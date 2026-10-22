@@ -1,0 +1,15 @@
+The cat sat on the mat. The dog sat on the log.
+The cat chased the dog, and the dog chased the cat!
+Then the cats and the dogs sat together on the mats.
+Isn't it lovely? The lowest, the newest, the widest, the slowest.
+The quick brown fox jumps over the lazy dog. The lazy dog sleeps.
+Running, jumping, and swimming are the things the dogs love most.
+The children were playing in the garden while their parents were talking.
+She said, "I don't think the weather will change today," and smiled.
+In 1969, the first people walked on the Moon; in 2026, they plan to return.
+def lower(text):
+    return text.lower()
+
+def count_words(text):
+    words = text.split()
+    return len(words)
