@@ -116,6 +116,7 @@ Every displayed form maps back to exactly one byte sequence.
 
 | file | purpose |
 |---|---|
+| `corpus.txt` | Small test corpus. |
 | `sample.txt` | Small mixed corpus: simple English sentences with repeated words (cat, dog, sat), shared suffixes (lowest, newest, slowest), punctuation, contractions, numbers, and two short Python functions to show how code affects the vocabulary (indentation, `()`, `):`). |
 | `news.txt` | A cookie-banner notice, standing in for web boilerplate. |
 | `news_copy1.txt`, `news_copy2.txt` | Exact copies of `news.txt`. They have the same checksum, so `--dedup` removes them. |
