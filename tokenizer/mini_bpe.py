@@ -33,7 +33,6 @@ Run with -h for all options.
 import argparse
 import hashlib
 import re
-import sys
 from collections import Counter
 
 # GPT-2-style pre-tokenizer pattern (stdlib `re` version).
@@ -44,8 +43,12 @@ PATTERN = re.compile(
 )
 
 
-def pretokenize(text):
-    return PATTERN.findall(text)
+def pretokenize(text, pattern=PATTERN):
+    """Split text into chunks (words, numbers, punctuation runs, whitespace).
+
+    BPE merges never cross a chunk boundary.
+    """
+    return pattern.findall(text)
 
 
 def show(tok_bytes):
@@ -90,23 +93,50 @@ DISPLAY = {
 }
 
 
-def train(texts, num_merges, verbose=True):
-    # Word-frequency table: each chunk as a tuple of byte-token IDs, summed
-    # over all documents. Each document is pre-tokenized separately, so no
-    # chunk (and hence no merge) spans two documents.
-    # IDs 0..255 are the raw bytes; each merge creates ID 256, 257, ...
+def count_chunks(texts):
+    """Build the word-frequency table the merges are learned from.
+
+    Each chunk becomes a tuple of byte-token IDs (0-255), counted over all
+    documents. Each document is pre-tokenized separately, so no chunk (and
+    hence no merge) spans two documents.
+    """
     chunks = Counter()
     for text in texts:
         chunks.update(tuple(c.encode("utf-8")) for c in pretokenize(text))
+    return chunks
+
+
+def count_pairs(chunks):
+    """Count adjacent token pairs, weighted by how often each chunk occurs."""
+    pairs = Counter()
+    for seq, n in chunks.items():
+        for pair in zip(seq, seq[1:]):
+            pairs[pair] += n
+    return pairs
+
+
+def apply_merge(chunks, pair, new_id):
+    """Replace every occurrence of `pair` in every chunk with `new_id`."""
+    merged = Counter()
+    for seq, n in chunks.items():
+        merged[merge_seq(seq, pair, new_id)] += n
+    return merged
+
+
+def train(texts, num_merges, verbose=True):
+    """Learn up to `num_merges` BPE merges from a list of documents.
+
+    Starts from the 256 byte values and repeatedly merges the most frequent
+    adjacent pair. Stops early once no pair occurs more than once. Returns
+    (merges, vocab): merges is the ordered list of ((left_id, right_id),
+    new_id), and vocab maps every token ID to its bytes.
+    """
+    chunks = count_chunks(texts)
     vocab = {i: bytes([i]) for i in range(256)}
-    merges = []  # ordered list of ((a, b), new_id)
+    merges = []
 
     for step in range(num_merges):
-        # Count adjacent pairs, weighted by how often each chunk occurs.
-        pairs = Counter()
-        for seq, n in chunks.items():
-            for pair in zip(seq, seq[1:]):
-                pairs[pair] += n
+        pairs = count_pairs(chunks)
         if not pairs:
             break
         best, count = pairs.most_common(1)[0]
@@ -115,12 +145,7 @@ def train(texts, num_merges, verbose=True):
         new_id = 256 + len(merges)
         merges.append((best, new_id))
         vocab[new_id] = vocab[best[0]] + vocab[best[1]]
-
-        # Replace the pair everywhere it occurs.
-        new_chunks = Counter()
-        for seq, n in chunks.items():
-            new_chunks[merge_seq(seq, best, new_id)] += n
-        chunks = new_chunks
+        chunks = apply_merge(chunks, best, new_id)
 
         if verbose:
             print(f"merge {step+1:3d}: {show(vocab[best[0]]):>10} + "
@@ -130,6 +155,8 @@ def train(texts, num_merges, verbose=True):
 
 
 def merge_seq(seq, pair, new_id):
+    """Return `seq` with each non-overlapping occurrence of `pair`, scanned
+    left to right, replaced by `new_id`."""
     out, i = [], 0
     while i < len(seq):
         if i < len(seq) - 1 and (seq[i], seq[i + 1]) == pair:
@@ -141,22 +168,26 @@ def merge_seq(seq, pair, new_id):
     return tuple(out)
 
 
-def encode(text, merges):
+def encode(text, merges, pattern=PATTERN):
+    """Convert text to token IDs by applying the merges in learned order."""
     ids = []
-    for chunk in pretokenize(text):
+    for chunk in pretokenize(text, pattern):
         seq = tuple(chunk.encode("utf-8"))
-        for pair, new_id in merges:  # apply merges in learned order
+        for pair, new_id in merges:
             seq = merge_seq(seq, pair, new_id)
         ids.extend(seq)
     return ids
 
 
 def decode(ids, vocab):
+    """Convert token IDs back to text by concatenating their bytes."""
     return b"".join(vocab[i] for i in ids).decode("utf-8")
 
 
-def report(text, merges, vocab):
-    ids = encode(text, merges)
+def report(text, merges, vocab, pattern=PATTERN):
+    """Tokenize `text` and print its tokens, IDs, compression, and a check
+    that decoding reproduces it exactly."""
+    ids = encode(text, merges, pattern)
     toks = fmt([vocab[i] for i in ids])
     ok = decode(ids, vocab) == text
     nbytes = len(text.encode("utf-8"))
@@ -259,8 +290,8 @@ def read_corpus(ap, paths, dedup):
     return texts, sources
 
 
-def main():
-    global PATTERN
+def build_parser():
+    """Define the command-line interface."""
     ap = argparse.ArgumentParser(
         description="Train a tiny byte-level BPE tokenizer on one or more "
                     "text files (documents), or load a saved one, and use it "
@@ -310,65 +341,77 @@ examples:
                          "one -t per line (not used for training)")
     ap.add_argument("-q", "--quiet", action="store_true",
                     help="don't print each merge during training")
-    args = ap.parse_args()
+    return ap
 
-    if args.load:
-        conflicts = [name for name, given in [
-            ("corpus files", args.corpus), ("--dedup", args.dedup),
-            ("-n/--merges", args.merges is not None), ("--save", args.save)]
-            if given]
-        if conflicts:
-            ap.error(f"--load uses a saved tokenizer instead of training; "
-                     f"don't combine it with {', '.join(conflicts)}")
+
+def load_mode(ap, args):
+    """Load a saved tokenizer. Returns (merges, vocab, pattern)."""
+    conflicts = [name for name, given in [
+        ("corpus files", args.corpus), ("--dedup", args.dedup),
+        ("-n/--merges", args.merges is not None), ("--save", args.save)]
+        if given]
+    if conflicts:
+        ap.error(f"--load uses a saved tokenizer instead of training; "
+                 f"don't combine it with {', '.join(conflicts)}")
+    try:
+        merges, vocab, pattern_text = load_tokenizer(args.load)
+    except OSError as e:
+        ap.error(f"can't read tokenizer file {args.load!r}: {e.strerror}")
+    except ValueError as e:
+        ap.error(f"{args.load!r} is not a valid tokenizer file: {e}")
+
+    pattern = PATTERN
+    if pattern_text != PATTERN.pattern:
+        print("Note: the file's pre-tokenizer pattern differs from this "
+              "script's default; using the file's pattern.")
+        pattern = re.compile(pattern_text)
+    print(f"=== Tokenizer loaded from {args.load} ===")
+    print(f"{len(merges)} merges; vocabulary = {len(vocab)} tokens "
+          f"(256 bytes + merges).")
+    if merges:
+        print("Last 10 tokens learned:",
+              fmt([vocab[m[1]] for m in merges[-10:]]))
+    return merges, vocab, pattern
+
+
+def train_mode(ap, args):
+    """Train a tokenizer on the corpus files (and save it if asked).
+    Returns (merges, vocab)."""
+    if not args.corpus:
+        ap.error("give corpus file(s) to train on, or --load FILE")
+    num_merges = 200 if args.merges is None else args.merges
+    texts, sources = read_corpus(ap, args.corpus, args.dedup)
+
+    total_bytes = sum(len(t.encode("utf-8")) for t in texts)
+    chunks = [c for t in texts for c in pretokenize(t)]
+    print(f"\n=== Corpus: {len(texts)} of {len(args.corpus)} documents — "
+          f"{total_bytes:,} bytes, {len(chunks):,} chunks, "
+          f"{len(set(chunks)):,} unique ===")
+    print("First 25 chunks:", fmt([c.encode() for c in chunks[:25]]), "\n")
+
+    print(f"=== Training: up to {num_merges} merges ===")
+    merges, vocab = train(texts, num_merges, verbose=not args.quiet)
+    n_tokens = sum(len(encode(t, merges)) for t in texts)
+    print(f"\nLearned {len(merges)} merges; vocabulary = {len(vocab)} "
+          f"tokens (256 bytes + merges).")
+    print(f"Corpus encodes to {n_tokens:,} tokens "
+          f"({total_bytes / n_tokens:.2f} bytes/token).")
+    if args.quiet and merges:
+        print("Last 10 tokens learned:",
+              fmt([vocab[m[1]] for m in merges[-10:]]))
+
+    if args.save:
         try:
-            merges, vocab, pattern = load_tokenizer(args.load)
+            save_tokenizer(args.save, merges, vocab, sources)
         except OSError as e:
-            ap.error(f"can't read tokenizer file {args.load!r}: {e.strerror}")
-        except ValueError as e:
-            ap.error(f"{args.load!r} is not a valid tokenizer file: {e}")
-        if pattern != PATTERN.pattern:
-            print("Note: the file's pre-tokenizer pattern differs from this "
-                  "script's default; using the file's pattern.")
-            PATTERN = re.compile(pattern)
-        print(f"=== Tokenizer loaded from {args.load} ===")
-        print(f"{len(merges)} merges; vocabulary = {len(vocab)} tokens "
-              f"(256 bytes + merges).")
-        if merges:
-            print("Last 10 tokens learned:",
-                  fmt([vocab[m[1]] for m in merges[-10:]]))
-    else:
-        if not args.corpus:
-            ap.error("give corpus file(s) to train on, or --load FILE")
-        num_merges = 200 if args.merges is None else args.merges
-        texts, sources = read_corpus(ap, args.corpus, args.dedup)
+            ap.error(f"can't write tokenizer file {args.save!r}: "
+                     f"{e.strerror}")
+        print(f"Saved tokenizer to {args.save} (vocab_size {len(vocab)}).")
+    return merges, vocab
 
-        total_bytes = sum(len(t.encode("utf-8")) for t in texts)
-        chunks = [c for t in texts for c in pretokenize(t)]
-        print(f"\n=== Corpus: {len(texts)} of {len(args.corpus)} documents — "
-              f"{total_bytes:,} bytes, {len(chunks):,} chunks, "
-              f"{len(set(chunks)):,} unique ===")
-        print("First 25 chunks:", fmt([c.encode() for c in chunks[:25]]), "\n")
 
-        print(f"=== Training: up to {num_merges} merges ===")
-        merges, vocab = train(texts, num_merges, verbose=not args.quiet)
-        n_tokens = sum(len(encode(t, merges)) for t in texts)
-        print(f"\nLearned {len(merges)} merges; vocabulary = {len(vocab)} "
-              f"tokens (256 bytes + merges).")
-        print(f"Corpus encodes to {n_tokens:,} tokens "
-              f"({total_bytes / n_tokens:.2f} bytes/token).")
-        if args.quiet and merges:
-            print("Last 10 tokens learned:",
-                  fmt([vocab[m[1]] for m in merges[-10:]]))
-
-        if args.save:
-            try:
-                save_tokenizer(args.save, merges, vocab, sources)
-            except OSError as e:
-                ap.error(f"can't write tokenizer file {args.save!r}: "
-                         f"{e.strerror}")
-            print(f"Saved tokenizer to {args.save} "
-                  f"(vocab_size {len(vocab)}).")
-
+def read_tests(ap, args):
+    """Collect test strings: -t strings first, then non-blank -f lines."""
     tests = list(args.text)
     if args.test_file:
         try:
@@ -376,22 +419,38 @@ examples:
                 tests += [line.rstrip("\n") for line in fh if line.strip()]
         except OSError as e:
             ap.error(f"can't read test file {args.test_file!r}: {e.strerror}")
+    return tests
 
+
+def run_tests(tests, merges, vocab, pattern):
+    """Tokenize each test string, or prompt for lines if there are none."""
     print("\n=== Encoding (␣ = space) ===")
     if tests:
         for t in tests:
-            report(t, merges, vocab)
+            report(t, merges, vocab, pattern)
+        return
+    print("Type a line to tokenize (Ctrl-D or empty line to quit).")
+    while True:
+        try:
+            line = input("> ")
+        except EOFError:
+            print()
+            break
+        if not line:
+            break
+        report(line, merges, vocab, pattern)
+
+
+def main():
+    """Train or load a tokenizer, then tokenize the test input."""
+    ap = build_parser()
+    args = ap.parse_args()
+    if args.load:
+        merges, vocab, pattern = load_mode(ap, args)
     else:
-        print("Type a line to tokenize (Ctrl-D or empty line to quit).")
-        while True:
-            try:
-                line = input("> ")
-            except EOFError:
-                print()
-                break
-            if not line:
-                break
-            report(line, merges, vocab)
+        merges, vocab = train_mode(ap, args)
+        pattern = PATTERN
+    run_tests(read_tests(ap, args), merges, vocab, pattern)
 
 
 if __name__ == "__main__":
