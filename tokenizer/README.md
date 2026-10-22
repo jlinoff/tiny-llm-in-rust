@@ -107,7 +107,7 @@ Tokens are shown in brackets, `[The][␣cat][.]`, with these markers:
 | `␣` | a space (U+2423, "visible space") |
 | `\n`, `\t` | newline, tab |
 | `\\` | a literal backslash |
-| `␣` | a literal `␣` character in the text |
+| `\u2423` | a literal `␣` character in the text |
 | `\xNN` | a single byte that is part of a multi-byte UTF-8 character, e.g. `æ` → `[\xc3][\xa6]` |
 
 Every displayed form maps back to exactly one byte sequence.
