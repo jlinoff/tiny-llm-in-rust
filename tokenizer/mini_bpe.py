@@ -25,6 +25,8 @@ Usage:
   python3 mini_bpe.py corpus.txt -f tests.txt     # after training, tokenize each line
                                                   # of tests.txt (test input, not training)
   python3 mini_bpe.py corpus.txt -q               # don't print every merge
+  python3 mini_bpe.py corpus.txt --save tok.bpe   # write the trained tokenizer
+  python3 mini_bpe.py --load tok.bpe -t "Text."   # use a saved tokenizer, no training
 
 Run with -h for all options.
 """
@@ -163,50 +165,71 @@ def report(text, merges, vocab):
           f"  ids: {ids}\n  lossless round-trip: {ok}\n")
 
 
-def main():
-    ap = argparse.ArgumentParser(
-        description="Train a tiny byte-level BPE tokenizer on one or more "
-                    "text files (documents) and use it to tokenize text.",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""\
-Two kinds of input:
-  training  the corpus files; the tokenizer's merges are learned from these
-  test      text tokenized AFTER training, to see how the learned tokenizer
-            splits it: -t strings first, then -f lines; if neither is given,
-            you're prompted to type lines interactively
+FORMAT_VERSION = "mini_bpe tokenizer v1"
 
-examples:
-  %(prog)s sample.txt                       train, then type test lines
-  %(prog)s sample.txt -t "The cat sat."     train, tokenize one string
-  %(prog)s sample.txt -f tests.txt -q       train, tokenize each line of tests.txt
-  %(prog)s sample.txt news*.txt --dedup     train on several documents, dedup
-""")
-    ap.add_argument("corpus", nargs="+",
-                    help="UTF-8 text file(s) to train the tokenizer on; "
-                         "each file is one document")
-    ap.add_argument("--dedup", action="store_true",
-                    help="skip documents whose SHA-256 checksum matches an "
-                         "earlier document (exact-duplicate removal)")
-    ap.add_argument("-n", "--merges", type=int, default=200,
-                    help="maximum number of merges to learn (default 200)")
-    ap.add_argument("-t", "--text", action="append", default=[],
-                    metavar="STRING",
-                    help="after training, tokenize STRING with the learned "
-                         "tokenizer and show the result (not used for "
-                         "training); may be repeated")
-    ap.add_argument("-f", "--test-file", metavar="FILE",
-                    help="after training, tokenize each non-blank line of "
-                         "FILE separately and show the results; like one -t "
-                         "per line (not used for training)")
-    ap.add_argument("-q", "--quiet", action="store_true",
-                    help="don't print each merge during training")
-    args = ap.parse_args()
 
-    # --- Load documents, checksum each, optionally drop exact duplicates ---
-    print(f"=== Documents ({'dedup ON' if args.dedup else 'dedup off'}) ===")
-    texts = []
+def save_tokenizer(path, merges, vocab, sources):
+    """Write the tokenizer (the output of the tokenizer phase) to a text file.
+
+    A trained tokenizer is fully defined by two things:
+      1. the pre-tokenizer pattern (how text is split into chunks), and
+      2. the ordered list of merges.
+    IDs 0-255 are the raw bytes, and the merge on data line k (counting from
+    0) creates token ID 256 + k, so the vocabulary is rebuilt from the merges
+    and needn't be stored. Text after '#' on a merge line is a comment.
+    """
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write(f"# {FORMAT_VERSION}\n")
+        fh.write(f"# vocab_size: {len(vocab)}  "
+                 f"(256 bytes + {len(merges)} merges)\n")
+        for src, digest in sources:
+            fh.write(f"# trained on: {src}  sha256 {digest}\n")
+        fh.write("# Data lines: one merge per line, '<left_id> <right_id>'.\n")
+        fh.write("# The merge on data line k (from 0) creates token id 256 + k.\n")
+        fh.write(f"pattern {PATTERN.pattern}\n")
+        for (a, b), new_id in merges:
+            fh.write(f"{a} {b}  # {new_id}: [{show(vocab[a])}] + "
+                     f"[{show(vocab[b])}] -> [{show(vocab[new_id])}]\n")
+
+
+def load_tokenizer(path):
+    """Read a file written by save_tokenizer; return (merges, vocab, pattern)."""
+    vocab = {i: bytes([i]) for i in range(256)}
+    merges = []
+    pattern = None
+    with open(path, encoding="utf-8") as fh:
+        for lineno, line in enumerate(fh, 1):
+            line = line.rstrip("\n")
+            if line.startswith("pattern "):
+                pattern = line[len("pattern "):]
+                continue
+            data = line.split("#", 1)[0].split()
+            if not data:
+                continue  # comment or blank line
+            if len(data) != 2:
+                raise ValueError(f"line {lineno}: expected '<left_id> <right_id>'")
+            a, b = int(data[0]), int(data[1])
+            new_id = 256 + len(merges)
+            if not (0 <= a < new_id and 0 <= b < new_id):
+                raise ValueError(f"line {lineno}: token id out of range "
+                                 f"(must be below {new_id})")
+            merges.append(((a, b), new_id))
+            vocab[new_id] = vocab[a] + vocab[b]
+    if pattern is None:
+        raise ValueError("no 'pattern' line found")
+    return merges, vocab, pattern
+
+
+def read_corpus(ap, paths, dedup):
+    """Load documents, checksum each, optionally drop exact duplicates.
+
+    Returns (texts, sources): the texts to train on, and (path, sha256) for
+    each of them, recorded in the saved tokenizer as provenance.
+    """
+    print(f"=== Documents ({'dedup ON' if dedup else 'dedup off'}) ===")
+    texts, sources = [], []
     first_seen = {}  # sha256 hex -> first file with that content
-    for path in args.corpus:
+    for path in paths:
         try:
             with open(path, "rb") as fh:
                 raw = fh.read()
@@ -218,39 +241,133 @@ examples:
             ap.error(f"corpus file {path!r} is not valid UTF-8 text")
 
         digest = hashlib.sha256(raw).hexdigest()
-        if digest in first_seen:
-            if args.dedup:
-                status = f"DUPLICATE of {first_seen[digest]} — skipped"
-            else:
-                status = f"DUPLICATE of {first_seen[digest]} — counted again"
-                texts.append(text)
+        if digest in first_seen and dedup:
+            status = f"DUPLICATE of {first_seen[digest]} — skipped"
         else:
-            first_seen[digest] = path
-            status = "kept"
+            if digest in first_seen:
+                status = f"DUPLICATE of {first_seen[digest]} — counted again"
+            else:
+                first_seen[digest] = path
+                status = "kept"
             texts.append(text)
+            sources.append((path, digest))
         print(f"  {path:<24} {len(raw):>9,} bytes  sha256 {digest[:16]}…  "
               f"{status}")
 
     if not any(texts):
         ap.error("no text to train on (all documents empty or skipped)")
+    return texts, sources
 
-    total_bytes = sum(len(t.encode("utf-8")) for t in texts)
-    chunks = [c for t in texts for c in pretokenize(t)]
-    print(f"\n=== Corpus: {len(texts)} of {len(args.corpus)} documents — "
-          f"{total_bytes:,} bytes, {len(chunks):,} chunks, "
-          f"{len(set(chunks)):,} unique ===")
-    print("First 25 chunks:", fmt([c.encode() for c in chunks[:25]]), "\n")
 
-    print(f"=== Training: up to {args.merges} merges ===")
-    merges, vocab = train(texts, args.merges, verbose=not args.quiet)
-    n_tokens = sum(len(encode(t, merges)) for t in texts)
-    print(f"\nLearned {len(merges)} merges; vocabulary = {len(vocab)} tokens "
-          f"(256 bytes + merges).")
-    print(f"Corpus encodes to {n_tokens:,} tokens "
-          f"({total_bytes / n_tokens:.2f} bytes/token).")
-    if args.quiet and merges:
-        print("Last 10 tokens learned:",
-              fmt([vocab[m[1]] for m in merges[-10:]]))
+def main():
+    global PATTERN
+    ap = argparse.ArgumentParser(
+        description="Train a tiny byte-level BPE tokenizer on one or more "
+                    "text files (documents), or load a saved one, and use it "
+                    "to tokenize text.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""\
+The tokenizer phase:
+  input     training text: the corpus files (each file is one document)
+  process   learn merges from the corpus
+  output    the trained tokenizer: --save FILE writes it (pre-tokenizer
+            pattern + ordered merges); --load FILE reads it back instead of
+            training. Its vocabulary size is what a model's embedding table
+            is sized from.
+
+Test input (tokenized after training or loading, never used for training):
+  -t strings first, then -f lines; if neither is given, you're prompted to
+  type lines interactively.
+
+examples:
+  %(prog)s sample.txt                       train, then type test lines
+  %(prog)s sample.txt -t "The cat sat."     train, tokenize one string
+  %(prog)s sample.txt -f tests.txt -q       train, tokenize each line of tests.txt
+  %(prog)s sample.txt news*.txt --dedup     train on several documents, dedup
+  %(prog)s sample.txt -q --save tok.bpe     train and save the tokenizer
+  %(prog)s --load tok.bpe -t "The cat sat." load a saved tokenizer, no training
+""")
+    ap.add_argument("corpus", nargs="*",
+                    help="UTF-8 text file(s) to train the tokenizer on; each "
+                         "file is one document (omit when using --load)")
+    ap.add_argument("--dedup", action="store_true",
+                    help="skip documents whose SHA-256 checksum matches an "
+                         "earlier document (exact-duplicate removal)")
+    ap.add_argument("-n", "--merges", type=int, metavar="N",
+                    help="maximum number of merges to learn (default 200)")
+    ap.add_argument("--save", metavar="FILE",
+                    help="after training, write the tokenizer to FILE")
+    ap.add_argument("--load", metavar="FILE",
+                    help="load a tokenizer saved with --save instead of "
+                         "training (no corpus files)")
+    ap.add_argument("-t", "--text", action="append", default=[],
+                    metavar="STRING",
+                    help="after training or loading, tokenize STRING and show "
+                         "the result (not used for training); may be repeated")
+    ap.add_argument("-f", "--test-file", metavar="FILE",
+                    help="after training or loading, tokenize each non-blank "
+                         "line of FILE separately and show the results; like "
+                         "one -t per line (not used for training)")
+    ap.add_argument("-q", "--quiet", action="store_true",
+                    help="don't print each merge during training")
+    args = ap.parse_args()
+
+    if args.load:
+        conflicts = [name for name, given in [
+            ("corpus files", args.corpus), ("--dedup", args.dedup),
+            ("-n/--merges", args.merges is not None), ("--save", args.save)]
+            if given]
+        if conflicts:
+            ap.error(f"--load uses a saved tokenizer instead of training; "
+                     f"don't combine it with {', '.join(conflicts)}")
+        try:
+            merges, vocab, pattern = load_tokenizer(args.load)
+        except OSError as e:
+            ap.error(f"can't read tokenizer file {args.load!r}: {e.strerror}")
+        except ValueError as e:
+            ap.error(f"{args.load!r} is not a valid tokenizer file: {e}")
+        if pattern != PATTERN.pattern:
+            print("Note: the file's pre-tokenizer pattern differs from this "
+                  "script's default; using the file's pattern.")
+            PATTERN = re.compile(pattern)
+        print(f"=== Tokenizer loaded from {args.load} ===")
+        print(f"{len(merges)} merges; vocabulary = {len(vocab)} tokens "
+              f"(256 bytes + merges).")
+        if merges:
+            print("Last 10 tokens learned:",
+                  fmt([vocab[m[1]] for m in merges[-10:]]))
+    else:
+        if not args.corpus:
+            ap.error("give corpus file(s) to train on, or --load FILE")
+        num_merges = 200 if args.merges is None else args.merges
+        texts, sources = read_corpus(ap, args.corpus, args.dedup)
+
+        total_bytes = sum(len(t.encode("utf-8")) for t in texts)
+        chunks = [c for t in texts for c in pretokenize(t)]
+        print(f"\n=== Corpus: {len(texts)} of {len(args.corpus)} documents — "
+              f"{total_bytes:,} bytes, {len(chunks):,} chunks, "
+              f"{len(set(chunks)):,} unique ===")
+        print("First 25 chunks:", fmt([c.encode() for c in chunks[:25]]), "\n")
+
+        print(f"=== Training: up to {num_merges} merges ===")
+        merges, vocab = train(texts, num_merges, verbose=not args.quiet)
+        n_tokens = sum(len(encode(t, merges)) for t in texts)
+        print(f"\nLearned {len(merges)} merges; vocabulary = {len(vocab)} "
+              f"tokens (256 bytes + merges).")
+        print(f"Corpus encodes to {n_tokens:,} tokens "
+              f"({total_bytes / n_tokens:.2f} bytes/token).")
+        if args.quiet and merges:
+            print("Last 10 tokens learned:",
+                  fmt([vocab[m[1]] for m in merges[-10:]]))
+
+        if args.save:
+            try:
+                save_tokenizer(args.save, merges, vocab, sources)
+            except OSError as e:
+                ap.error(f"can't write tokenizer file {args.save!r}: "
+                         f"{e.strerror}")
+            print(f"Saved tokenizer to {args.save} "
+                  f"(vocab_size {len(vocab)}).")
 
     tests = list(args.text)
     if args.test_file:

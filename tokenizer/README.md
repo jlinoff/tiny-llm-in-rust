@@ -17,6 +17,19 @@ everything visible:
    decoding concatenates the bytes back. Tokenization is **lossless**: decoding
    reproduces the input exactly, including every space and newline.
 
+Viewed as a phase of building an LLM:
+
+| | |
+|---|---|
+| **input** | training text: the corpus files |
+| **process** | learn the merges |
+| **output** | the trained tokenizer: the pre-tokenizer pattern plus the ordered merges, written with `--save` |
+
+The tokenizer's output is what the next phase consumes. A model sizes its
+embedding table from the tokenizer's vocabulary size, V (one row per token), and
+uses the tokenizer to turn text into the token IDs that select those rows. See
+[Saving and loading the tokenizer](#saving-and-loading-the-tokenizer).
+
 It is for understanding, not production use. It's slow, it has no special
 tokens, and its regex approximates GPT-style pre-tokenization, so its splits
 won't exactly match any real model's.
@@ -39,24 +52,27 @@ line or Ctrl-D quits.
 ## Usage
 
 ```
-./mini_bpe.py [options] corpus [corpus ...]
+./mini_bpe.py [options] corpus [corpus ...]     # train a tokenizer
+./mini_bpe.py --load FILE [options]             # use a saved tokenizer
 ```
 
 There are two kinds of input:
 
 - **Training input**: the corpus files. The merges are learned from these.
   Each file is treated as one document.
-- **Test input**: text tokenized *after* training, to see how the learned
-  tokenizer splits it. It is not used for training. `-t` strings are
+- **Test input**: text tokenized *after* training (or loading), to see how the
+  tokenizer splits it. It is never used for training. `-t` strings are
   processed first, then `-f` lines. If neither is given, you're prompted to
   type lines.
 
 | option | meaning |
 |---|---|
 | `-n N`, `--merges N` | maximum number of merges to learn (default 200) |
-| `-t STRING`, `--text STRING` | after training, tokenize STRING; may be repeated |
-| `-f FILE`, `--test-file FILE` | after training, tokenize each non-blank line of FILE separately |
 | `--dedup` | skip documents whose SHA-256 checksum matches an earlier document |
+| `--save FILE` | after training, write the tokenizer to FILE |
+| `--load FILE` | load a tokenizer saved with `--save` instead of training; can't be combined with corpus files, `-n`, `--dedup`, or `--save` |
+| `-t STRING`, `--text STRING` | after training or loading, tokenize STRING; may be repeated |
+| `-f FILE`, `--test-file FILE` | after training or loading, tokenize each non-blank line of FILE separately |
 | `-q`, `--quiet` | don't print each merge during training |
 | `-h`, `--help` | show help |
 
@@ -67,6 +83,8 @@ Examples:
 ./mini_bpe.py sample.txt -f tests.txt -q       # train, tokenize each line of tests.txt
 ./mini_bpe.py sample.txt -n 1000 -q            # more merges, no merge log
 ./mini_bpe.py sample.txt news*.txt --dedup     # several documents, drop exact duplicates
+./mini_bpe.py sample.txt -q --save tok.bpe     # train and save the tokenizer
+./mini_bpe.py --load tok.bpe -f tests.txt      # reuse it later, no training
 ```
 
 ## Reading the output
@@ -112,11 +130,54 @@ Tokens are shown in brackets, `[The][␣cat][.]`, with these markers:
 
 Every displayed form maps back to exactly one byte sequence.
 
+## Saving and loading the tokenizer
+
+`--save FILE` writes the trained tokenizer to a plain-text file, and
+`--load FILE` reads it back so you can tokenize without retraining. Loading
+gives exactly the same tokens and IDs as the original training run.
+
+A trained tokenizer is fully defined by two things, and the file holds both:
+
+1. **The pre-tokenizer pattern.** The merges only reproduce the same tokens if
+   text is split into the same chunks first.
+2. **The ordered merge list.** Order matters: encoding applies the merges in
+   the order they were learned.
+
+The vocabulary itself isn't stored, because it can be rebuilt: IDs 0–255 are
+the raw bytes, and the merge on data line *k* (counting from 0) creates token ID
+256 + *k*. Example (`./mini_bpe.py sample.txt news.txt -q --save tok.bpe`):
+
+```
+# mini_bpe tokenizer v1
+# vocab_size: 364  (256 bytes + 108 merges)
+# trained on: sample.txt  sha256 8e5a595442e28fa0e4ee1a7d…
+# trained on: news.txt  sha256 cf7a91850aa826969c1fb760…
+# Data lines: one merge per line, '<left_id> <right_id>'.
+# The merge on data line k (from 0) creates token id 256 + k.
+pattern '(?:[sdmt]|ll|ve|re)| ?[^\W\d_]+| ?\d+| ?[^\s\w]+|\s+(?!\S)|\s+
+32 116  # 256: [␣] + [t] -> [␣t]
+104 101  # 257: [h] + [e] -> [he]
+…
+```
+
+Lines starting with `#` and text after `#` on a merge line are comments for
+human readers: the vocabulary size, the training documents with their
+checksums (provenance), and each merge in readable form. Only the `pattern`
+line and the pairs of IDs are used when loading. If the saved pattern differs
+from the script's built-in one, the file's pattern is used.
+
+**Connection to the next phase.** The `vocab_size` line is V, the number the
+model needs: its embedding table is allocated as V × d (d is a model setting)
+and filled with small random values, one row per token ID. Real tokenizers ship
+the same way — a merge list and vocabulary file distributed with the model —
+because the two are locked together: token ID 300 means `west` only under this
+tokenizer. Train a different tokenizer and every row of the embedding table
+would point at the wrong token.
+
 ## Data files
 
 | file | purpose |
 |---|---|
-| `corpus.txt` | Small test corpus. |
 | `sample.txt` | Small mixed corpus: simple English sentences with repeated words (cat, dog, sat), shared suffixes (lowest, newest, slowest), punctuation, contractions, numbers, and two short Python functions to show how code affects the vocabulary (indentation, `()`, `):`). |
 | `news.txt` | A cookie-banner notice, standing in for web boilerplate. |
 | `news_copy1.txt`, `news_copy2.txt` | Exact copies of `news.txt`. They have the same checksum, so `--dedup` removes them. |
@@ -157,6 +218,20 @@ and retrain: the code tokens disappear and the merges go to English. Or train
 on a larger text, such as a Project Gutenberg book, with `-n 1000 -q`, and
 compare the bytes per token for the same `-f` test file. The script can also
 train on its own source as a code corpus: `./mini_bpe.py mini_bpe.py -n 300`.
+
+**Tokenizers are not interchangeable.** Save two tokenizers trained on
+different corpora and tokenize the same text with each:
+
+```
+./mini_bpe.py sample.txt -q --save a.bpe -t x > /dev/null
+./mini_bpe.py news.txt -q --save b.bpe -t x > /dev/null
+./mini_bpe.py --load a.bpe -t "The website uses cookies."
+./mini_bpe.py --load b.bpe -t "The website uses cookies."
+```
+
+The same text gets different tokens *and* different IDs. A model trained with
+one tokenizer can't use the other: its embedding rows are indexed by the first
+tokenizer's IDs.
 
 ## Performance
 
