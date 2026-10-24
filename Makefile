@@ -9,13 +9,21 @@ hdr = @printf "\n\033[35;1m== %s ==\033[0m\n" "$(1)"
 
 # Stages
 .PHONY: tokenize
-tokenize: $(OUT)/tok.bpe ## Learn the tokenizer from the training text.
+tokenize: $(OUT)/tok.bpe ## Step 1: learn the tokenizer from the training text.
 
-# Rebuilt only when the corpus or the script changes. Input comes from
-# /dev/null so the script's interactive prompt ends immediately.
+# Rebuilt only when the corpus or the script changes.
 $(OUT)/tok.bpe: $(CORPUS) tokenizer/mini_bpe.py | $(OUT)
 	$(call hdr,tokenize)
-	time python3 tokenizer/mini_bpe.py $(CORPUS) -n $(MERGES) --save $@ < /dev/null
+	time python3 tokenizer/mini_bpe.py $(CORPUS) -n $(MERGES) --save $@
+
+# run make -b encode MERGES=2000 to rebuild everything when a variable changes.
+.PHONY: encode
+encode: $(OUT)/corpus.ids ## Step 2: encode the corpus into token IDs.
+
+# Rebuilt when the tokenizer, the corpus or the script changes.
+$(OUT)/corpus.ids: $(OUT)/tok.bpe $(CORPUS) tokenizer/mini_bpe.py | $(OUT)
+	$(call hdr,encode)
+	time python3 tokenizer/mini_bpe.py --load $(OUT)/tok.bpe --encode $(CORPUS) -o $@
 
 $(OUT):
 	mkdir -p $@

@@ -180,20 +180,24 @@ it.
   - `tok.bpe`
 - **Output:**
   - `corpus.ids` (or `chat.ids`): the text as token IDs
-- **Command** (proposed):
+- **Command:**
 
   ```
   python3 tokenizer/mini_bpe.py --load tok.bpe --encode corpus.txt -o corpus.ids
   python3 tokenizer/mini_bpe.py --load tok.bpe --encode chat.txt   -o chat.ids
   ```
 
-  `--load` reads the saved tokenizer (exists today); `--encode` and `-o` are
-  new.
-- **Status:** to do
+  `--load` reads the saved tokenizer, `--encode` names the text, `-o` the
+  output.
+- **Status:** done (`tokenizer/mini_bpe.py --encode`)
 
 **What it does:** turns text into the integers the model consumes. Real
 pipelines pre-tokenize the whole corpus into a binary ID file once, so training
-never touches text.
+never touches text. The `.ids` file has a 64-byte header recording V and a
+fingerprint of the tokenizer (a hash of its pattern and merges), so later steps
+can refuse IDs made by a different tokenizer. After encoding, the IDs are
+decoded and compared with the input. The format is described in
+`tokenizer/README.md`.
 
 ##### Step 3: build
 
@@ -413,6 +417,24 @@ locally plausible but often meaningless, and fine-tuning it will mostly teach
 it the turn-taking format, not helpfulness. That's still the point: the
 mechanics are the same as in a production model, only the scale differs.
 
+## Conventions for all code
+
+Rules every program in the project follows:
+
+- **Check files before doing any work.** Every output file must be writable
+  and every input file readable *before* any training or encoding starts, so
+  a bad path fails in a fraction of a second instead of after a long run. The
+  check must not modify an existing output file, and must not leave an empty
+  file behind if the run later fails. (Implemented in `mini_bpe.py`,
+  `mini_w2v` and `train_gensim.py`.)
+- **Verify what can be verified.** When an output can be checked cheaply,
+  check it: `--encode` decodes its IDs and compares them with the input
+  before writing anything. That check found a bug in which underscores were
+  silently dropped by the tokenizer (see `tokenizer/README.md`).
+- **Record what produced a file.** Files passed between steps say what made
+  them: the tokenizer lists its training documents with checksums, and an
+  `.ids` file carries the tokenizer's fingerprint.
+
 ## Where the stages live
 
 The rule: **one directory per component, one command per step.** A component
@@ -434,7 +456,7 @@ llm/
 
 | directory | flow steps | status |
 |---|---|---|
-| `tokenizer/` | LLM 1 tokenize, 2 encode; decode for 6 | step 1 done (`mini_bpe.py`) except special tokens; encode to do |
+| `tokenizer/` | LLM 1 tokenize, 2 encode; decode for 6 | steps 1 and 2 done (`mini_bpe.py`); special tokens to do |
 | `word2vec/` | word2vec 1 train, 2 explore | done |
 | `attention/` | none: a learning step before `transformer/` | not started |
 | `transformer/` | LLM 3 build, 4 train, 5 finetune, 6 generate | not started |
@@ -469,8 +491,8 @@ transformer finetune --model model.ckpt --data chat.ids --config config.toml -o 
 transformer generate --model chat.ckpt --tokenizer tok.bpe --config config.toml --prompt "Hello"
 ```
 
-As in [What each stage does](#what-each-stage-does), everything after step 1
-is proposed. Only the `tokenize` target exists so far; the others are added as
+As in [What each stage does](#what-each-stage-does), everything after step 2
+is proposed. The `tokenize` and `encode` targets exist so far; the others are added as
 each step is built. (The paths above are shortened: in the Makefile, the
 corpus is `data/corpus.txt` and generated files are in `out/`.)
 
@@ -549,11 +571,14 @@ text8, matching gensim (a widely used Python library with its own word2vec) at
      `fancy-regex` crate, which supports lookahead, or the pattern would need
      rewriting.
 
-   Leaning toward (a): it matches how real pipelines work and keeps a single
+   *Decided:* (a). It matches how real pipelines work and keeps a single
    implementation of encoding.
-2. **The `corpus.ids` format.** A simple binary file of little-endian
-   integers (16-bit is enough while V < 65,536), with a small header, is what
-   nanoGPT (Andrej Karpathy's minimal GPT training code) does.
+2. **The `corpus.ids` format.** *Decided:* a 64-byte header (magic, version,
+   bytes per ID, V, count, tokenizer fingerprint), then the IDs as
+   little-endian integers: 2 bytes each while V ≤ 65,536, otherwise 4. This
+   follows nanoGPT (Andrej Karpathy's minimal GPT training code), which
+   stores plain 16-bit IDs, plus the header. Specified in
+   `tokenizer/README.md`.
 3. **The checkpoint format.** A custom binary format with a header, or
    safetensors (Hugging Face's weights format, described below: simple,
    well-specified, readable from both Rust and Python, which allows inspecting
@@ -602,8 +627,8 @@ text8, matching gensim (a widely used Python library with its own word2vec) at
 ## Order of work
 
 1. ~~Finish word2vec.~~ Done.
-2. Tokenizer: reserve special tokens, then stage 2 (`--encode` writing
-   `corpus.ids`).
+2. Tokenizer: ~~stage 2 (`--encode` writing `corpus.ids`)~~ done; reserve
+   special tokens.
 3. `attention/`: self-attention alone, on toy inputs.
 4. `transformer/`: build, then train, then generate, then finetune.
 5. Throughout: add each step's Makefile target as the step is built
