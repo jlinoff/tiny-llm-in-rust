@@ -45,6 +45,21 @@ def read_sentences(paths):
     return sentences
 
 
+def check_writable(ap, path, what):
+    """Stop with an error now, before any work is done, if `path` can't be
+    written. An existing file is left unchanged; if the file didn't exist,
+    the empty file the check created is removed."""
+    if os.path.isdir(path):
+        ap.error(f"{what} {path!r} is a directory")
+    existed = os.path.exists(path)
+    try:
+        os.close(os.open(path, os.O_WRONLY | os.O_CREAT, 0o666))
+    except OSError as e:
+        ap.error(f"can't write {what} {path!r}: {e.strerror}")
+    if not existed:
+        os.remove(path)
+
+
 class EpochReporter:  # pylint: disable=too-few-public-methods
     """gensim callback: print the elapsed time after every epoch."""
 
@@ -101,6 +116,8 @@ def main():
                     help="worker threads (default: all CPU cores)")
     ap.add_argument("--seed", type=int, default=1, help="random seed")
     args = ap.parse_args()
+    # Fail now, not after a long training run, if the output can't be written.
+    check_writable(ap, args.output, "output file")
 
     skipgram = args.model == "skipgram"
     alpha = args.alpha or (0.025 if skipgram else 0.05)
