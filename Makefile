@@ -16,7 +16,7 @@ $(OUT)/tok.bpe: $(CORPUS) tokenizer/mini_bpe.py | $(OUT)
 	$(call hdr,tokenize)
 	time python3 tokenizer/mini_bpe.py $(CORPUS) -n $(MERGES) --save $@
 
-# run make -b encode MERGES=2000 to rebuild everything when a variable changes.
+# run make -B encode MERGES=2000 to rebuild everything when a variable changes.
 .PHONY: encode
 encode: $(OUT)/corpus.ids ## Step 2: encode the corpus into token IDs.
 
