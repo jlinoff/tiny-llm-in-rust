@@ -1,0 +1,3 @@
+# For explore.py and train_gensim.py:  pip install -r requirements.txt
+gensim>=4.3
+numpy

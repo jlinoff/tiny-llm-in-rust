@@ -1,0 +1,13 @@
+[package]
+name = "mini_w2v"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.87"
+description = "A minimal word2vec (skip-gram / CBOW with negative sampling), written for understanding"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+
+[profile.release]
+codegen-units = 1
+lto = true

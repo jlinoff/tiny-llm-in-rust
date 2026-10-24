@@ -435,7 +435,7 @@ llm/
 | directory | flow steps | status |
 |---|---|---|
 | `tokenizer/` | LLM 1 tokenize, 2 encode; decode for 6 | step 1 done (`mini_bpe.py`) except special tokens; encode to do |
-| `word2vec/` | word2vec 1 train, 2 explore | trainer working; scripts and README to do |
+| `word2vec/` | word2vec 1 train, 2 explore | done |
 | `attention/` | none: a learning step before `transformer/` | not started |
 | `transformer/` | LLM 3 build, 4 train, 5 finetune, 6 generate | not started |
 
@@ -521,14 +521,20 @@ limitation they were invented to overcome:
   pretraining applies the same self-supervised idea, predicting the next
   token, at vastly larger scale.
 
-Status: Rust trainer (skip-gram and CBOW, negative sampling, Hogwild threads)
-written and trained on text8. Sensible neighbors emerge (king → prince, queen;
-three → four, five). Before it's delivered: investigate why the reported loss
-rises slightly in later epochs, finish the Python exploration scripts (analogy
-with and without excluding the input words; Google's analogy test set of about
-19,500 questions such as Athens : Greece :: Baghdad : ?), compare against
-gensim (a widely used Python library with its own word2vec), and write the
-README.
+Status: done. The Rust trainer (`mini_w2v`: skip-gram and CBOW, negative
+sampling, Hogwild threads) scores 38.0% on Google's analogy test set (about
+19,500 questions such as Athens : Greece :: Baghdad : ?) after training on
+text8, matching gensim (a widely used Python library with its own word2vec) at
+37.4%. Details, and the honest caveats, are in `word2vec/README.md`:
+
+- **Two losses.** The loss measured during training rose in later epochs
+  while a loss measured on a fixed sample with frozen weights kept falling;
+  the trainer now reports both. The same distinction, training loss versus
+  evaluation loss, will matter for the LLM.
+- **Analogies.** Excluding the question's own words (the standard convention)
+  is worth most of the score: without it, accuracy falls to about 9%. On text8,
+  king − man + woman gave *queen* only 11th; individual analogies are a coin
+  toss at this corpus size.
 
 ## Open decisions
 
@@ -595,7 +601,7 @@ README.
 
 ## Order of work
 
-1. Finish word2vec (above).
+1. ~~Finish word2vec.~~ Done.
 2. Tokenizer: reserve special tokens, then stage 2 (`--encode` writing
    `corpus.ids`).
 3. `attention/`: self-attention alone, on toy inputs.
