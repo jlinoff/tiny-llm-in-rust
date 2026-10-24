@@ -39,30 +39,50 @@ Grouped so that each definition uses only terms defined above it.
 - **vector**: a list of numbers; here, the numbers that represent a token.
 - **d (model width)**: the length of every token's vector (more in
   [Configuration](#configuration)).
-- **layer**: one stage of computation that the vectors pass through.
+- **layer**: one stage of computation that the vectors pass through. In a
+  transformer, "layer" means one whole transformer block (defined below), as
+  in "a 12-layer model"; the two parts inside a block are its **sublayers**.
+  The embedding layer and the output layer are named for being the first and
+  last stages; they are not blocks.
 - **embedding table**: a V × d table with one row (one vector) per token. It is
   the model's first layer: a token ID selects its row.
 - **weights**, **parameters**: the numbers inside the model that are adjusted
   as it learns. **Hyperparameters** are the settings we choose (more in
   [Configuration](#configuration)).
-- **self-attention**: a layer in which each token's vector takes in
+- **self-attention**: a sublayer in which each token's vector takes in
   information from the tokens before it, weighting each by a relevance score
   (a dot product of their vectors). An **attention head** is one independent
-  copy of this computation; each attention layer runs several side by side.
-- **feed-forward layer** (**FFN**, feed-forward network): a layer that
-  transforms each token's vector on its own, the same way at every position.
+  copy of this computation, working on a slice of each token's vector; each
+  attention sublayer, in every block, runs several side by side (more in
+  [How heads fit in](#how-heads-fit-in)). Inside attention, each token's
+  vector is turned into a **query** (what it looks for), a **key** (what it
+  offers to be matched on) and a **value** (what it passes on); see
+  [How attention works](#how-attention-works-queries-keys-and-values).
+- **contextual embedding**: a token's vector after attention has mixed in
+  information from its context, so the same word gets different vectors in
+  different sentences. A row of the embedding table, by contrast, is the
+  same wherever the token appears.
+- **feed-forward network** (**FFN**; often loosely "feed-forward layer"): a
+  sublayer that transforms each token's vector on its own, the same way at
+  every position.
   "Feed-forward" means information passes straight through, with no loops.
-- **residual connection**: adding a layer's input back to its output, so the
-  layer computes a *change* to each vector rather than a replacement.
+- **residual connection**: adding a sublayer's input back to its output, so
+  the sublayer computes a *change* to each vector rather than a replacement.
 - **layer normalization**: rescaling each token's vector to a standard size
   (mean 0, variance 1, then a learned scale and shift), which keeps values
   stable as they pass through many layers.
-- **transformer block**: one self-attention layer and one feed-forward
-  layer, each with a residual connection and layer normalization. A
+- **transformer block**, or **layer**: one self-attention sublayer and one
+  FFN sublayer, each with a residual connection and layer normalization. A
   **transformer** is a model built from a stack of these blocks (more in
   [The transformer block](#the-transformer-block)).
-- **output layer** (or **unembedding**): the final layer, which turns a vector
-  into V scores, one for each possible next token.
+- **output layer** (or **unembedding**, or **LM head** for "language-model
+  head"): the final layer, which turns a vector into V scores, one for each
+  possible next token. This "head" is unrelated to attention heads.
+- **softmax**: turns a list of scores z₁ … zₙ into positive weights that sum
+  to 1: weightᵢ = e^zᵢ / (e^z₁ + … + e^zₙ). Higher scores get exponentially
+  more weight. It's the Boltzmann distribution, with the scores playing the
+  role of negative energies. It turns attention scores into weights, and the
+  output layer's V scores into next-token probabilities.
 - **context length**: the most tokens the model can take in at once.
 - **GPT (generative pre-trained transformer)**: a transformer trained to
   predict the next token. "GPT-style" means this design, which most LLMs use.
@@ -81,8 +101,10 @@ Grouped so that each definition uses only terms defined above it.
   **Post-training**: further training that turns the result into an assistant
   (see [Post-training](#post-training)). **Fine-tuning**: continuing to train
   an already trained model on new data.
-- **temperature**: a text-generation setting. Low values pick the most likely
-  next token; higher values sample more varied ones.
+- **temperature**: a text-generation setting T: the output scores are divided
+  by T before the softmax, exactly as temperature enters the Boltzmann
+  distribution. Low values make the most likely next token dominate; higher
+  values flatten the probabilities, so sampling picks more varied tokens.
 - **checkpoint**: a saved file of a model's weights (more in open decision 3).
 
 **word2vec**
@@ -234,7 +256,7 @@ message of `chat.txt` will be wrapped in turn markers (planned; see
 - **Status:** not started
 
 **What it does:** creates the **whole** model: the V × d embedding table,
-every attention and feed-forward layer, and the output layer, all randomly
+every block's attention and FFN sublayers, and the output layer, all randomly
 initialized. One seed gives one starting model, so experiments are
 reproducible. (Precedent: EleutherAI, a nonprofit AI research group, publishes
 the step-0, untrained checkpoints of its Pythia models.)
@@ -401,20 +423,52 @@ Where they appear in the flow:
 
 ## The transformer block
 
-The model built in steps 3–6 is a stack of identical **transformer blocks**
-between the embedding table and the output layer:
+The model built in steps 3–6 is a stack of identical **transformer blocks**,
+also called **layers** ("a 4-layer model" has 4 blocks), between the embedding
+table and the output layer:
 
 ```
 token IDs → embedding table (+ position information) → block 1 → block 2 → … → block N
           → layer normalization → output layer → V scores for the next token
 ```
 
-Each block updates every token's vector in two stages. In the form used by
-GPT-2 and most modern LLMs, called "pre-norm":
+Each block updates every token's vector in two stages, its two sublayers.
+In the form used by GPT-2 and most modern LLMs, called "pre-norm":
 
 ```
-h = x + attention(normalize(x))     # stage 1: tokens exchange information
-y = h + FFN(normalize(h))           # stage 2: each token is processed on its own
+h = x + attention(normalize(x))     # sublayer 1: tokens exchange information
+y = h + FFN(normalize(h))           # sublayer 2: each token is processed on its own
+```
+
+The same thing as a picture, following one token's vector through one block:
+
+```
+                one token's vector (d numbers), from the block below
+                                  │
+╔═════════════════════════════════╪═════════════════════════════════╗
+║ ONE TRANSFORMER BLOCK           │                                 ║
+║ (= one layer)                   │                                 ║
+║                ┌────────────────┤  the residual stream            ║
+║                │                ▼                                 ║
+║                │       layer normalization                        ║
+║  sublayer 1    │                ▼                                 ║
+║                │        self-attention  ◄──── also reads the      ║
+║                │                │             earlier tokens'     ║
+║                │                ▼             vectors             ║
+║                └──────────────► + add the change back             ║
+║                                 │                                 ║
+║                ┌────────────────┤                                 ║
+║                │                ▼                                 ║
+║                │       layer normalization                        ║
+║  sublayer 2    │                ▼                                 ║
+║                │   feed-forward network (FFN)                     ║
+║                │      this token only                             ║
+║                │                ▼                                 ║
+║                └──────────────► + add the change back             ║
+║                                 │                                 ║
+╚═════════════════════════════════╪═════════════════════════════════╝
+                                  ▼
+                       to the next block (layer)
 ```
 
 Here x holds one d-dimensional vector per token, "normalize" is layer
@@ -422,7 +476,7 @@ normalization, and the `x +` and `h +` are the residual connections. (The
 original 2017 transformer normalized *after* each addition instead; putting
 normalization first trains more stably in deep stacks.)
 
-**The four parts:**
+#### The four parts
 
 - **Self-attention: tokens exchange information.** The only place in the
   block where one token's vector is affected by the others. Each token's
@@ -430,15 +484,29 @@ normalization first trains more stably in deep stacks.)
   looking for?"), a **key** ("what do I contain?") and a **value** ("what do
   I pass on?"). Each token scores every earlier token by the dot product of
   its query with their keys, divided by √(head size) to keep the scores in a
-  workable range. **Softmax** turns those scores into positive weights that
-  sum to 1, and the token's output is the weighted sum of the values. The
+  workable range. Softmax (see [Terms](#terms)) turns those scores into
+  positive weights that sum to 1, and the token's output is the weighted sum of the values. The
   **causal mask** sets the scores for later tokens to −∞ before the softmax,
-  so a token can never use the future it's being trained to predict.
+  so a token can never use the future it's being trained to predict:
+
+  ```
+  attention scores for a four-token input
+  (row = the token looking, column = the token looked at)
+
+              The    cat    sat     on
+      The      ■      ·      ·      ·        ■ = allowed
+      cat      ■      ■      ·      ·        · = masked: set to −∞, so its
+      sat      ■      ■      ■      ·            softmax weight is exactly 0
+      on       ■      ■      ■      ■
+
+  each row → softmax → weights summing to 1 → weighted sum of those tokens' values
+  ```
+
   Several **heads** do this side by side, each in a slice of d with its own
   matrices, so different heads can track different relationships; their
   outputs are joined and passed through one more learned matrix.
-- **Feed-forward network (FFN): each token on its own.** Two learned linear
-  layers with a nonlinearity between them: d → d_ff (usually 4 × d) →
+- **Feed-forward network (FFN): each token on its own.** Two learned matrix
+  multiplications with a nonlinearity between them: d → d_ff (usually 4 × d) →
   nonlinearity (GELU, a smooth version of "keep positive values, zero the
   rest") → d. It never looks at other tokens. It holds two-thirds of a block's
   parameters (8d² against attention's 4d²), and studies such as Geva et al.
@@ -447,11 +515,273 @@ normalization first trains more stably in deep stacks.)
   received. A token's vector becomes a running sum that every block reads and
   writes, often called the **residual stream**. This also gives the training
   signal a direct path back through a deep stack (He et al., 2016).
-- **Layer normalization.** Applied before each stage, it keeps vectors at a
-  consistent scale however many blocks they have passed through (Ba et al.,
-  2016).
+- **Layer normalization.** Applied to the copy of the vector entering each
+  sublayer, it gives every sublayer inputs at a consistent scale however many
+  blocks they have passed through (Ba et al., 2016).
 
-**Position information.** Attention by itself ignores order: shuffling the
+#### How attention works: queries, keys and values
+
+This expands the self-attention summary above, with a worked example small
+enough to check by hand.
+
+**How the matrices are constructed.** W_q, W_k and W_v are weights, exactly
+like the embedding table: created with random values in step 3 (build),
+fixed during a forward pass, where they're simply multiplied with the input,
+and nudged a little by training after every batch. Nothing about "queries" or
+"keys" is designed in; those are names for the roles the matrices end up
+playing once trained. Each head has three matrices of size d × (head size);
+with d = 128 and 4 heads, 128 × 32 each. In practice the heads' matrices are
+stored side by side as one d × d matrix, hence the "4d²" (W_q, W_k, W_v and
+the output matrix W_o) in [The four parts](#the-four-parts). Every block has
+its own four matrices; they aren't shared between blocks.
+
+**A worked example.** Three tokens, d = 4, one head of size 2. The rows of X
+are the three tokens' vectors after layer normalization. The weights are
+hand-picked small integers so the arithmetic is easy to follow; learned ones
+are messier.
+
+```
+          X (3 tokens × d=4)       W_q (4×2)    W_k (4×2)    W_v (4×2)
+the    [ 1  0  1  0 ]              [ 1  0 ]     [ 0  1 ]     [ 1  0 ]
+cat    [ 0  1  0  1 ]              [ 0  1 ]     [ 1  0 ]     [ 0  1 ]
+sat    [ 1  1  0  0 ]              [ 1  0 ]     [ 0  0 ]     [ 0  0 ]
+                                   [ 0  0 ]     [ 1  1 ]     [ 0  0 ]
+```
+
+*Step 1: project every token three ways.* Ordinary matrix products, each
+token's row times each matrix. The same input vector gives what the token
+looks for (its query q), what it offers to be matched on (its key k), and
+what it hands over (its value v):
+
+```
+          Q = X·W_q    K = X·W_k    V = X·W_v
+the        [ 2  0 ]     [ 0  1 ]     [ 1  0 ]
+cat        [ 0  1 ]     [ 2  1 ]     [ 0  1 ]
+sat        [ 1  1 ]     [ 1  1 ]     [ 1  1 ]
+```
+
+*Step 2: score every query against every key.* scores = Q · Kᵀ: entry (i, j)
+is the dot product of token i's query with token j's key, then divided by
+√(head size) = √2:
+
+```
+                    key of:  the    cat    sat
+query of  the               0.00   2.83   1.41
+          cat               0.71   0.71   0.71
+          sat               0.71   2.12   1.41
+```
+
+*Step 3: apply the causal mask.* A token may look only at itself and earlier
+tokens, so everything above the diagonal becomes −∞:
+
+```
+          the    cat    sat
+the       0.00    −∞     −∞
+cat       0.71   0.71    −∞
+sat       0.71   2.12   1.41
+```
+
+*Step 4: softmax each row* into weights that sum to 1; the −∞ entries become
+exactly 0:
+
+```
+          the    cat    sat
+the       1.00   0      0        "the" can only see itself
+cat       0.50   0.50   0        equal scores give equal weights
+sat       0.14   0.58   0.28     "sat" attends mostly to "cat"
+```
+
+*Step 5: each token's output is the weighted sum of the values:*
+
+```
+sat:  0.14 × [1 0]  +  0.58 × [0 1]  +  0.28 × [1 1]  =  [0.42  0.86]
+      (the's value)    (cat's value)     (sat's value)
+```
+
+That's the whole mechanism: three matrix multiplications, one more for the
+scores, a mask, a softmax and a weighted sum. Everything except the softmax
+is ordinary linear algebra.
+
+**Who does what.**
+
+```
+Q · K  →  where to look   (the weights: how much each earlier token matters)
+V      →  what you get    (the information actually passed along)
+```
+
+- **Q and K decide the weights; V doesn't.** The weights come from pairing
+  the current token's query with the key of itself and each earlier token. V
+  plays no part in deciding where to look; it's what gets delivered once the
+  weights are fixed. Elhage et al. (2021) call these the "QK circuit" and the
+  "OV circuit" (V with the output matrix W_o) and analyze them separately: a
+  head can find tokens by one property and copy a different one from them.
+- **Each row is one token looking back.** The weights are the attention the
+  *current* token pays to each earlier token (and itself): "sat"'s row,
+  0.14, 0.58, 0.28, is sat's attention budget, always summing to 1.
+- **Triples and pairs.** Each token has three vectors, a triple (q, k, v).
+  The *pairs* are (query of the token looking, key of the token looked at),
+  one per cell of the score triangle.
+
+**How a token is updated.** A token isn't updated by its own value vector,
+but by the weighted sum of the value vectors of the tokens it attends to
+(possibly including itself); its own value is what it offers to others. For
+"sat", the update is [0.42 0.86], drawn mostly from "cat". Then:
+
+```
+join all heads' updates → multiply by W_o → ADD to the token's vector in the residual stream
+```
+
+The addition is the residual connection: "sat" keeps everything it had and
+gains information from its context. In short:
+
+- **Q · K:** whom each token listens to
+- **V:** what each token says when listened to
+- **the weighted sum, then W_o, added to the stream:** how each token's
+  vector changes as a result
+
+This is exactly the step word2vec lacks. A word2vec vector for "sat" is the
+same in every sentence; after attention, "sat" in "the cat sat" carries
+information about the cat, and after a few more layers it can encode who
+sat, where and when. That is what a **contextual embedding** is.
+
+**Why three separate matrices.** Expand a score:
+
+```
+score(i, j) = q_i · k_j = (x_i W_q) · (x_j W_k) = x_i · (W_q W_kᵀ) x_j
+```
+
+The score is a **learned bilinear form** xᵢᵀ M xⱼ, with M = W_q W_kᵀ a d × d
+matrix of rank at most the head size: each head learns its own definition of
+"relevant". Using the raw vectors instead, xᵢ · xⱼ, would measure only
+similarity, word2vec-style, and would be symmetric. With a learned M:
+
+- **relevance can differ from similarity:** a verb can attend to its subject
+  although their vectors aren't alike, because M maps verb-like queries onto
+  subject-like keys;
+- **relevance can be asymmetric:** in the example, "the" scores "cat" at
+  2.83, but "cat" scores "the" at only 0.71.
+
+W_v is separate from both because *what you match on* and *what you pass
+along* are different questions: a token can be found by its grammatical role
+while contributing its meaning.
+
+**How they become useful.** Training never sees "queries" or "keys", only
+the final next-token loss. The gradient flows back through the weighted sum,
+the softmax and the dot products into all three matrices, and they drift
+toward whatever makes predictions better. The names come from database
+lookup, and attention is a **soft lookup**: a dictionary `d[key]` returns
+the value whose key matches *exactly*; attention returns a *blend* of every
+value, weighted by how well each key matches the query.
+
+The `attention/` program will print exactly these tables (Q, K, V, scores,
+mask, weights, outputs) for small inputs, first with hand-set weights like
+these and later with trained ones.
+
+#### How heads fit in
+
+A head is a part of **one attention sublayer, inside one block**, not a pass
+through the model. With the starting sizes from
+[Configuration](#configuration) (d = 128, 4 layers, 4 heads):
+
+```
+model
+└── 4 transformer blocks (layers), applied one after another
+    └── each block
+        ├── attention sublayer
+        │   ├── head 1 ─┐  each head: its own query, key and value matrices,
+        │   ├── head 2  │  working on a 32-number slice (128 / 4) of every
+        │   ├── head 3  │  token's vector, attending over ALL the tokens
+        │   └── head 4 ─┘
+        │        → the 4 heads' outputs are joined (4 × 32 = 128 numbers)
+        │          and passed through one more learned matrix
+        └── FFN sublayer
+```
+
+That model has 4 × 4 = 16 heads in all, four in each block's attention
+sublayer. Each head is a complete, independent attention computation: its own
+queries, keys and values, scores, causal mask and softmax.
+
+**Why several heads:** each can learn to track a different relationship. In
+trained models, researchers have found heads that consistently attend to the
+previous token, heads that link a pronoun to its noun, and "induction heads"
+(Elhage et al., 2021; studied in depth by Olsson et al., 2022) that spot a repeated pattern and predict its continuation. A single head per
+block could learn only one weighting at a time.
+
+**Every block processes all the tokens, in parallel.** The blocks aren't
+applied to one token at a time: each block updates every token's vector.
+What's per-token is the FFN, which handles each vector separately; attention,
+including every head, is exactly the part that looks across tokens.
+
+**Two meanings of "head".** The output layer is often called the **LM head**
+(language-model head), meaning the final layer of the whole model, which
+turns vectors into token scores. It has nothing to do with attention heads.
+
+#### What runs in parallel
+
+- **Heads within an attention sublayer: parallel.** They're independent until
+  their outputs are joined. In practice they aren't even separate
+  computations: one matrix multiplication produces the queries for all heads,
+  and "splitting into heads" just views the result as slices.
+- **Blocks: sequential.** Each block needs the previous block's output, so
+  depth costs time in a way width doesn't.
+- **Tokens during training: parallel.** Every position in a sequence is
+  processed at once, predicting every next token simultaneously; the causal
+  mask is what makes this legitimate, since no position can see a later one.
+  This parallelism is the main reason transformers replaced recurrent
+  networks, which had to read text one token at a time.
+- **Tokens during generation: sequential.** A token can't be generated until
+  the one before it exists, so generation makes one pass through the model per
+  token. The **KV cache** (key-value cache) keeps each earlier token's keys and
+  values, so each pass computes only the newest token.
+
+All of these are optimizations: in exact arithmetic, computing the heads
+together or one at a time, or the tokens at once or one by one, gives the same
+result. In floating-point arithmetic the results are equal only to rounding
+(see [Conventions for all code](#conventions-for-all-code)). Our code may
+simply loop over the heads, which is clearer and fast enough at toy sizes.
+
+#### Why repeated normalization doesn't lose information
+
+With 2N normalizations in an N-layer model, it might seem that information is
+whittled away. It isn't, for three reasons:
+
+1. **The residual stream itself is never normalized.** In `h = x +
+   attention(normalize(x))`, normalization produces only the sublayer's
+   *input*; `x` itself flows past untouched to the `+`, where the sublayer's
+   output is added. In the diagram, the normalization boxes sit on the side
+   branches, never on the main vertical line. The stream carries its full,
+   unnormalized information from the embedding to the top of the stack, each
+   block only adding to it, and it is normalized just once, at the very end,
+   before the output layer.
+2. **What normalizing a copy discards is deliberately little.** Layer
+   normalization subtracts the vector's mean and divides by its standard
+   deviation: it removes 2 of the d numbers' worth of information, the
+   vector's overall offset and overall scale. Its *direction*, the other
+   d − 2 degrees of freedom, is untouched, and that's where the meaning is.
+   (word2vec showed the same: cosine similarity, which ignores length, was the
+   right measure of relatedness.) Two learned parameters per dimension, a
+   scale and a shift, are then applied, so a sublayer that needs a particular
+   scale can learn it.
+3. **It improves numerical precision.** Keeping sublayer inputs near
+   magnitude 1 is where floating-point numbers are most precise, and keeps
+   them away from overflow (too large to represent) and underflow (too small),
+   which matters even more when models compute with 16-bit numbers.
+
+Why normalize at all: without it, the sublayers' input magnitudes would drift
+as blocks keep adding to the stream, and each sublayer would have to cope with
+inputs ranging from tiny to huge. Normalizing the copy means every sublayer
+always sees the same scale, which keeps training stable.
+
+The **post-norm** design of the original 2017 transformer *did* normalize the
+stream itself after every sublayer, repeatedly discarding its scale. It
+worked, but deep stacks were harder to train, which is one reason pre-norm
+took over. Many recent models (Llama, for example) use **RMSNorm** (root mean
+square normalization), which only divides by the vector's scale without
+subtracting the mean, discarding even less.
+
+#### Position information
+
+Attention by itself ignores order: shuffling the
 earlier tokens wouldn't change a token's weighted sum. So the model is told
 each token's position. GPT-2 adds a learned **position embedding** (one
 vector per position, up to the context length) to each token's embedding;
@@ -459,7 +789,7 @@ many newer models instead rotate the queries and keys by an angle that
 depends on position (RoPE, rotary position embedding). Which we use is a
 decision for `transformer/`.
 
-**Where each part is built:**
+#### Where each part is built
 
 - **`attention/`**: self-attention alone, on toy inputs, small enough to print
   every number: one head first (queries, keys, values, the scores, the
@@ -498,7 +828,7 @@ holds parameters.
 | layers | how many transformer blocks (attention + feed-forward) are stacked |
 | heads | how many attention heads each layer splits into; d must divide evenly by it |
 | context length | the most tokens the model can see at once |
-| d_ff | the inner width of each feed-forward layer, conventionally 4 × d |
+| d_ff | the inner width of each FFN sublayer, conventionally 4 × d |
 | seed | the random seed for the initial weights |
 
 Starting values will be chosen for a model that trains in minutes on a laptop
@@ -562,6 +892,21 @@ Rules every program in the project follows:
   check it: `--encode` decodes its IDs and compares them with the input
   before writing anything. That check found a bug in which underscores were
   silently dropped by the tokenizer (see `tokenizer/README.md`).
+- **Exact comparisons for integers, tolerances for floating point.** Token
+  IDs, merges and other integer data must match exactly, as the tokenizer's
+  tests require. Floating-point results must be compared with a tolerance
+  (for example, a relative difference below 10⁻⁵ for 32-bit floats), because
+  floating-point addition isn't associative: (a + b) + c and a + (b + c) can
+  differ in the last bit, since each addition rounds. Two computations that
+  are identical in exact arithmetic, such as a looped and a batched dot
+  product, add in different orders and agree only to about 6 or 7 significant
+  digits. A consequence for reproducibility: if the order of additions varies
+  between runs (as with some parallel or GPU operations), two runs with the
+  same seed can drift apart, and over thousands of training steps the
+  differences can grow; keeping the order fixed avoids that. None of this is
+  a flaw in the results: models train in 16-bit floats (about 3 significant
+  digits) and run in 8- or 4-bit formats, because the learned function is
+  robust to small perturbations and training is already noisy.
 - **Record what produced a file.** Files passed between steps say what made
   them: the tokenizer lists its training documents with checksums, and an
   `.ids` file carries the tokenizer's fingerprint.
@@ -657,7 +1002,7 @@ the words around it, with nothing else in the way:
   vectors become contextual: "bank" is represented differently in "river
   bank" and "bank loan". word2vec's vectors are static.
 
-**Why it matters for self-attention and feed-forward layers.** word2vec isn't
+**Why it matters for self-attention and feed-forward networks.** word2vec isn't
 an ancestor of either mechanism; it's the foundation they build on and the
 limitation they were invented to overcome:
 
@@ -667,7 +1012,7 @@ limitation they were invented to overcome:
   a dot product, then mixes their vectors according to those scores.
 - **The limitation.** One fixed vector per word can't tell "river bank" from
   "bank loan". Self-attention exists to fix this: it rebuilds each token's
-  vector from its context, layer after layer, and the feed-forward layers
+  vector from its context, block after block, and the FFN sublayers
   transform each of those context-aware vectors further.
 - **The training principle.** It showed that useful meaning emerges just from
   predicting words from their neighbors in raw, unlabeled text. LLM
@@ -866,7 +1211,7 @@ for language research.
   added to an older recurrent translation model.
 - ★ Vaswani, A., et al. (2017). "Attention Is All You Need." NeurIPS.
   [arXiv:1706.03762](https://arxiv.org/abs/1706.03762). The transformer:
-  self-attention, attention heads, feed-forward layers, positional
+  self-attention, attention heads, feed-forward networks, positional
   information.
 - Peters, M. E., et al. (2018). "Deep Contextualized Word Representations."
   NAACL. [arXiv:1802.05365](https://arxiv.org/abs/1802.05365). ELMo: the step
@@ -904,7 +1249,12 @@ for language research.
   layers appear to be doing.
 - Elhage, N., et al. (2021). "A Mathematical Framework for Transformer
   Circuits." Anthropic, transformer-circuits.pub. Reading a transformer as
-  linear algebra; demanding but rewarding.
+  linear algebra; demanding but rewarding. Introduces the residual stream
+  view and induction heads.
+- Olsson, C., et al. (2022). "In-context Learning and Induction Heads."
+  Anthropic, transformer-circuits.pub.
+  [arXiv:2209.11895](https://arxiv.org/abs/2209.11895). How heads that copy
+  repeated patterns form during training.
 
 ### Training data and small models
 
