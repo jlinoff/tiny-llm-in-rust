@@ -35,7 +35,7 @@ project.zip: $(SRC_FILES)
 W2V        := word2vec/target/release/mini_w2v
 W2V_SRC    := word2vec/Cargo.toml $(wildcard word2vec/src/*.rs)
 W2V_CORPUS ?= data/text8
-W2V_ARGS   ?= -p king,cat,paris,computer,three
+W2V_ARGS   ?= -p king,cat,paris,computer,three -e 10 -d 300 -m skipgram
 
 .PHONY: word2vec
 word2vec: $(W2V_CORPUS) $(W2V) | $(OUT) ## Train word vectors with the standalone word2vec tool.
