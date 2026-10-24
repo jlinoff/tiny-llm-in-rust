@@ -41,6 +41,7 @@ W2V_OUT    ?= $(OUT)/vectors.txt
 .PHONY: word2vec
 word2vec: $(W2V_CORPUS) $(W2V) | $(OUT) ## Train word vectors with the standalone word2vec tool.
 	$(call hdr,$@)
+	@mkdir -p $(dir $(W2V_OUT))
 	time $(W2V) $(W2V_CORPUS) $(W2V_ARGS) -o $(W2V_OUT)
 
 # Rebuilt only when the Rust source changes.
