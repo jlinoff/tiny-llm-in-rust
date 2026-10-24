@@ -70,3 +70,6 @@ help:  ## This help message.
 	@printf "   %-18s  %s\n" "CORPUS" "$(CORPUS)"
 	@printf "   %-18s  %s\n" "MERGES" "$(MERGES)"
 	@printf "   %-18s  %s\n" "OUT" "$(OUT)"
+	@printf "   %-18s  %s\n" "W2V" "$(W2V)"
+	@printf "   %-18s  %s\n" "W2V_CORPUS" "$(W2V_CORPUS)"
+	@printf "   %-18s  %s\n" "W2V_ARGS" "$(W2V_ARGS)"
