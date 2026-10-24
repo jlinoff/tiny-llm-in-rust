@@ -29,6 +29,8 @@ Usage:
   python3 mini_bpe.py --load tok.bpe -t "Text."   # use a saved tokenizer, no training
   python3 mini_bpe.py --load tok.bpe --encode corpus.txt -o corpus.ids
                                                   # encode a text file into token IDs
+  python3 mini_bpe.py --load tok.bpe --encode a.txt b.txt -o ab.ids
+                                                  # two documents, each ending in EOS
 
 Run with -h for all options.
 """
@@ -40,6 +42,7 @@ import struct
 import sys
 from array import array
 from collections import Counter
+from dataclasses import dataclass
 
 # GPT-2-style pre-tokenizer pattern (stdlib `re` version).
 #   contractions | optional space + letters | optional space + digits
@@ -235,34 +238,89 @@ def report(text, merges, vocab, pattern=PATTERN):
 FORMAT_VERSION = "mini_bpe tokenizer v1"
 
 
-def save_tokenizer(path, merges, vocab, sources):
+# Special tokens: token IDs reserved by hand for structure, not text. They
+# get the IDs after the merges and never come out of encoding text: if a
+# document contains the characters "<|endoftext|>", they're encoded as
+# ordinary bytes. Only code inserts a special token's ID.
+EOS = "<|endoftext|>"  # end of sequence: marks the end of each document
+DEFAULT_SPECIALS = [EOS]
+
+
+@dataclass
+class Tokenizer:
+    """Everything that defines a trained tokenizer.
+
+    merges:   ordered list of ((left_id, right_id), new_id)
+    vocab:    token ID -> bytes, for the 256 bytes and every merge
+    pattern:  the compiled pre-tokenizer regex
+    specials: special-token names; the i-th has ID 256 + len(merges) + i
+    """
+    merges: list
+    vocab: dict
+    pattern: "re.Pattern[str]"
+    specials: list
+
+    @property
+    def vocab_size(self):
+        """V: bytes + merges + special tokens."""
+        return 256 + len(self.merges) + len(self.specials)
+
+    def special_id(self, name):
+        """The ID of a special token, or None if the tokenizer lacks it."""
+        if name not in self.specials:
+            return None
+        return 256 + len(self.merges) + self.specials.index(name)
+
+    def fingerprint(self):
+        """SHA-256 of what defines the tokenizer: its pattern, ordered merges
+        and special tokens.
+
+        Comments and provenance in a .bpe file don't affect tokenization, so
+        they're left out: two files with the same pattern, merges and special
+        tokens have the same fingerprint. The canonical text hashed is the
+        pattern, a newline, one "left right" line per merge, then one
+        "special NAME" line per special token.
+        """
+        text = (self.pattern.pattern + "\n"
+                + "".join(f"{a} {b}\n" for (a, b), _ in self.merges)
+                + "".join(f"special {name}\n" for name in self.specials))
+        return hashlib.sha256(text.encode("utf-8")).digest()
+
+
+def save_tokenizer(path, tok, sources):
     """Write the tokenizer (the output of the tokenizer phase) to a text file.
 
-    A trained tokenizer is fully defined by two things:
-      1. the pre-tokenizer pattern (how text is split into chunks), and
-      2. the ordered list of merges.
-    IDs 0-255 are the raw bytes, and the merge on data line k (counting from
-    0) creates token ID 256 + k, so the vocabulary is rebuilt from the merges
-    and needn't be stored. Text after '#' on a merge line is a comment.
+    A trained tokenizer is fully defined by three things:
+      1. the pre-tokenizer pattern (how text is split into chunks),
+      2. the ordered list of merges, and
+      3. the special tokens.
+    IDs 0-255 are the raw bytes, the merge on data line k (counting from 0)
+    creates token ID 256 + k, and the special tokens take the IDs after the
+    merges, in order. So the vocabulary is rebuilt from the file and needn't
+    be stored. Text after '#' on a data line is a comment.
     """
+    vocab = tok.vocab
     with open(path, "w", encoding="utf-8") as fh:
         fh.write(f"# {FORMAT_VERSION}\n")
-        fh.write(f"# vocab_size: {len(vocab)}  "
-                 f"(256 bytes + {len(merges)} merges)\n")
+        fh.write(f"# vocab_size: {tok.vocab_size}  (256 bytes + "
+                 f"{len(tok.merges)} merges + {len(tok.specials)} special)\n")
         for src, digest in sources:
             fh.write(f"# trained on: {src}  sha256 {digest}\n")
-        fh.write("# Data lines: one merge per line, '<left_id> <right_id>'.\n")
-        fh.write("# The merge on data line k (from 0) creates token id 256 + k.\n")
-        fh.write(f"pattern {PATTERN.pattern}\n")
-        for (a, b), new_id in merges:
+        fh.write("# Merge lines: '<left_id> <right_id>'; the merge on merge "
+                 "line k (from 0)\n# creates token id 256 + k. Special "
+                 "lines: 'special <name>', IDs after the merges.\n")
+        fh.write(f"pattern {tok.pattern.pattern}\n")
+        for (a, b), new_id in tok.merges:
             fh.write(f"{a} {b}  # {new_id}: [{show(vocab[a])}] + "
                      f"[{show(vocab[b])}] -> [{show(vocab[new_id])}]\n")
+        for name in tok.specials:
+            fh.write(f"special {name}  # {tok.special_id(name)}\n")
 
 
 def load_tokenizer(path):
-    """Read a file written by save_tokenizer; return (merges, vocab, pattern)."""
+    """Read a file written by save_tokenizer; return a Tokenizer."""
     vocab = {i: bytes([i]) for i in range(256)}
-    merges = []
+    merges, specials = [], []
     pattern = None
     with open(path, encoding="utf-8") as fh:
         for lineno, line in enumerate(fh, 1):
@@ -273,6 +331,12 @@ def load_tokenizer(path):
             data = line.split("#", 1)[0].split()
             if not data:
                 continue  # comment or blank line
+            if data[0] == "special":
+                if len(data) != 2 or data[1] in specials:
+                    raise ValueError(f"line {lineno}: expected 'special "
+                                     f"<name>' with a new, space-free name")
+                specials.append(data[1])
+                continue
             if len(data) != 2:
                 raise ValueError(f"line {lineno}: expected '<left_id> <right_id>'")
             a, b = int(data[0]), int(data[1])
@@ -284,19 +348,7 @@ def load_tokenizer(path):
             vocab[new_id] = vocab[a] + vocab[b]
     if pattern is None:
         raise ValueError("no 'pattern' line found")
-    return merges, vocab, pattern
-
-
-def tokenizer_fingerprint(merges, pattern_text):
-    """SHA-256 of what defines the tokenizer: its pattern and ordered merges.
-
-    Comments and provenance in a .bpe file don't affect tokenization, so
-    they're left out: two files with the same pattern and merges have the
-    same fingerprint. The canonical text hashed is the pattern, a newline,
-    then one "left right" line per merge.
-    """
-    text = pattern_text + "\n" + "".join(f"{a} {b}\n" for (a, b), _ in merges)
-    return hashlib.sha256(text.encode("utf-8")).digest()
+    return Tokenizer(merges, vocab, re.compile(pattern), specials)
 
 
 # The token-ID file (.ids): a 64-byte header, then the IDs.
@@ -307,7 +359,7 @@ def tokenizer_fingerprint(merges, pattern_text):
 #       16     4  V, the tokenizer's vocabulary size
 #       20     4  reserved (0)
 #       24     8  number of IDs
-#       32    32  tokenizer fingerprint (see tokenizer_fingerprint)
+#       32    32  tokenizer fingerprint (see Tokenizer.fingerprint)
 #       64     -  the IDs
 # All integers are unsigned and little-endian.
 IDS_MAGIC = b"MBPEIDS\0"
@@ -456,9 +508,10 @@ examples:
     ap.add_argument("--load", metavar="FILE",
                     help="load a tokenizer saved with --save instead of "
                          "training (no corpus files)")
-    ap.add_argument("--encode", metavar="TEXTFILE",
-                    help="after training or loading, encode TEXTFILE into "
-                         "token IDs and write them to the -o file")
+    ap.add_argument("--encode", metavar="TEXTFILE", nargs="+",
+                    help="after training or loading, encode the text "
+                         "file(s) into token IDs, each file a document "
+                         "followed by EOS, and write them to the -o file")
     ap.add_argument("-o", "--output", metavar="FILE",
                     help="where --encode writes the token IDs (binary .ids "
                          "format, described in the README)")
@@ -475,8 +528,15 @@ examples:
     return ap
 
 
+def describe(tok):
+    """One line describing the vocabulary."""
+    return (f"vocabulary V = {tok.vocab_size} tokens (256 bytes + "
+            f"{len(tok.merges)} merges + {len(tok.specials)} special: "
+            f"{', '.join(tok.specials) or 'none'})")
+
+
 def load_mode(ap, args):
-    """Load a saved tokenizer. Returns (merges, vocab, pattern)."""
+    """Load a saved tokenizer. Returns a Tokenizer."""
     conflicts = [name for name, given in [
         ("corpus files", args.corpus), ("--dedup", args.dedup),
         ("-n/--merges", args.merges is not None), ("--save", args.save)]
@@ -485,29 +545,26 @@ def load_mode(ap, args):
         ap.error(f"--load uses a saved tokenizer instead of training; "
                  f"don't combine it with {', '.join(conflicts)}")
     try:
-        merges, vocab, pattern_text = load_tokenizer(args.load)
-    except OSError as e:
-        ap.error(f"can't read tokenizer file {args.load!r}: {e.strerror}")
+        tok = load_tokenizer(args.load)
+    except (OSError, re.error) as e:
+        ap.error(f"can't read tokenizer file {args.load!r}: {e}")
     except ValueError as e:
         ap.error(f"{args.load!r} is not a valid tokenizer file: {e}")
 
-    pattern = PATTERN
-    if pattern_text != PATTERN.pattern:
+    if tok.pattern.pattern != PATTERN.pattern:
         print("Note: the file's pre-tokenizer pattern differs from this "
               "script's default; using the file's pattern.")
-        pattern = re.compile(pattern_text)
     print(f"=== Tokenizer loaded from {args.load} ===")
-    print(f"{len(merges)} merges; vocabulary = {len(vocab)} tokens "
-          f"(256 bytes + merges).")
-    if merges:
+    print(f"{len(tok.merges)} merges; {describe(tok)}.")
+    if tok.merges:
         print("Last 10 tokens learned:",
-              fmt([vocab[m[1]] for m in merges[-10:]]))
-    return merges, vocab, pattern
+              fmt([tok.vocab[m[1]] for m in tok.merges[-10:]]))
+    return tok
 
 
 def train_mode(ap, args):
     """Train a tokenizer on the corpus files (and save it if asked).
-    Returns (merges, vocab)."""
+    Returns a Tokenizer."""
     if not args.corpus:
         ap.error("give corpus file(s) to train on, or --load FILE")
     num_merges = 200 if args.merges is None else args.merges
@@ -522,9 +579,9 @@ def train_mode(ap, args):
 
     print(f"=== Training: up to {num_merges} merges ===")
     merges, vocab = train(texts, num_merges, verbose=not args.quiet)
+    tok = Tokenizer(merges, vocab, PATTERN, list(DEFAULT_SPECIALS))
     n_tokens = sum(len(encode(t, merges)) for t in texts)
-    print(f"\nLearned {len(merges)} merges; vocabulary = {len(vocab)} "
-          f"tokens (256 bytes + merges).")
+    print(f"\nLearned {len(merges)} merges; {describe(tok)}.")
     print(f"Corpus encodes to {n_tokens:,} tokens "
           f"({total_bytes / n_tokens:.2f} bytes/token).")
     if args.quiet and merges:
@@ -533,12 +590,12 @@ def train_mode(ap, args):
 
     if args.save:
         try:
-            save_tokenizer(args.save, merges, vocab, sources)
+            save_tokenizer(args.save, tok, sources)
         except OSError as e:
             ap.error(f"can't write tokenizer file {args.save!r}: "
                      f"{e.strerror}")
-        print(f"Saved tokenizer to {args.save} (vocab_size {len(vocab)}).")
-    return merges, vocab
+        print(f"Saved tokenizer to {args.save} (vocab_size {tok.vocab_size}).")
+    return tok
 
 
 def read_tests(ap, args):
@@ -555,15 +612,15 @@ def read_tests(ap, args):
 
 def check_outputs(ap, args):
     """Validate the options that read and write files, and check that the
-    text to encode is readable and every output path writable, before any
+    texts to encode are readable and every output path writable, before any
     training or encoding starts."""
     if args.output and not args.encode:
         ap.error("-o/--output is only used with --encode")
     if args.encode and not args.output:
         ap.error("--encode needs -o FILE for the token IDs")
-    if args.encode and not (os.path.isfile(args.encode)
-                            and os.access(args.encode, os.R_OK)):
-        ap.error(f"can't read text file {args.encode!r}")
+    for path in args.encode or []:
+        if not (os.path.isfile(path) and os.access(path, os.R_OK)):
+            ap.error(f"can't read text file {path!r}")
     outputs = [(args.save, "tokenizer file"), (args.output, "output file")]
     paths = [p for p, _ in outputs if p]
     if len(paths) != len({os.path.realpath(p) for p in paths}):
@@ -573,35 +630,59 @@ def check_outputs(ap, args):
             check_writable(ap, path, what)
 
 
-def encode_mode(ap, args, merges, vocab, pattern):
-    """Encode the --encode text file into token IDs and write the -o file."""
+def read_text(ap, path):
+    """Read a UTF-8 text file, or stop with an error."""
     try:
-        with open(args.encode, encoding="utf-8") as fh:
-            text = fh.read()
+        with open(path, encoding="utf-8") as fh:
+            return fh.read()
     except OSError as e:
-        ap.error(f"can't read text file {args.encode!r}: {e.strerror}")
+        ap.error(f"can't read text file {path!r}: {e.strerror}")
     except UnicodeDecodeError:
-        ap.error(f"text file {args.encode!r} is not valid UTF-8 text")
+        ap.error(f"text file {path!r} is not valid UTF-8 text")
+    return None  # not reached: ap.error exits
 
-    print(f"\n=== Encode: {args.encode} -> {args.output} ===")
-    ids = encode(text, merges, pattern)
-    if decode(ids, vocab) != text:  # can't happen: the encoding is lossless
-        ap.error("round-trip check failed: decoding didn't reproduce the text")
-    fingerprint = tokenizer_fingerprint(merges, pattern.pattern)
+
+def encode_mode(ap, args, tok):
+    """Encode the --encode text files into token IDs and write the -o file.
+
+    Each file is one document. Its tokens are followed by the EOS token, so
+    the model can learn where a document ends, both to keep unrelated
+    documents apart during training and to know when to stop generating.
+    """
+    eos = tok.special_id(EOS)
+    if eos is None:
+        ap.error(f"the tokenizer has no {EOS} (EOS) token; it was saved by "
+                 f"an older version of mini_bpe.py, so retrain it")
+    print(f"\n=== Encode: {' '.join(args.encode)} -> {args.output} ===")
+    ids, cache, nbytes = [], {}, 0
+    for path in args.encode:
+        text = read_text(ap, path)
+        doc = encode(text, tok.merges, tok.pattern, cache)
+        # Round-trip check per document: the IDs between EOS tokens must
+        # decode to exactly this file. Encoding text never produces the EOS
+        # ID, so the document boundaries are unambiguous.
+        if decode(doc, tok.vocab) != text:
+            ap.error(f"round-trip check failed for {path!r}: decoding "
+                     f"didn't reproduce the text")
+        ids += doc + [eos]
+        nbytes += len(text.encode("utf-8"))
+        print(f"  {path:<24} {len(text.encode('utf-8')):>12,} bytes -> "
+              f"{len(doc):>11,} tokens + EOS")
+    fingerprint = tok.fingerprint()
     try:
-        width = write_ids(args.output, ids, len(vocab), fingerprint)
+        width = write_ids(args.output, ids, tok.vocab_size, fingerprint)
     except OSError as e:
         ap.error(f"can't write {args.output!r}: {e.strerror}")
-    nbytes = len(text.encode("utf-8"))
-    print(f"  {nbytes:,} bytes of text -> {len(ids):,} tokens "
-          f"({nbytes / max(len(ids), 1):.2f} bytes/token); "
+    print(f"  {len(args.encode)} document(s), {nbytes:,} bytes of text -> "
+          f"{len(ids):,} IDs including {len(args.encode)} EOS (ID {eos}); "
+          f"{nbytes / max(len(ids) - len(args.encode), 1):.2f} bytes/token; "
           f"lossless round-trip: True")
     print(f"  wrote {IDS_HEADER.size}-byte header + {len(ids):,} IDs x "
-          f"{width} bytes; V = {len(vocab):,}; "
+          f"{width} bytes; V = {tok.vocab_size:,}; "
           f"tokenizer fingerprint {fingerprint.hex()[:16]}…")
 
 
-def run_tests(tests, merges, vocab, pattern, prompt):
+def run_tests(tests, tok, prompt):
     """Tokenize each test string; if there are none and `prompt` is true,
     ask for lines interactively."""
     if not tests and not prompt:
@@ -609,7 +690,7 @@ def run_tests(tests, merges, vocab, pattern, prompt):
     print("\n=== Encoding (␣ = space) ===")
     if tests:
         for t in tests:
-            report(t, merges, vocab, pattern)
+            report(t, tok.merges, tok.vocab, tok.pattern)
         return
     print("Type a line to tokenize (Ctrl-D or empty line to quit).")
     while True:
@@ -620,7 +701,7 @@ def run_tests(tests, merges, vocab, pattern, prompt):
             break
         if not line:
             break
-        report(line, merges, vocab, pattern)
+        report(line, tok.merges, tok.vocab, tok.pattern)
 
 
 def main():
@@ -630,16 +711,11 @@ def main():
     args = ap.parse_args()
     check_outputs(ap, args)
     tests = read_tests(ap, args)
-    if args.load:
-        merges, vocab, pattern = load_mode(ap, args)
-    else:
-        merges, vocab = train_mode(ap, args)
-        pattern = PATTERN
+    tok = load_mode(ap, args) if args.load else train_mode(ap, args)
     if args.encode:
-        encode_mode(ap, args, merges, vocab, pattern)
+        encode_mode(ap, args, tok)
     # Prompt only when the run has nothing else to do: no files to write.
-    run_tests(tests, merges, vocab, pattern,
-              prompt=not (args.save or args.encode))
+    run_tests(tests, tok, prompt=not (args.save or args.encode))
 
 
 if __name__ == "__main__":

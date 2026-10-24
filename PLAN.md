@@ -168,8 +168,8 @@ in `transformer/`, with one subcommand per step.
   `-n` is the maximum number of merges, `--save` names the output. Special
   tokens will need one more option, proposed as
   `--special "<|user|>,<|assistant|>,<|end|>"`.
-- **Status:** done (`tokenizer/mini_bpe.py --save`), except special tokens
-  (EOS is needed for multi-document corpora; turn markers for step 5)
+- **Status:** done (`tokenizer/mini_bpe.py --save`), including EOS; the turn
+  markers for step 5 are still to do
 
 **What it does:** learns the tokenizer from the training text, and reserves
 IDs for the special tokens after the merges. It runs once; the result is then
@@ -178,7 +178,8 @@ frozen and used unchanged by every later step that needs it.
 ##### Step 2: encode
 
 - **Inputs:**
-  - text: `corpus.txt` for step 4, `chat.txt` for step 5
+  - text: `corpus.txt` (one or more documents) for step 4, `chat.txt` for
+    step 5
   - `tok.bpe`
 - **Output:**
   - `corpus.ids` (or `chat.ids`): the text as token IDs
@@ -200,8 +201,9 @@ fingerprint of the tokenizer (a hash of its pattern and merges), so later steps
 can refuse IDs made by a different tokenizer. After encoding, the IDs are
 decoded and compared with the input. The format is described in
 `tokenizer/README.md`. Encoding is also where special tokens enter the data:
-code inserts EOS between documents, and wraps each message of `chat.txt` in
-turn markers (planned; see [Special tokens](#special-tokens)).
+each input file is a document, and EOS is appended after each one (done); each
+message of `chat.txt` will be wrapped in turn markers (planned; see
+[Special tokens](#special-tokens)).
 
 ##### Step 3: build
 
@@ -374,9 +376,11 @@ What makes them special:
 Where they appear in the flow:
 
 - **Step 1, tokenize:** defined. The list is saved in `tok.bpe`, each gets a
-  reserved ID, and they count toward V and the fingerprint.
-- **Step 2, encode:** inserted. EOS between documents in `corpus.ids`; turn
-  markers around each message when `chat.txt` is encoded.
+  reserved ID, and they count toward V and the fingerprint. EOS
+  (`<|endoftext|>`) is always reserved (done).
+- **Step 2, encode:** inserted. EOS after each document in `corpus.ids`
+  (done); turn markers around each message when `chat.txt` is encoded (to
+  do).
 - **Step 3, build:** each needs its row in the embedding table, which is why
   they must be defined before the model is built.
 - **Step 6, generate:** used. Generation stops at EOS or end-of-turn, and the
@@ -498,7 +502,7 @@ llm/
 
 | directory | flow steps | status |
 |---|---|---|
-| `tokenizer/` | LLM 1 tokenize, 2 encode; decode for 6 | steps 1 and 2 done (`mini_bpe.py`); special tokens to do |
+| `tokenizer/` | LLM 1 tokenize, 2 encode; decode for 6 | steps 1 and 2 done (`mini_bpe.py`), with EOS; turn markers to do |
 | `word2vec/` | word2vec 1 train, 2 explore | done |
 | `attention/` | none: a learning step before `transformer/` | not started |
 | `transformer/` | LLM 3 build, 4 train, 5 finetune, 6 generate | not started |
@@ -669,8 +673,8 @@ text8, matching gensim (a widely used Python library with its own word2vec) at
 ## Order of work
 
 1. ~~Finish word2vec.~~ Done.
-2. Tokenizer: ~~stage 2 (`--encode` writing `corpus.ids`)~~ done. Next: EOS
-   between documents; turn markers when post-training needs them.
+2. Tokenizer: ~~stage 2 (`--encode` writing `corpus.ids`)~~ and ~~EOS after
+   each document~~ done. Turn markers when post-training needs them.
 3. `attention/`: self-attention alone, on toy inputs.
 4. `transformer/`: build, then train, then generate, then finetune.
 5. Throughout: add each step's Makefile target as the step is built

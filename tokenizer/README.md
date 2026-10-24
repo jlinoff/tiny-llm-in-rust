@@ -1,6 +1,6 @@
 # mini_bpe
 
-A minimal byte-level BPE (byte-pair encoding) tokenizer in about 650 lines of
+A minimal byte-level BPE (byte-pair encoding) tokenizer in about 720 lines of
 plain Python, written to make one question concrete: **where does an LLM's list
 of tokens come from?**
 
@@ -26,15 +26,15 @@ two steps of the LLM flow:
     pattern plus the ordered merges. See
     [Saving and loading the tokenizer](#saving-and-loading-the-tokenizer).
 - **Step 2, encode**
-  - *Inputs:* a text file and the tokenizer
-  - *Output:* the text as token IDs, written with `--encode FILE -o FILE` in a
-    binary `.ids` file. See [Encoding a corpus](#encoding-a-corpus).
+  - *Inputs:* one or more text files (documents) and the tokenizer
+  - *Output:* the text as token IDs, each document followed by EOS, written
+    with `--encode FILE ... -o FILE` in a binary `.ids` file. See [Encoding a corpus](#encoding-a-corpus).
 
 A model sizes its embedding table from the tokenizer's vocabulary size, V (one
 row per token), and trains on the token IDs, which select those rows.
 
-It is for understanding, not production use. Training is slow, it has no special
-tokens, and its regex approximates GPT-style pre-tokenization, so its splits
+It is for understanding, not production use. Training is slow, its only special
+token is EOS, and its regex approximates GPT-style pre-tokenization, so its splits
 won't exactly match any real model's.
 
 ## Requirements
@@ -77,8 +77,8 @@ Options:
 - `--save FILE`: after training, write the tokenizer to FILE
 - `--load FILE`: load a tokenizer saved with `--save` instead of training. It
   can't be combined with corpus files, `-n`, `--dedup`, or `--save`.
-- `--encode TEXTFILE`: after training or loading, encode TEXTFILE into token
-  IDs; requires `-o`
+- `--encode TEXTFILE ...`: after training or loading, encode one or more text
+  files into token IDs, each file a document followed by EOS; requires `-o`
 - `-o FILE`, `--output FILE`: where `--encode` writes the token IDs
 - `-t STRING`, `--text STRING`: after training or loading, tokenize STRING;
   may be repeated
@@ -102,6 +102,7 @@ Examples:
 ./mini_bpe.py sample.txt -q --save tok.bpe     # train and save the tokenizer
 ./mini_bpe.py --load tok.bpe -f tests.txt      # reuse it later, no training
 ./mini_bpe.py --load tok.bpe --encode corpus.txt -o corpus.ids   # encode a corpus
+./mini_bpe.py --load tok.bpe --encode a.txt b.txt -o ab.ids      # two documents
 ```
 
 ## Reading the output
@@ -153,34 +154,39 @@ Every displayed form maps back to exactly one byte sequence.
 `--load FILE` reads it back so you can tokenize without retraining. Loading
 gives exactly the same tokens and IDs as the original training run.
 
-A trained tokenizer is fully defined by two things, and the file holds both:
+A trained tokenizer is fully defined by three things, and the file holds all
+of them:
 
 1. **The pre-tokenizer pattern.** The merges only reproduce the same tokens if
    text is split into the same chunks first.
 2. **The ordered merge list.** Order matters: encoding applies the merges in
    the order they were learned.
+3. **The special tokens** (see [Special tokens](#special-tokens)).
 
 The vocabulary itself isn't stored, because it can be rebuilt: IDs 0–255 are
-the raw bytes, and the merge on data line *k* (counting from 0) creates token ID
-256 + *k*. Example (`./mini_bpe.py sample.txt news.txt -q --save tok.bpe`):
+the raw bytes, the merge on merge line *k* (counting from 0) creates token ID
+256 + *k*, and the special tokens take the IDs after the merges, in order.
+Example (`./mini_bpe.py sample.txt news.txt -q --save tok.bpe`):
 
 ```
 # mini_bpe tokenizer v1
-# vocab_size: 364  (256 bytes + 108 merges)
+# vocab_size: 365  (256 bytes + 108 merges + 1 special)
 # trained on: sample.txt  sha256 8e5a595442e28fa0e4ee1a7d…
 # trained on: news.txt  sha256 cf7a91850aa826969c1fb760…
-# Data lines: one merge per line, '<left_id> <right_id>'.
-# The merge on data line k (from 0) creates token id 256 + k.
+# Merge lines: '<left_id> <right_id>'; the merge on merge line k (from 0)
+# creates token id 256 + k. Special lines: 'special <name>', IDs after the merges.
 pattern '(?:[sdmt]|ll|ve|re)| ?[^\W\d_]+| ?\d+| ?(?:[^\s\w]|_)+|\s+(?!\S)|\s+
 32 116  # 256: [␣] + [t] -> [␣t]
 104 101  # 257: [h] + [e] -> [he]
 …
+special <|endoftext|>  # 364
 ```
 
-Lines starting with `#` and text after `#` on a merge line are comments for
+Lines starting with `#` and text after `#` on a data line are comments for
 human readers: the vocabulary size, the training documents with their
-checksums (provenance), and each merge in readable form. Only the `pattern`
-line and the pairs of IDs are used when loading. If the saved pattern differs
+checksums (provenance), and each merge or special token's ID in readable form.
+Only the `pattern` line, the pairs of IDs and the `special` lines are used when
+loading. If the saved pattern differs
 from the script's built-in one, the file's pattern is used.
 
 **Connection to the next phase.** The `vocab_size` line is V, the number the
@@ -191,24 +197,52 @@ because the two are locked together: token ID 300 means `west` only under this
 tokenizer. Train a different tokenizer and every row of the embedding table
 would point at the wrong token.
 
+## Special tokens
+
+A special token is a token ID reserved by hand for structure, not text. The
+tokenizer currently has one, **EOS** ("end of sequence"), named
+`<|endoftext|>` as in GPT-2. Training always reserves it, with the first ID
+after the merges, so V = 256 + merges + 1.
+
+EOS marks the end of each document. In training it keeps unrelated documents
+apart, so the model doesn't learn to continue a recipe with a news article;
+in generation, the model *predicting* EOS is how it signals that it's
+finished.
+
+**Text never becomes a special token.** If a document contains the
+characters `<|endoftext|>`, they're encoded as ordinary bytes; only the encoder
+itself inserts the EOS ID, at document boundaries. Otherwise any text could
+fake a document boundary, a tokenizer-level form of injection.
+
+The file format holds a list of special tokens, so the conversation markers
+needed for fine-tuning (see `../PLAN.md`) can be added later. A tokenizer saved
+before EOS existed has no `special` line: it still works for `-t` and `-f`,
+but `--encode` refuses it, so retrain it.
+
 ## Encoding a corpus
 
-`--encode TEXTFILE -o FILE` turns a text file into token IDs and writes them to
-a binary file, conventionally named `.ids`. This is step 2 of the LLM flow: the
-model trains on these integers and never sees the text. With the tokenizer
-from the example above (trained on `sample.txt` and `news.txt`):
+`--encode TEXTFILE ... -o FILE` turns one or more text files into token IDs and
+writes them to a binary file, conventionally named `.ids`. This is step 2 of
+the LLM flow: the model trains on these integers and never sees the text.
+
+Each file is one document, and each document's tokens are followed by EOS,
+including the last one's, so the model also learns how a document ends. With
+the tokenizer from the example above (trained on `sample.txt` and `news.txt`):
 
 ```
-./mini_bpe.py --load tok.bpe --encode sample.txt -o sample.ids
+./mini_bpe.py --load tok.bpe --encode sample.txt news.txt -o docs.ids
 ```
 ```
-=== Encode: sample.txt -> sample.ids ===
-  682 bytes of text -> 305 tokens (2.24 bytes/token); lossless round-trip: True
-  wrote 64-byte header + 305 IDs x 2 bytes; V = 364; tokenizer fingerprint e72abeff2f40696c…
+=== Encode: sample.txt news.txt -> docs.ids ===
+  sample.txt                        682 bytes ->         305 tokens + EOS
+  news.txt                          137 bytes ->          58 tokens + EOS
+  2 document(s), 819 bytes of text -> 365 IDs including 2 EOS (ID 364); 2.26 bytes/token; lossless round-trip: True
+  wrote 64-byte header + 365 IDs x 2 bytes; V = 365; tokenizer fingerprint 3e9260d88f88bc69…
 ```
 
-After encoding, the IDs are decoded again and compared with the input; if they
-differ the run stops with an error and writes nothing.
+Each document's IDs are decoded again and compared with its file; if any
+differ, the run stops with an error and writes nothing. Because text never
+produces the EOS ID, splitting the IDs at EOS recovers the documents exactly.
 
 **The `.ids` format.** A 64-byte header, then the IDs. All integers are
 unsigned and little-endian:
@@ -226,9 +260,10 @@ offset  size  field
 ```
 
 **The tokenizer fingerprint** is a SHA-256 hash of what defines the tokenizer:
-its pattern, a newline, and then one `left right` line per merge, in order.
-Comments and provenance in the `.bpe` file are left out, so two tokenizer
-files with the same pattern and merges have the same fingerprint. The
+its pattern, a newline, one `left right` line per merge in order, then one
+`special NAME` line per special token. Comments and provenance in the `.bpe`
+file are left out, so two tokenizer files with the same pattern, merges and
+special tokens have the same fingerprint. The
 fingerprint lets a later stage check that an `.ids` file was made with the
 tokenizer it's about to use, because IDs are meaningless under any other.
 
