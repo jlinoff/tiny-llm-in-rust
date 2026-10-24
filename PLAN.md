@@ -1,21 +1,106 @@
-# Plan: building the pieces of an LLM
+# Plan: building the pieces of an LLM (large language model)
 
-The goal is understanding, not performance: each stage is small enough to read,
-and each runs on its own so its output can be inspected. A driver script
-(working name `simple`) chains the LLM stages into a complete flow.
+This project builds a small LLM piece by piece. The goal
+is understanding, not performance: each stage is small enough to read, and each
+runs on its own so its output can be inspected. A driver script (working name
+`simple`) chains the LLM stages into a complete flow.
+
+Technical terms are defined in [Terms](#terms), just below; tool and product
+names are explained where they first appear.
+
+## Terms
+
+Grouped so that each definition uses only terms defined above it.
+
+**Text and tokens**
+
+- **corpus**: the body of text a model is trained on.
+- **token**: a unit of text the model works with: a word, part of a word, a
+  punctuation mark, or a single byte. Each token has a **token ID**, an integer.
+- **tokenizer**: the component that converts text to token IDs (**encoding**)
+  and token IDs back to text (**decoding**).
+- **BPE (byte-pair encoding)**: the algorithm that learns a tokenizer. It starts
+  from the 256 byte values and repeatedly **merges** the most frequent adjacent
+  pair into a new token. The ordered list of merges is the tokenizer's main
+  content. `mini_bpe.py` implements it, and `.bpe` is our extension for its
+  saved tokenizer.
+- **pre-tokenizer pattern**: the regular expression that first splits text into
+  chunks (words, numbers, runs of punctuation), so that merges never cross a
+  chunk boundary.
+- **special tokens**: tokens added by hand rather than learned, to mark
+  structure, such as the start of a user's turn in a conversation.
+- **vocabulary**, **V**: the set of all tokens, and its size.
+
+**The model**
+
+- **vector**: a list of numbers; here, the numbers that represent a token.
+- **d (model width)**: the length of every token's vector (more in
+  [Configuration](#configuration)).
+- **layer**: one stage of computation that the vectors pass through.
+- **embedding table**: a V × d table with one row (one vector) per token. It is
+  the model's first layer: a token ID selects its row.
+- **weights**, **parameters**: the numbers inside the model that are adjusted
+  as it learns. **Hyperparameters** are the settings we choose (more in
+  [Configuration](#configuration)).
+- **self-attention**: a layer in which each token's vector takes in
+  information from the tokens before it, weighting each by a relevance score
+  (a dot product of their vectors). An **attention head** is one independent
+  copy of this computation; each attention layer runs several side by side.
+- **feed-forward layer**: a layer that transforms each token's vector on its
+  own, the same way at every position.
+- **transformer block**: one self-attention layer followed by one feed-forward
+  layer. A **transformer** is a model built from a stack of these blocks.
+- **output layer** (or **unembedding**): the final layer, which turns a vector
+  into V scores, one for each possible next token.
+- **context length**: the most tokens the model can take in at once.
+- **GPT (generative pre-trained transformer)**: a transformer trained to
+  predict the next token. "GPT-style" means this design, which most LLMs use.
+
+**Training**
+
+- **training**: repeatedly make a prediction, measure the error, and adjust the
+  weights slightly to reduce it (gradient descent).
+- **learning rate**: how large each adjustment is.
+- **step**, **batch size**: one adjustment; the number of examples used to
+  compute it.
+- **epoch**: one full pass over the training data.
+- **seed**: the starting value of a pseudo-random number generator; the same
+  seed reproduces the same "random" numbers.
+- **pretraining**: training on a large corpus to predict the next token.
+  **Post-training**: further training that turns the result into an assistant
+  (see [Post-training](#post-training)). **Fine-tuning**: continuing to train
+  an already trained model on new data.
+- **temperature**: a text-generation setting. Low values pick the most likely
+  next token; higher values sample more varied ones.
+- **checkpoint**: a saved file of a model's weights (more in open decision 3).
+
+**word2vec**
+
+- **word2vec**: a 2013 method that learns one vector per word, the historical
+  precursor covered by this project's second flow.
+- **skip-gram**, **CBOW (continuous bag of words)**: word2vec's two training
+  tasks. Skip-gram predicts each nearby word from the center word; CBOW
+  predicts the center word from its neighbors.
+- **negative sampling**: word2vec's shortcut. Instead of scoring all V words
+  for each prediction, it scores the correct word against a few randomly drawn
+  wrong ones.
+- **Hogwild**: training with many threads that update the shared weights
+  without locks, accepting the rare collision.
 
 ## Why Rust
 
 Training is slow even for small models, because it's billions of tiny
-arithmetic updates. word2vec on text8 (17 million words) makes about 375
+arithmetic updates. word2vec on text8 (a standard benchmark corpus: 17 million
+words of Wikipedia text) makes about 375
 million predictions over 5 epochs, each updating 7 vectors of 100 numbers:
 over 2.5 billion vector updates per run. In plain Python, the interpreter's
 overhead on every one of those operations dominates, likely making it 50–100×
-slower (an estimate, not a measurement). NumPy only helps if the updates are
+slower (an estimate, not a measurement). NumPy (Python's numerical array
+library) only helps if the updates are
 batched into large array operations, which hides the algorithm behind array
 manipulation. In Rust, the inner loops are written as plain loops that read
 like the math and run at native speed: the full text8 run takes about 8½
-minutes on 2 CPU cores, and less on a machine with more cores.
+minutes on 2 processor cores, and less on a machine with more cores.
 
 The tokenizer stays in Python because it's fast enough at this scale. It can
 move to Rust later if there's a compelling reason.
@@ -60,14 +145,92 @@ in Python and the later stages are in Rust.
 
 #### What each stage does
 
-| stage | input | output | notes |
-|---|---|---|---|
-| **tokenize** | training text, often a representative sample of the corpus | `tok.bpe`: pre-tokenizer pattern, ordered merges, special tokens, V | Done: `tokenizer/mini_bpe.py --save`, except special tokens (to do; needed by step 5). Trained once, then frozen. |
-| **encode** | text + `tok.bpe` | token IDs | Turns text into the integers the model consumes. Real pipelines pre-tokenize the whole corpus into a binary ID file once, so training never touches text. |
-| **build** | V (from `tok.bpe`) + config `[model]`: d, layers, heads, context length, seed | `model-init.ckpt` | Creates the **whole** model: the V × d embedding table, every attention and feed-forward layer, the output layer, all randomly initialized. Writes the `[model]` settings into the checkpoint. One seed gives one starting model, so experiments are reproducible. (Precedent: EleutherAI's Pythia models publish their step-0, untrained checkpoints.) |
-| **train** | `model-init.ckpt` + `corpus.ids` + config `[training]`: learning rate, steps, batch size | `model.ckpt` | Repeatedly: predict the next token ID, compare with the real one, adjust every weight, including the embedding rows. Reads the model's shape from the checkpoint, never from the config. The tokenizer is not involved; it already did its work in stage 2. |
-| **finetune** | `model.ckpt` + `chat.ids` + config `[finetune]` | `chat.ckpt` | The same training loop as stage 4, continued from the pretrained model on example conversations, usually with a lower learning rate. |
-| **generate** | `model.ckpt` or `chat.ckpt` + `tok.bpe` + a prompt + config `[generate]`: temperature, length | text | Encode the prompt, predict a token ID, append it, repeat; decode the IDs back to text. |
+##### Step 1: tokenize
+
+- **Input:**
+  - training text, often a representative sample of the corpus
+- **Output:**
+  - `tok.bpe`: the pre-tokenizer pattern, the ordered merges, the special
+    tokens, and V
+- **Status:** done (`tokenizer/mini_bpe.py --save`), except special tokens,
+  which step 5 needs
+
+**What it does:** learns the tokenizer from the training text. It runs once;
+the result is then frozen and used unchanged by every later step that needs
+it.
+
+##### Step 2: encode
+
+- **Inputs:**
+  - text: `corpus.txt` for step 4, `chat.txt` for step 5
+  - `tok.bpe`
+- **Output:**
+  - `corpus.ids` (or `chat.ids`): the text as token IDs
+- **Status:** to do
+
+**What it does:** turns text into the integers the model consumes. Real
+pipelines pre-tokenize the whole corpus into a binary ID file once, so training
+never touches text.
+
+##### Step 3: build
+
+- **Inputs:**
+  - V, from `tok.bpe`
+  - config `[model]`: d, layers, heads, context length, d_ff, seed
+- **Output:**
+  - `model-init.ckpt`: all the model's weights, random, plus the `[model]`
+    settings
+- **Status:** not started
+
+**What it does:** creates the **whole** model: the V × d embedding table,
+every attention and feed-forward layer, and the output layer, all randomly
+initialized. One seed gives one starting model, so experiments are
+reproducible. (Precedent: EleutherAI, a nonprofit AI research group, publishes
+the step-0, untrained checkpoints of its Pythia models.)
+
+##### Step 4: train
+
+- **Inputs:**
+  - `model-init.ckpt`
+  - `corpus.ids`
+  - config `[training]`: learning rate, steps, batch size
+- **Output:**
+  - `model.ckpt`: the same weights, pretrained
+- **Status:** not started
+
+**What it does:** repeatedly predicts the next token ID, compares the
+prediction with the real one, and adjusts every weight slightly, including
+the embedding rows. It reads the model's shape from the checkpoint, never from
+the config. The tokenizer is not involved; it already did its work in step 2.
+
+##### Step 5: finetune
+
+- **Inputs:**
+  - `model.ckpt`
+  - `chat.ids`
+  - config `[finetune]`: learning rate, steps
+- **Output:**
+  - `chat.ckpt`: the same weights, tuned on conversations
+- **Status:** not started
+
+**What it does:** runs the same training loop as step 4, continuing from the
+pretrained model on example conversations, usually with a lower learning rate.
+This is post-training (see [Post-training](#post-training)).
+
+##### Step 6: generate
+
+- **Inputs:**
+  - `chat.ckpt` (or `model.ckpt`)
+  - `tok.bpe`
+  - a prompt
+  - config `[generate]`: temperature, maximum length
+- **Output:**
+  - text
+- **Status:** not started
+
+**What it does:** encodes the prompt, predicts a token ID, appends it, and
+repeats; then decodes the IDs back to text. With `model.ckpt` it continues the
+prompt; with `chat.ckpt` it answers as the assistant.
 
 #### What crosses each boundary
 
@@ -105,21 +268,31 @@ Same key as above. "Settings" are the vector size d, window size, number of
 epochs, and so on. Step 2 prints its results rather than writing a file.
 
 word2vec is a single program (`mini_w2v`), as it was designed in 2013, so the
-LLM flow's first four stages all happen inside its step 1 and nothing is saved
-between them:
+LLM flow's first four steps all happen inside its step 1 and nothing is saved
+between them. Each LLM step and its word2vec equivalent:
 
-| LLM flow stage | word2vec equivalent (inside step 1) |
-|---|---|
-| tokenize | Count whole words; keep those occurring at least `--min-count` times. That count is V. Nothing is saved; V is printed. |
-| encode | The corpus is held in memory as word IDs. |
-| build | Create two V × d tables: input (the word vectors), random; output (context vectors), zero. |
-| train | Predict nearby words instead of the next token: skip-gram predicts each context word from the center word, CBOW the center word from its context. |
-| generate | None: word2vec can't produce text. Its product is the trained input table itself, written to `vectors.txt`. |
+- **tokenize:** count whole words; keep those occurring at least
+  `--min-count` times. That count is V. Nothing is saved; V is printed.
+
+- **encode:** the corpus is held in memory as word IDs.
+
+- **build:** create two V × d tables: input (the word vectors), random; output
+  (context vectors), zero.
+
+- **train:** predict nearby words instead of the next token. Skip-gram predicts
+  each context word from the center word; CBOW predicts the center word from
+  its context.
+
+- **finetune:** none.
+
+- **generate:** none. word2vec can't produce text. Its product is the trained
+  input table itself, written to `vectors.txt`.
 
 ## Configuration
 
 One file, `config.toml`, holds the settings for every LLM stage, with one
-section per stage. Each stage reads only its own section:
+section per stage. (TOML, "Tom's Obvious, Minimal Language", is a simple
+format for settings files.) Each stage reads only its own section:
 
 ```
 [model]        # read by build:    d, layers, heads, context length, d_ff, seed
@@ -154,8 +327,9 @@ same in every stage. Rather than every stage rereading the config (someone
 could edit it between build and train), **build copies `[model]` into the
 checkpoint**, and train, finetune and generate read the shapes from the
 checkpoint only. After build, there is exactly one source of truth, so a
-mismatch can't happen. Hugging Face does the same: every model ships a
-`config.json` beside its weights.
+mismatch can't happen. Hugging Face, the main public hub for sharing models,
+does the same: every model ships a `config.json` beside its weights. (JSON,
+JavaScript Object Notation, is a common text format for structured data.)
 
 **V is not in the config.** It comes from `tok.bpe`. Writing it in a second
 place would only create another way for the two to disagree.
@@ -173,9 +347,13 @@ stages:
    same training loop with different data and a lower learning rate. The model
    learns the format of a conversation: whose turn it is, and when a response
    ends.
-2. **Preference tuning** (RLHF, or the simpler DPO): train the model toward
-   responses that people, or a reward model trained on people's choices,
-   preferred over alternatives. Out of scope for a toy model, but it's the
+2. **Preference tuning**: train the model toward responses that people
+   preferred over alternatives. The two main methods are RLHF
+   (reinforcement learning from human feedback), which first trains a
+   **reward model** (a second model that predicts which response people would
+   prefer) and then trains the LLM to score well on it, and the simpler DPO
+   (direct preference optimization), which learns from the preference pairs
+   directly. Out of scope for a toy model, but it's the
    step that shapes a production assistant's behavior most.
 
 **Requirement on the tokenizer: special tokens.** Conversations need markers
@@ -276,8 +454,10 @@ Status: Rust trainer (skip-gram and CBOW, negative sampling, Hogwild threads)
 written and trained on text8. Sensible neighbors emerge (king → prince, queen;
 three → four, five). Before it's delivered: investigate why the reported loss
 rises slightly in later epochs, finish the Python exploration scripts (analogy
-with and without excluding the input words; Google analogy test set), compare
-against gensim, and write the README.
+with and without excluding the input words; Google's analogy test set of about
+19,500 questions such as Athens : Greece :: Baghdad : ?), compare against
+gensim (a widely used Python library with its own word2vec), and write the
+README.
 
 ## Open decisions
 
@@ -287,17 +467,20 @@ against gensim, and write the README.
      only ever sees IDs. Generate then needs decode in Rust, which is
      easy: decoding is concatenating each token's bytes.
    - (b) Port `encode` to Rust as well. Small, but note that the pattern's
-     lookahead `\s+(?!\S)` isn't supported by Rust's `regex` crate; it would
-     need `fancy-regex`, or the pattern would need rewriting.
+     lookahead `\s+(?!\S)` isn't supported by `regex`, the standard Rust
+     library ("crate") for regular expressions; it would need the
+     `fancy-regex` crate, which supports lookahead, or the pattern would need
+     rewriting.
 
    Leaning toward (a): it matches how real pipelines work and keeps a single
    implementation of encoding.
 2. **The `corpus.ids` format.** A simple binary file of little-endian
-   integers (u16 is enough while V < 65,536), with a small header, is what
-   nanoGPT does.
+   integers (16-bit is enough while V < 65,536), with a small header, is what
+   nanoGPT (Andrej Karpathy's minimal GPT training code) does.
 3. **The checkpoint format.** A custom binary format with a header, or
-   safetensors (simple, well-specified, readable from both Rust and Python,
-   which allows inspecting weights in Python).
+   safetensors (Hugging Face's weights format, described below: simple,
+   well-specified, readable from both Rust and Python, which allows inspecting
+   weights in Python).
 
    *A "checkpoint" is a saved snapshot of a model's weights, taken during
    training or at the end. `.ckpt` in the flow above is a placeholder meaning
@@ -305,17 +488,19 @@ against gensim, and write the README.
    should use its extension (for safetensors: `model-init.safetensors`,
    `model.safetensors`).*
 
-   `.ckpt` is a convention, not a standard. TensorFlow historically saved
-   `model.ckpt-…` files, PyTorch Lightning uses `.ckpt`, and early Stable
-   Diffusion models were distributed as `.ckpt`. In each case the extension
+   `.ckpt` is a convention, not a standard. TensorFlow (Google's deep-learning
+   framework) historically saved `model.ckpt-…` files; PyTorch Lightning (a
+   training library built on PyTorch, Meta's deep-learning framework) uses
+   `.ckpt`; and early versions of Stable Diffusion (an image-generation model)
+   were distributed as `.ckpt`. In each case the extension
    says nothing about the format inside. Common extensions for model weights:
 
    | extension | what it is |
    |---|---|
    | `.safetensors` | Hugging Face's format: a JSON header giving each tensor's name, type, and shape, followed by the raw numbers. Now the default on Hugging Face. |
-   | `.pt` / `.pth` | PyTorch's native save format, built on Python's pickle |
+   | `.pt` / `.pth` | PyTorch's native save format, built on pickle (Python's built-in format for saving arbitrary objects) |
    | `.bin` | older Hugging Face files (`pytorch_model.bin`), also pickle |
-   | `.gguf` | llama.cpp's format for running models locally |
+   | `.gguf` | the format of llama.cpp, a popular program for running models on your own computer |
    | `.ckpt` | TensorFlow and Lightning checkpoints, old Stable Diffusion files |
 
    **Security note:** pickle-based files (`.pt`, `.bin`, old `.ckpt`) can
@@ -328,8 +513,9 @@ against gensim, and write the README.
    [Configuration](#configuration)); the syntax isn't. TOML is easy to read and
    edit by hand and supports comments; JSON is what Hugging Face uses for the
    copy stored with a model.
-5. **The driver.** A shell script or a small Makefile. A Makefile would only
-   re-run the stages whose inputs changed.
+5. **The driver.** A shell script or a small Makefile (a build script run by
+   the `make` tool). A Makefile would only re-run the stages whose inputs
+   changed.
 6. **The training data.** A pretraining corpus small enough to train on in
    minutes, but large enough to learn something: text8 (17 million words) is
    one candidate. For fine-tuning, a few hundred to a few thousand short
@@ -344,3 +530,190 @@ against gensim, and write the README.
 3. `attention/`: self-attention alone, on toy inputs.
 4. `transformer/`: build, then train, then generate, then finetune.
 5. The `simple` driver, and fold this plan into `llm/README.md`.
+
+## Bibliography
+
+Grouped by stage of the plan. Each entry says why it matters here. ★ marks a
+suggested first-reading path, roughly one paper per stage. Most papers are free
+on arXiv, the open preprint server used throughout machine learning.
+
+Venue abbreviations: NeurIPS (Conference on Neural Information Processing
+Systems), ICLR (International Conference on Learning Representations), ICML
+(International Conference on Machine Learning), JMLR (Journal of Machine
+Learning Research). ACL is the Association for Computational Linguistics; its
+conferences ACL, NAACL (North American chapter), EACL (European chapter) and
+EMNLP (Empirical Methods in Natural Language Processing), and its journals TACL
+(Transactions of the ACL) and Computational Linguistics, are the main venues
+for language research.
+
+### Tokenization (`tokenizer/`)
+
+- Gage, P. (1994). "A New Algorithm for Data Compression." *C Users Journal*
+  12(2). The original byte-pair encoding, invented for compression, not
+  language.
+- ★ Sennrich, R., Haddow, B., & Birch, A. (2016). "Neural Machine Translation
+  of Rare Words with Subword Units." ACL.
+  [arXiv:1508.07909](https://arxiv.org/abs/1508.07909). Brought BPE to neural
+  language models; the algorithm `mini_bpe.py` implements.
+- Radford, A., Wu, J., Child, R., Luan, D., Amodei, D., & Sutskever, I. (2019).
+  "Language Models are Unsupervised Multitask Learners." OpenAI technical
+  report (GPT-2). Introduced byte-level BPE and the pre-tokenizer regex that
+  `mini_bpe.py`'s pattern approximates.
+- Kudo, T., & Richardson, J. (2018). "SentencePiece: A simple and language
+  independent subword tokenizer and detokenizer for Neural Text Processing."
+  EMNLP. [arXiv:1808.06226](https://arxiv.org/abs/1808.06226). The `▁`
+  space-marker convention and the main alternative toolkit.
+- Kudo, T. (2018). "Subword Regularization: Improving Neural Network
+  Translation Models with Multiple Subword Candidates." ACL.
+  [arXiv:1804.10959](https://arxiv.org/abs/1804.10959). The unigram tokenizer,
+  which prunes a large vocabulary down instead of merging up.
+- Petrov, A., La Malfa, E., Torr, P., & Bibi, A. (2023). "Language Model
+  Tokenizers Introduce Unfairness Between Languages." NeurIPS.
+  [arXiv:2305.15425](https://arxiv.org/abs/2305.15425). The "token tax": the
+  same text costs some languages several times more tokens.
+- Land, S., & Bartolo, M. (2024). "Fishing for Magikarp: Automatically
+  Detecting Under-trained Tokens in Large Language Models." EMNLP.
+  [arXiv:2405.05417](https://arxiv.org/abs/2405.05417). Glitch tokens such as
+  " SolidGoldMagikarp": what happens when the tokenizer's sample and the
+  training corpus differ.
+- Xue, L., et al. (2022). "ByT5: Towards a Token-Free Future with Pre-trained
+  Byte-to-Byte Models." TACL.
+  [arXiv:2105.13626](https://arxiv.org/abs/2105.13626). The alternative: skip
+  learned tokenization and feed the model raw bytes.
+
+### Word vectors (`word2vec/`)
+
+- Harris, Z. S. (1954). "Distributional Structure." *Word* 10(2–3), and Firth,
+  J. R. (1957). "A Synopsis of Linguistic Theory, 1930–1955." The
+  distributional hypothesis behind all of this: "You shall know a word by the
+  company it keeps" (Firth).
+- Bengio, Y., Ducharme, R., Vincent, P., & Jauvin, C. (2003). "A Neural
+  Probabilistic Language Model." JMLR 3. The first neural language model with
+  a learned embedding table, ten years before word2vec.
+- Mikolov, T., Chen, K., Corrado, G., & Dean, J. (2013). "Efficient Estimation
+  of Word Representations in Vector Space."
+  [arXiv:1301.3781](https://arxiv.org/abs/1301.3781). The first word2vec
+  paper: skip-gram and CBOW, and the analogy test set.
+- ★ Mikolov, T., Sutskever, I., Chen, K., Corrado, G., & Dean, J. (2013).
+  "Distributed Representations of Words and Phrases and their
+  Compositionality." NeurIPS.
+  [arXiv:1310.4546](https://arxiv.org/abs/1310.4546). Negative sampling and
+  subsampling of frequent words, as implemented in `mini_w2v`.
+- Mikolov, T., Yih, W., & Zweig, G. (2013). "Linguistic Regularities in
+  Continuous Space Word Representations." NAACL. The source of
+  king − man + woman ≈ queen.
+- ★ Goldberg, Y., & Levy, O. (2014). "word2vec Explained: Deriving Mikolov et
+  al.'s Negative-Sampling Word-Embedding Method."
+  [arXiv:1402.3722](https://arxiv.org/abs/1402.3722). A short, clear
+  derivation of the objective the original papers leave terse.
+- Levy, O., & Goldberg, Y. (2014). "Neural Word Embedding as Implicit Matrix
+  Factorization." NeurIPS. Shows skip-gram with negative sampling is
+  implicitly factorizing a matrix of word co-occurrence statistics (shifted
+  pointwise mutual information). Likely to appeal to a physicist.
+- Pennington, J., Socher, R., & Manning, C. D. (2014). "GloVe: Global Vectors
+  for Word Representation." EMNLP. The main alternative, built directly from
+  co-occurrence counts.
+- Niu, F., Recht, B., Ré, C., & Wright, S. J. (2011). "Hogwild!: A Lock-Free
+  Approach to Parallelizing Stochastic Gradient Descent." NeurIPS.
+  [arXiv:1106.5730](https://arxiv.org/abs/1106.5730). Why lock-free parallel
+  updates work, as used in `mini_w2v`.
+- Nissim, M., van Noord, R., & van der Goot, R. (2020). "Fair Is Better than
+  Sensational: Man Is to Doctor as Woman Is to Doctor." *Computational
+  Linguistics* 46(2). [arXiv:1905.09866](https://arxiv.org/abs/1905.09866).
+  The caveat on analogy arithmetic: the standard evaluation excludes the input
+  words.
+
+### Attention and the transformer (`attention/`, `transformer/`)
+
+- Bahdanau, D., Cho, K., & Bengio, Y. (2015). "Neural Machine Translation by
+  Jointly Learning to Align and Translate." ICLR.
+  [arXiv:1409.0473](https://arxiv.org/abs/1409.0473). The origin of attention,
+  added to an older recurrent translation model.
+- ★ Vaswani, A., et al. (2017). "Attention Is All You Need." NeurIPS.
+  [arXiv:1706.03762](https://arxiv.org/abs/1706.03762). The transformer:
+  self-attention, attention heads, feed-forward layers, positional
+  information.
+- Peters, M. E., et al. (2018). "Deep Contextualized Word Representations."
+  NAACL. [arXiv:1802.05365](https://arxiv.org/abs/1802.05365). ELMo: the step
+  from word2vec's static vectors to vectors that depend on context.
+- Radford, A., Narasimhan, K., Salimans, T., & Sutskever, I. (2018).
+  "Improving Language Understanding by Generative Pre-Training." OpenAI
+  technical report (GPT-1). Pretraining a transformer to predict the next
+  token: the design `transformer/` follows.
+- Devlin, J., Chang, M.-W., Lee, K., & Toutanova, K. (2019). "BERT:
+  Pre-training of Deep Bidirectional Transformers for Language Understanding."
+  NAACL. [arXiv:1810.04805](https://arxiv.org/abs/1810.04805). The other
+  branch: predict hidden words from both sides, CBOW's descendant.
+- Brown, T. B., et al. (2020). "Language Models are Few-Shot Learners."
+  NeurIPS. [arXiv:2005.14165](https://arxiv.org/abs/2005.14165). GPT-3: what
+  the same design does at scale.
+- He, K., Zhang, X., Ren, S., & Sun, J. (2016). "Deep Residual Learning for
+  Image Recognition." CVPR (Conference on Computer Vision and Pattern
+  Recognition). [arXiv:1512.03385](https://arxiv.org/abs/1512.03385), and Ba,
+  J. L., Kiros, J. R., & Hinton, G. E. (2016). "Layer Normalization."
+  [arXiv:1607.06450](https://arxiv.org/abs/1607.06450). Two pieces every
+  transformer block uses to make deep stacks trainable.
+- Press, O., & Wolf, L. (2017). "Using the Output Embedding to Improve
+  Language Models." EACL. [arXiv:1608.05859](https://arxiv.org/abs/1608.05859).
+  Weight tying: using the embedding table as the output layer too.
+- Kingma, D. P., & Ba, J. (2015). "Adam: A Method for Stochastic
+  Optimization." ICLR. [arXiv:1412.6980](https://arxiv.org/abs/1412.6980). The
+  optimizer that nearly every transformer is trained with.
+- Holtzman, A., Buys, J., Du, L., Forbes, M., & Choi, Y. (2020). "The Curious
+  Case of Neural Text Degeneration." ICLR.
+  [arXiv:1904.09751](https://arxiv.org/abs/1904.09751). How to choose the next
+  token in `generate`: temperature, top-k, and nucleus sampling.
+- Geva, M., Schuster, R., Berant, J., & Levy, O. (2021). "Transformer
+  Feed-Forward Layers Are Key-Value Memories." EMNLP.
+  [arXiv:2012.14913](https://arxiv.org/abs/2012.14913). What the feed-forward
+  layers appear to be doing.
+- Elhage, N., et al. (2021). "A Mathematical Framework for Transformer
+  Circuits." Anthropic, transformer-circuits.pub. Reading a transformer as
+  linear algebra; demanding but rewarding.
+
+### Training data and small models
+
+- Eldan, R., & Li, Y. (2023). "TinyStories: How Small Can Language Models Be
+  and Still Speak Coherent English?"
+  [arXiv:2305.07759](https://arxiv.org/abs/2305.07759). Models of a few million
+  parameters, trained on simple stories, write coherent text. A strong
+  candidate corpus for open decision 6.
+- Biderman, S., et al. (2023). "Pythia: A Suite for Analyzing Large Language
+  Models Across Training and Scaling." ICML.
+  [arXiv:2304.01373](https://arxiv.org/abs/2304.01373). The models whose
+  step-0 checkpoints are the precedent for the build stage.
+- Kaplan, J., et al. (2020). "Scaling Laws for Neural Language Models."
+  [arXiv:2001.08361](https://arxiv.org/abs/2001.08361), and Hoffmann, J., et
+  al. (2022). "Training Compute-Optimal Large Language Models."
+  [arXiv:2203.15556](https://arxiv.org/abs/2203.15556). How model size, data
+  and compute trade off; useful for choosing toy-model sizes.
+
+### Post-training (`transformer finetune`)
+
+- Christiano, P., et al. (2017). "Deep Reinforcement Learning from Human
+  Preferences." NeurIPS. [arXiv:1706.03741](https://arxiv.org/abs/1706.03741).
+  The origin of RLHF.
+- ★ Ouyang, L., et al. (2022). "Training Language Models to Follow
+  Instructions with Human Feedback." NeurIPS.
+  [arXiv:2203.02155](https://arxiv.org/abs/2203.02155). InstructGPT: the full
+  post-training recipe, supervised fine-tuning then RLHF.
+- Bai, Y., et al. (2022). "Training a Helpful and Harmless Assistant with
+  Reinforcement Learning from Human Feedback."
+  [arXiv:2204.05862](https://arxiv.org/abs/2204.05862). Anthropic's account of
+  RLHF for an assistant.
+- Rafailov, R., et al. (2023). "Direct Preference Optimization: Your Language
+  Model is Secretly a Reward Model." NeurIPS.
+  [arXiv:2305.18290](https://arxiv.org/abs/2305.18290). DPO: preference tuning
+  without a separate reward model.
+- Zhou, C., et al. (2023). "LIMA: Less Is More for Alignment." NeurIPS.
+  [arXiv:2305.11206](https://arxiv.org/abs/2305.11206). Fine-tuning on only
+  1,000 carefully chosen conversations works well, encouraging for a small
+  `chat.txt`.
+
+### Not papers, but excellent for this project
+
+- Karpathy, A. "Let's build the GPT Tokenizer" (2024) and "Let's build GPT:
+  from scratch, in code, spelled out" (2023), video lectures on YouTube, and
+  his nanoGPT code on GitHub. The closest existing match to this project.
+- Alammar, J. "The Illustrated Transformer" (2018), a blog post. The standard
+  visual introduction to attention.
