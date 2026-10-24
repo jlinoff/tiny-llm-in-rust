@@ -42,3 +42,7 @@ help:  ## This help message.
 		awk -F'##' '{printf("%-18s %s\n",$$1,$$2)}' | \
 		sort -f | \
 		sed -e 's@^@   @'
+	@printf "\n\033[35;1m%s\n" "Variables"
+	@printf "   %-18s  %s\n" "CORPUS" "$(CORPUS)"
+	@printf "   %-18s  %s\n" "MERGES" "$(MERGES)"
+	@printf "   %-18s  %s\n" "OUT" "$(OUT)"
