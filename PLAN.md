@@ -29,7 +29,9 @@ Grouped so that each definition uses only terms defined above it.
   chunks (words, numbers, runs of punctuation), so that merges never cross a
   chunk boundary.
 - **special tokens**: tokens added by hand rather than learned, to mark
-  structure, such as the start of a user's turn in a conversation.
+  structure rather than text, such as the end of a document (**EOS**, "end of
+  sequence") or the start of a user's turn in a conversation (more in
+  [Special tokens](#special-tokens)).
 - **vocabulary**, **V**: the set of all tokens, and its size.
 
 **The model**
@@ -166,12 +168,12 @@ in `transformer/`, with one subcommand per step.
   `-n` is the maximum number of merges, `--save` names the output. Special
   tokens will need one more option, proposed as
   `--special "<|user|>,<|assistant|>,<|end|>"`.
-- **Status:** done (`tokenizer/mini_bpe.py --save`), except special tokens,
-  which step 5 needs
+- **Status:** done (`tokenizer/mini_bpe.py --save`), except special tokens
+  (EOS is needed for multi-document corpora; turn markers for step 5)
 
-**What it does:** learns the tokenizer from the training text. It runs once;
-the result is then frozen and used unchanged by every later step that needs
-it.
+**What it does:** learns the tokenizer from the training text, and reserves
+IDs for the special tokens after the merges. It runs once; the result is then
+frozen and used unchanged by every later step that needs it.
 
 ##### Step 2: encode
 
@@ -197,7 +199,9 @@ never touches text. The `.ids` file has a 64-byte header recording V and a
 fingerprint of the tokenizer (a hash of its pattern and merges), so later steps
 can refuse IDs made by a different tokenizer. After encoding, the IDs are
 decoded and compared with the input. The format is described in
-`tokenizer/README.md`.
+`tokenizer/README.md`. Encoding is also where special tokens enter the data:
+code inserts EOS between documents, and wraps each message of `chat.txt` in
+turn markers (planned; see [Special tokens](#special-tokens)).
 
 ##### Step 3: build
 
@@ -337,6 +341,47 @@ between them. Each LLM step and its word2vec equivalent:
 - **generate:** none. word2vec can't produce text. Its product is the trained
   input table itself, written to `vectors.txt`.
 
+## Special tokens
+
+A special token is a token ID reserved by hand for structure, not text. It
+never comes out of encoding ordinary text. Common kinds:
+
+- **EOS (end of sequence, or end of document).** GPT-2's is `<|endoftext|>`.
+  In training, documents are joined into one stream with EOS between them, so
+  the model learns where one ends and an unrelated one begins. In generation,
+  the model *predicting* EOS is how it signals that it's finished; without
+  it, generation runs until a length limit.
+- **BOS (beginning of sequence).** Some models start every input with one.
+- **PAD (padding).** Filler that makes the sequences in a training batch the
+  same length; the loss ignores it.
+- **Turn markers.** Mark who is speaking in a conversation, such as
+  `<|user|>`, `<|assistant|>`, and an end-of-turn token. The end-of-turn token
+  is what makes a chat model stop after its answer instead of also writing the
+  user's next line.
+
+What makes them special:
+
+1. **Not learned from frequency.** They're appended after the merges, so
+   V = 256 + merges + number of special tokens.
+2. **An ordinary embedding row.** Each gets a row in the embedding table,
+   random at first and trained like any other; the model learns what EOS
+   "means" from where it appears.
+3. **Never produced from text.** If the text contains the literal characters
+   `<|endoftext|>`, the encoder treats them as ordinary bytes. Otherwise any
+   text could fake a document boundary or a change of speaker, a
+   tokenizer-level form of injection. Special IDs are inserted only by code.
+
+Where they appear in the flow:
+
+- **Step 1, tokenize:** defined. The list is saved in `tok.bpe`, each gets a
+  reserved ID, and they count toward V and the fingerprint.
+- **Step 2, encode:** inserted. EOS between documents in `corpus.ids`; turn
+  markers around each message when `chat.txt` is encoded.
+- **Step 3, build:** each needs its row in the embedding table, which is why
+  they must be defined before the model is built.
+- **Step 6, generate:** used. Generation stops at EOS or end-of-turn, and the
+  prompt is wrapped in the same turn markers.
+
 ## Configuration
 
 One file, `config.toml`, holds the settings for every LLM stage, with one
@@ -407,10 +452,7 @@ stages:
 
 **Requirement on the tokenizer: special tokens.** Conversations need markers
 that never occur in ordinary text, such as `<|user|>`, `<|assistant|>` and
-`<|end|>`. Each is a single reserved token ID, added by hand rather than
-learned from frequency. `mini_bpe.py` has none yet. They must be reserved
-before step 3, because each one needs a row in the embedding table; adding
-them after the model is built means growing the table.
+`<|end|>`; see [Special tokens](#special-tokens).
 
 **Expectations.** A toy model trained for minutes will produce text that is
 locally plausible but often meaningless, and fine-tuning it will mostly teach
@@ -627,8 +669,8 @@ text8, matching gensim (a widely used Python library with its own word2vec) at
 ## Order of work
 
 1. ~~Finish word2vec.~~ Done.
-2. Tokenizer: ~~stage 2 (`--encode` writing `corpus.ids`)~~ done; reserve
-   special tokens.
+2. Tokenizer: ~~stage 2 (`--encode` writing `corpus.ids`)~~ done. Next: EOS
+   between documents; turn markers when post-training needs them.
 3. `attention/`: self-attention alone, on toy inputs.
 4. `transformer/`: build, then train, then generate, then finetune.
 5. Throughout: add each step's Makefile target as the step is built
