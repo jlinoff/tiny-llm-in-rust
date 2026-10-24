@@ -2,8 +2,9 @@
 
 This project builds a small LLM piece by piece. The goal
 is understanding, not performance: each stage is small enough to read, and each
-runs on its own so its output can be inspected. A driver script (working name
-`simple`) chains the LLM stages into a complete flow.
+runs on its own so its output can be inspected. A Makefile (a build script run
+by the `make` tool) chains the LLM stages into a complete flow, with one target
+per step: `make tokenize`, `make encode`, and so on.
 
 Technical terms are defined in [Terms](#terms), just below; tool and product
 names are explained where they first appear.
@@ -119,7 +120,7 @@ There are two separate flows:
 ### 1. The LLM flow
 
 ```
-simple:
+LLM flow:
   step          input(s)                                       output
   1. tokenize   corpus.txt                                 ──► tok.bpe          # contains: pattern, merges, special tokens; V
   2. encode     corpus.txt + tok.bpe                       ──► corpus.ids       # contains: the corpus as token IDs
@@ -422,6 +423,8 @@ directories would mean copying that code or reaching across directories for it.
 ```
 llm/
 ├── PLAN.md        # this file
+├── Makefile       # one target per step: make tokenize, make encode, ...
+├── out/           # generated files: tok.bpe, *.ids, *.ckpt (git-ignored; make clean removes it)
 ├── data/          # corpora and example conversations, e.g. text8, chat.txt (git-ignored)
 ├── tokenizer/     # text <-> token IDs: tokenize, encode, decode
 ├── word2vec/      # word vectors, the historical precursor
@@ -436,7 +439,19 @@ llm/
 | `attention/` | none: a learning step before `transformer/` | not started |
 | `transformer/` | LLM 3 build, 4 train, 5 finetune, 6 generate | not started |
 
-The `simple` driver then reads like the flow, one command per step:
+The Makefile in `llm/` drives the flow, with one target per step. Each target
+knows which files it needs, so `make train`, for example, first reruns any
+earlier step whose inputs have changed, and skips the ones that are up to
+date:
+
+```
+make tokenize  →  make encode  →  make build  →  make train  →  make finetune  →  make generate
+```
+
+Generated files go in `out/` (so `make clean` is simply `rm -rf out`), and
+corpora stay in `data/`. Make tracks files, not variables: after changing a
+setting such as `MERGES`, force a rebuild with `make -B <target>`. The commands
+the targets run, one per step:
 
 ```
 # 1 tokenize
@@ -455,7 +470,9 @@ transformer generate --model chat.ckpt --tokenizer tok.bpe --config config.toml 
 ```
 
 As in [What each stage does](#what-each-stage-does), everything after step 1
-is proposed.
+is proposed. Only the `tokenize` target exists so far; the others are added as
+each step is built. (The paths above are shortened: in the Makefile, the
+corpus is `data/corpus.txt` and generated files are in `out/`.)
 
 **Where post-training lives.** The example conversations (`chat.txt`) are in
 `data/`. The special tokens are reserved by `tokenizer/` in `tok.bpe`, and
@@ -567,9 +584,9 @@ README.
    [Configuration](#configuration)); the syntax isn't. TOML is easy to read and
    edit by hand and supports comments; JSON is what Hugging Face uses for the
    copy stored with a model.
-5. **The driver.** A shell script or a small Makefile (a build script run by
-   the `make` tool). A Makefile would only re-run the stages whose inputs
-   changed.
+5. **The driver.** *Decided:* a Makefile, with one target per step (see
+   [Where the stages live](#where-the-stages-live)). Unlike a shell script, it
+   reruns only the steps whose inputs changed.
 6. **The training data.** A pretraining corpus small enough to train on in
    minutes, but large enough to learn something: text8 (17 million words) is
    one candidate. For fine-tuning, a few hundred to a few thousand short
@@ -583,7 +600,8 @@ README.
    `corpus.ids`).
 3. `attention/`: self-attention alone, on toy inputs.
 4. `transformer/`: build, then train, then generate, then finetune.
-5. The `simple` driver, and fold this plan into `llm/README.md`.
+5. Throughout: add each step's Makefile target as the step is built
+   (`tokenize` exists). At the end, fold this plan into `llm/README.md`.
 
 ## Bibliography
 
