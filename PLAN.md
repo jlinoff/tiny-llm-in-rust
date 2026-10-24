@@ -145,6 +145,10 @@ in Python and the later stages are in Rust.
 
 #### What each stage does
 
+Commands marked *proposed* belong to programs not yet written; their names
+and options may change when the code is. `transformer` is the planned program
+in `transformer/`, with one subcommand per step.
+
 ##### Step 1: tokenize
 
 - **Input:**
@@ -152,6 +156,15 @@ in Python and the later stages are in Rust.
 - **Output:**
   - `tok.bpe`: the pre-tokenizer pattern, the ordered merges, the special
     tokens, and V
+- **Command:**
+
+  ```
+  python3 tokenizer/mini_bpe.py corpus.txt -n 1000 --save tok.bpe
+  ```
+
+  `-n` is the maximum number of merges, `--save` names the output. Special
+  tokens will need one more option, proposed as
+  `--special "<|user|>,<|assistant|>,<|end|>"`.
 - **Status:** done (`tokenizer/mini_bpe.py --save`), except special tokens,
   which step 5 needs
 
@@ -166,6 +179,15 @@ it.
   - `tok.bpe`
 - **Output:**
   - `corpus.ids` (or `chat.ids`): the text as token IDs
+- **Command** (proposed):
+
+  ```
+  python3 tokenizer/mini_bpe.py --load tok.bpe --encode corpus.txt -o corpus.ids
+  python3 tokenizer/mini_bpe.py --load tok.bpe --encode chat.txt   -o chat.ids
+  ```
+
+  `--load` reads the saved tokenizer (exists today); `--encode` and `-o` are
+  new.
 - **Status:** to do
 
 **What it does:** turns text into the integers the model consumes. Real
@@ -180,6 +202,11 @@ never touches text.
 - **Output:**
   - `model-init.ckpt`: all the model's weights, random, plus the `[model]`
     settings
+- **Command** (proposed):
+
+  ```
+  transformer build --tokenizer tok.bpe --config config.toml -o model-init.ckpt
+  ```
 - **Status:** not started
 
 **What it does:** creates the **whole** model: the V × d embedding table,
@@ -196,6 +223,11 @@ the step-0, untrained checkpoints of its Pythia models.)
   - config `[training]`: learning rate, steps, batch size
 - **Output:**
   - `model.ckpt`: the same weights, pretrained
+- **Command** (proposed):
+
+  ```
+  transformer train --model model-init.ckpt --data corpus.ids --config config.toml -o model.ckpt
+  ```
 - **Status:** not started
 
 **What it does:** repeatedly predicts the next token ID, compares the
@@ -211,6 +243,11 @@ the config. The tokenizer is not involved; it already did its work in step 2.
   - config `[finetune]`: learning rate, steps
 - **Output:**
   - `chat.ckpt`: the same weights, tuned on conversations
+- **Command** (proposed):
+
+  ```
+  transformer finetune --model model.ckpt --data chat.ids --config config.toml -o chat.ckpt
+  ```
 - **Status:** not started
 
 **What it does:** runs the same training loop as step 4, continuing from the
@@ -226,6 +263,13 @@ This is post-training (see [Post-training](#post-training)).
   - config `[generate]`: temperature, maximum length
 - **Output:**
   - text
+- **Command** (proposed):
+
+  ```
+  transformer generate --model chat.ckpt --tokenizer tok.bpe --config config.toml --prompt "Hello"
+  ```
+
+  The output text is printed rather than written to a file.
 - **Status:** not started
 
 **What it does:** encodes the prompt, predicts a token ID, appends it, and
@@ -395,13 +439,23 @@ llm/
 The `simple` driver then reads like the flow, one command per step:
 
 ```
-python3 tokenizer/mini_bpe.py corpus.txt --save tok.bpe            # 1 tokenize
-python3 tokenizer/mini_bpe.py --load tok.bpe --encode corpus.txt   # 2 encode  (and chat.txt for step 5)
-transformer build    ...                                           # 3 build
-transformer train    ...                                           # 4 train     (end of pretraining)
-transformer finetune ...                                           # 5 finetune  (post-training)
-transformer generate ...                                           # 6 generate
+# 1 tokenize
+python3 tokenizer/mini_bpe.py corpus.txt -n 1000 --save tok.bpe
+# 2 encode (the corpus for step 4, the conversations for step 5)
+python3 tokenizer/mini_bpe.py --load tok.bpe --encode corpus.txt -o corpus.ids
+python3 tokenizer/mini_bpe.py --load tok.bpe --encode chat.txt   -o chat.ids
+# 3 build
+transformer build    --tokenizer tok.bpe --config config.toml -o model-init.ckpt
+# 4 train (end of pretraining)
+transformer train    --model model-init.ckpt --data corpus.ids --config config.toml -o model.ckpt
+# 5 finetune (post-training)
+transformer finetune --model model.ckpt --data chat.ids --config config.toml -o chat.ckpt
+# 6 generate
+transformer generate --model chat.ckpt --tokenizer tok.bpe --config config.toml --prompt "Hello"
 ```
+
+As in [What each stage does](#what-each-stage-does), everything after step 1
+is proposed.
 
 **Where post-training lives.** The example conversations (`chat.txt`) are in
 `data/`. The special tokens are reserved by `tokenizer/` in `tok.bpe`, and
