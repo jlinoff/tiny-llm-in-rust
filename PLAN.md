@@ -81,8 +81,12 @@ Grouped so that each definition uses only terms defined above it.
 - **softmax**: turns a list of scores z₁ … zₙ into positive weights that sum
   to 1: weightᵢ = e^zᵢ / (e^z₁ + … + e^zₙ). Higher scores get exponentially
   more weight. It's the Boltzmann distribution, with the scores playing the
-  role of negative energies. It turns attention scores into weights, and the
-  output layer's V scores into next-token probabilities.
+  role of negative energies, and the denominator is the partition function.
+  It turns attention scores into weights, and the output layer's V scores
+  into next-token probabilities. Adding the same constant to every score
+  changes nothing (like choosing the zero of energy), so implementations
+  subtract the largest score before exponentiating, which keeps e^z from
+  overflowing.
 - **context length**: the most tokens the model can take in at once.
 - **GPT (generative pre-trained transformer)**: a transformer trained to
   predict the next token. "GPT-style" means this design, which most LLMs use.
@@ -91,6 +95,11 @@ Grouped so that each definition uses only terms defined above it.
 
 - **training**: repeatedly make a prediction, measure the error, and adjust the
   weights slightly to reduce it (gradient descent).
+- **backpropagation**: the algorithm that computes, for every weight, how much
+  the error would change if the weight moved slightly (its **gradient**), by
+  applying the chain rule backward through the network. **Gradient descent**
+  then moves each weight a little against its gradient; **Adam** is the
+  improved variant nearly every transformer is trained with.
 - **learning rate**: how large each adjustment is.
 - **step**, **batch size**: one adjustment; the number of examples used to
   compute it.
@@ -483,9 +492,15 @@ normalization first trains more stably in deep stacks.)
   vector is turned, by three learned matrices, into a **query** ("what am I
   looking for?"), a **key** ("what do I contain?") and a **value** ("what do
   I pass on?"). Each token scores every earlier token by the dot product of
-  its query with their keys, divided by √(head size) to keep the scores in a
-  workable range. Softmax (see [Terms](#terms)) turns those scores into
-  positive weights that sum to 1, and the token's output is the weighted sum of the values. The
+  its query with their keys, divided by √(head size). The division matters:
+  a dot product of two random vectors of length h has a variance that grows
+  in proportion to h, so without it, larger heads would produce larger
+  scores, and the softmax would saturate, giving one weight near 1 and the
+  rest near 0, with gradients near zero, so the head would stop learning.
+  Dividing by √h keeps the scores at a scale where the softmax stays
+  responsive. Softmax (see [Terms](#terms)) then turns the scores into
+  positive weights that sum to 1 for each token, and the token's output is
+  the weighted sum of the values. The
   **causal mask** sets the scores for later tokens to −∞ before the softmax,
   so a token can never use the future it's being trained to predict:
 
@@ -602,6 +617,27 @@ That's the whole mechanism: three matrix multiplications, one more for the
 scores, a mask, a softmax and a weighted sum. Everything except the softmax
 is ordinary linear algebra.
 
+**Real sizes.** The example shrinks two *independent* sizes at once, which
+can make it look as if a query sees only a few nearby keys:
+
+- **d, the vector width:** how many numbers describe each token. 4 in the
+  example, 128 in our planned model, thousands in real LLMs.
+- **T, the number of tokens in view:** 3 in the example, up to 128 (the
+  planned context length) in our model, many thousands in real LLMs.
+
+Neither affects the other. At our model's size, for one head in one block:
+
+```
+table             example     our model (d = 128, 4 heads, context 128)
+X                 3 × 4       T × 128
+Q, K, V           3 × 2       T × 32 each       (32 = 128 / 4 heads)
+scores, weights   3 × 3       T × T             up to 128 × 128
+output            3 × 2       T × 32
+```
+
+The score matrix is always T × T, whatever d is: a token near the end of the
+context weighs well over a hundred earlier tokens at once.
+
 **Who does what.**
 
 ```
@@ -644,15 +680,31 @@ same in every sentence; after attention, "sat" in "the cat sat" carries
 information about the cat, and after a few more layers it can encode who
 sat, where and when. That is what a **contextual embedding** is.
 
+**Notation.** For token i, write **x_i** for its vector as it enters this
+block's attention sublayer: its current vector in the residual stream, after
+layer normalization, d numbers long; it is row i of X. Its query, key and
+value are **q_i** = x_i W_q, **k_i** = x_i W_k and **v_i** = x_i W_v (row i of
+Q, K and V). In a score, i is the token doing the looking and j the token
+being looked at.
+
+What x_i contains depends on the block. In block 1 it's the token's row of
+the embedding table plus its position information, normalized: it knows only
+which token it is and where it sits. In later blocks it's that starting
+vector plus everything earlier blocks have added, normalized: by block 3, x
+for "sat" already carries information gathered from "cat". So the same token
+has a different x_i in each block, and therefore a different query, key and
+value; that's how later blocks compare tokens by what they've come to mean
+in context, not just by which token they are.
+
 **Why three separate matrices.** Expand a score:
 
 ```
 score(i, j) = q_i · k_j = (x_i W_q) · (x_j W_k) = x_i · (W_q W_kᵀ) x_j
 ```
 
-The score is a **learned bilinear form** xᵢᵀ M xⱼ, with M = W_q W_kᵀ a d × d
+The score is a **learned bilinear form** x_iᵀ M x_j, with M = W_q W_kᵀ a d × d
 matrix of rank at most the head size: each head learns its own definition of
-"relevant". Using the raw vectors instead, xᵢ · xⱼ, would measure only
+"relevant". Using the raw vectors instead, x_i · x_j, would measure only
 similarity, word2vec-style, and would be symmetric. With a learned M:
 
 - **relevance can differ from similarity:** a verb can attend to its subject
@@ -673,9 +725,173 @@ lookup, and attention is a **soft lookup**: a dictionary `d[key]` returns
 the value whose key matches *exactly*; attention returns a *blend* of every
 value, weighted by how well each key matches the query.
 
+**How the weights get their values.** In the worked example the weights were
+chosen by hand, only to make the arithmetic readable; they mean nothing. In a
+real model nobody chooses them:
+
+1. **They start random and small.** Every entry is drawn from a normal
+   distribution with mean 0 and a small standard deviation (GPT-2 used 0.02).
+   Random, to break symmetry: identical heads would get identical updates and
+   stay identical. Small, so every score starts near 0 and the softmax of
+   near-equal scores is near-uniform: an untrained head attends roughly
+   equally to all earlier tokens, and training teaches it to be selective.
+2. **Training adjusts them.** Each training step runs the chain backward from
+   the loss to the weights:
+
+   ```
+   loss ← output ← weighted sum of values ← weights ← softmax ← scores ← q · k ← W_q, W_k
+   ```
+
+   Calculus gives, for every entry, how much the loss would change if it moved
+   slightly, and each entry moves a little in the direction that lowers the
+   loss. For one score, score(sat, cat) = (x_sat W_q) · k_cat, the gradient
+   with respect to W_q is the outer product x_sat ⊗ k_cat. If attending more
+   to "cat" would have helped, the update strengthens the connections between
+   the features in "sat"'s vector and those in "cat"'s key, and W_k is updated
+   the same way from the other side; if it was unhelpful, the sign flips.
+   Over millions of examples, each head's W_q and W_k come to encode the
+   pattern of "who attends to whom" that most reduces the loss.
+3. **Backpropagation and gradient descent.** **Backpropagation** computes the
+   gradients: the chain rule applied backward through the network, giving
+   every weight's gradient in one backward pass, at roughly the cost of one or
+   two forward passes. **Gradient descent** (in practice an improved variant,
+   **Adam**) does the update: each weight moves a little against its gradient,
+   scaled by the learning rate. Every weight in the model is trained this way:
+   W_q, W_k, W_v and W_o in every block, the FFN matrices, the
+   layer-normalization scales and shifts, the embedding table and the output
+   layer. (word2vec's update formula was the same thing worked out by hand for
+   one simple model; for a transformer, the program derives the gradients
+   automatically, layer by layer.)
+4. **W_v learns by a different path.** W_q and W_k affect the loss only
+   through the scores and the softmax, so they learn *where to look*. W_v
+   affects it directly through the weighted sum, after the weights are fixed,
+   so it learns *what's worth passing along*: the QK/OV split again.
+5. **The individual values aren't even unique.** Scores depend on W_q and W_k
+   only through their product M = W_q W_kᵀ. Replace them with W_q R and
+   W_k (R⁻¹)ᵀ for any invertible R and every score is unchanged, a kind of
+   gauge freedom. Training could land on any of infinitely many equivalent
+   pairs, so only M is meaningful, which is why interpretability research
+   studies the products W_q W_kᵀ and W_v W_o rather than single matrices.
+
+**Why "query" and "key".** The names come from information retrieval, and a
+library catalog makes them concrete: the **query** is what you type into the
+search box ("books about cats"), a **key** is the catalog entry describing a
+book ("subject: cats; animals; pets"), and the **value** is the book itself,
+what you take home. You match the query against every key and collect the
+values whose keys match; attention does it softly, taking a blend weighted by
+how well each key matches.
+
+The difference between query and key is *who supplies which*:
+
+```
+score(i, j)  =  q_i  ·  k_j
+                 ↑       ↑
+       from the token   from the token
+       doing the        being looked at
+       looking
+```
+
+Every token produces both, from the same vector through different matrices,
+because it plays both roles: it looks at earlier tokens (with its query), and
+later tokens look at it (with its key). What a token *seeks* and what it *is*
+generally differ. For a pronoun such as "it", the query encodes roughly "I'm
+looking for a singular noun earlier in the text", and the key roughly "I'm a
+pronoun"; if the two were one vector, "it" could only seek pronoun-like
+tokens, which is exactly wrong.
+
+Are they interchangeable? The *names* are; the *roles* aren't:
+
+- **Swapping the names before training changes nothing.** W_q and W_k have
+  the same shape and the same random initialization; relabeled, the model
+  simply learns the same thing with the labels exchanged. What makes one the
+  query matrix is only which side of the dot product it's on.
+- **Swapping them in a trained model changes the meaning.** It gives
+  score′(i, j) = score(j, i), the transposed score matrix: "A looks for B"
+  becomes "B looks for A". With the causal mask, the large scores would mostly
+  land in the masked, future half.
+- **Forcing them to be equal** (one matrix for both) would make every score
+  symmetric, since it becomes x_iᵀ W Wᵀ x_j: relevance would have to be mutual,
+  and tokens would mostly attend to tokens that resemble them. Two matrices
+  are what allow asymmetric relevance, like "it" seeking "cat" without "cat"
+  seeking "it" (in the worked example, "the" scores "cat" at 2.83, but "cat"
+  scores "the" at only 0.71).
+
+Query and key are the two ends of a directed relationship, like sender and
+receiver, or the row and column of the score matrix.
+
+**Which keys a query meets.** Every earlier token's key in the **context
+window**, not just some of them:
+
+```
+            token 1   token 2   token 3   …   token T      ← the context window (all the text)
+block 1       ■─────────■─────────■───────────■            in each block, every token attends to
+block 2       ■─────────■─────────■───────────■            ALL earlier tokens in the context
+block 3       ■─────────■─────────■───────────■            (and itself)
+  ⋮
+```
+
+- **Within each block,** a token's query is matched against the keys of
+  itself and every earlier token in the context, from the first token on. The
+  only limits are the causal mask (no later tokens) and the context length
+  (at most that many tokens are visible; anything earlier is out of view).
+- **Across blocks,** each block computes *fresh* queries, keys and values,
+  with its own W_q, W_k and W_v, from the tokens' vectors *as they are at that
+  point in the stack*. In block 3, the keys come from vectors that blocks 1
+  and 2 have already enriched with context. That's how multi-step reasoning
+  builds up: block 1 might link "it" to the nearby noun "cat"; block 3,
+  working on vectors that carry that link, can attend on the basis of what
+  "it" now *refers to*.
+- **The cost.** Doubling the context roughly quadruples the attention work,
+  which is one of the main costs behind the context-length limits of real
+  LLMs. Where the n² comes from (n = the number of tokens so far):
+  - **A token's own q, k and v cost nothing related to n.** Each is one
+    matrix-vector product of that token's vector alone.
+  - **Each token's attention is O(n).** Its query is scored against n keys,
+    and it takes a weighted sum of n values: O(n · d).
+  - **The total is O(n²).** Summing over all tokens, 1 + 2 + … + n ≈ n²/2
+    query-key scores per head per block.
+
+  The score triangle shows both readings. A token's **row** is its query
+  meeting every earlier key: its own work, longer the later it comes. A
+  token's **column** is its key and value being used by every later token.
+  The triangle's area is the total:
+
+  ```
+                  key of token:  1    2    3    4    5
+  query of token 1               ■
+                 2               ■    ■
+                 3               ■    ■    ■         ← row: token 3's work,
+                 4               ■    ■    ■    ■      3 scores
+                 5               ■    ■    ■    ■    ■
+                                      ↑
+                                 column: token 2's key and value,
+                                 used by tokens 2 to 5
+
+  area ≈ n²/2 scores per head per block (15 here, for n = 5)
+  ```
+
+  - **Later tokens use a token's key and value, not its output.** Token i's
+    output (the weighted sum it gathered) updates *its own* vector in the
+    residual stream. In the next block, that updated vector produces token
+    i's new q, k and v. So information reaches later tokens directly, by
+    attending to token i's value in each block, and indirectly, because token
+    i's later keys and values come from a vector that has already absorbed
+    its own context.
+  - **Training vs generation.** In training, all n positions are computed at
+    once: O(n²) per block per head, in parallel. In generation, one new token
+    at a time: with the KV cache it computes only its own q, k and v and
+    scores its query against the n cached keys, O(n) per new token, so
+    generating n tokens still totals O(n²), one O(n) step at a time. The KV
+    cache itself grows with n, holding every earlier token's keys and values
+    for every head in every block.
+- **A naming trap.** "Block" here means a transformer block (a layer), not a
+  stretch of text. Karpathy's nanoGPT, however, calls the context length
+  `block_size`, meaning a block of *text*; its transformer blocks are counted
+  by `n_layer`.
+
 The `attention/` program will print exactly these tables (Q, K, V, scores,
-mask, weights, outputs) for small inputs, first with hand-set weights like
-these and later with trained ones.
+mask, weights, outputs) for small inputs; see
+[Where each part is built](#where-each-part-is-built) for its sequence.
 
 #### How heads fit in
 
@@ -792,11 +1008,18 @@ decision for `transformer/`.
 #### Where each part is built
 
 - **`attention/`**: self-attention alone, on toy inputs, small enough to print
-  every number: one head first (queries, keys, values, the scores, the
-  softmax weights, the causal mask), then several heads. It ends with a look
-  ahead at one complete block, adding the FFN, residual connections and
-  layer normalization, so they appear before `transformer/` without being
-  the focus.
+  every number, in this order:
+  1. **Hand-set weights**, reproducing the worked example in
+     [How attention works](#how-attention-works-queries-keys-and-values), to
+     check the mechanics.
+  2. **Random weights**, to see an untrained head's near-uniform attention.
+  3. **Weights trained on a tiny task whose right attention pattern is known
+     in advance**, for example "predict the token two positions back", to
+     watch W_q and W_k move from random to the pattern the task requires.
+  4. **Several heads.**
+  5. **A look ahead at one complete block,** adding the FFN, residual
+     connections and layer normalization, so they appear before
+     `transformer/` without being the focus.
 - **`transformer/`**: the real model. Step 3 builds the embedding table,
   position information, N blocks and the output layer; step 4 trains them
   all together.
