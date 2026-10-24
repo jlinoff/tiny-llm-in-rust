@@ -36,11 +36,12 @@ W2V        := word2vec/target/release/mini_w2v
 W2V_SRC    := word2vec/Cargo.toml $(wildcard word2vec/src/*.rs)
 W2V_CORPUS ?= data/text8
 W2V_ARGS   ?= -p king,cat,paris,computer,three -e 10 -d 300 -m skipgram
+W2V_OUT    ?= $(OUT)/vectors.txt
 
 .PHONY: word2vec
 word2vec: $(W2V_CORPUS) $(W2V) | $(OUT) ## Train word vectors with the standalone word2vec tool.
 	$(call hdr,$@)
-	time $(W2V) $(W2V_CORPUS) $(W2V_ARGS) -o $(OUT)/vectors.txt
+	time $(W2V) $(W2V_CORPUS) $(W2V_ARGS) -o $(W2V_OUT)
 
 # Rebuilt only when the Rust source changes.
 $(W2V): $(W2V_SRC)
@@ -73,3 +74,4 @@ help:  ## This help message.
 	@printf "   %-18s  %s\n" "W2V" "$(W2V)"
 	@printf "   %-18s  %s\n" "W2V_CORPUS" "$(W2V_CORPUS)"
 	@printf "   %-18s  %s\n" "W2V_ARGS" "$(W2V_ARGS)"
+	@printf "   %-18s  %s\n" "W2V_OUT" "$(W2V_OUT)"
