@@ -49,10 +49,18 @@ Grouped so that each definition uses only terms defined above it.
   information from the tokens before it, weighting each by a relevance score
   (a dot product of their vectors). An **attention head** is one independent
   copy of this computation; each attention layer runs several side by side.
-- **feed-forward layer**: a layer that transforms each token's vector on its
-  own, the same way at every position.
-- **transformer block**: one self-attention layer followed by one feed-forward
-  layer. A **transformer** is a model built from a stack of these blocks.
+- **feed-forward layer** (**FFN**, feed-forward network): a layer that
+  transforms each token's vector on its own, the same way at every position.
+  "Feed-forward" means information passes straight through, with no loops.
+- **residual connection**: adding a layer's input back to its output, so the
+  layer computes a *change* to each vector rather than a replacement.
+- **layer normalization**: rescaling each token's vector to a standard size
+  (mean 0, variance 1, then a learned scale and shift), which keeps values
+  stable as they pass through many layers.
+- **transformer block**: one self-attention layer and one feed-forward
+  layer, each with a residual connection and layer normalization. A
+  **transformer** is a model built from a stack of these blocks (more in
+  [The transformer block](#the-transformer-block)).
 - **output layer** (or **unembedding**): the final layer, which turns a vector
   into V scores, one for each possible next token.
 - **context length**: the most tokens the model can take in at once.
@@ -391,6 +399,78 @@ Where they appear in the flow:
 - **Step 6, generate:** used. Generation stops at EOS or end-of-turn, and the
   prompt is wrapped in the same turn markers.
 
+## The transformer block
+
+The model built in steps 3–6 is a stack of identical **transformer blocks**
+between the embedding table and the output layer:
+
+```
+token IDs → embedding table (+ position information) → block 1 → block 2 → … → block N
+          → layer normalization → output layer → V scores for the next token
+```
+
+Each block updates every token's vector in two stages. In the form used by
+GPT-2 and most modern LLMs, called "pre-norm":
+
+```
+h = x + attention(normalize(x))     # stage 1: tokens exchange information
+y = h + FFN(normalize(h))           # stage 2: each token is processed on its own
+```
+
+Here x holds one d-dimensional vector per token, "normalize" is layer
+normalization, and the `x +` and `h +` are the residual connections. (The
+original 2017 transformer normalized *after* each addition instead; putting
+normalization first trains more stably in deep stacks.)
+
+**The four parts:**
+
+- **Self-attention: tokens exchange information.** The only place in the
+  block where one token's vector is affected by the others. Each token's
+  vector is turned, by three learned matrices, into a **query** ("what am I
+  looking for?"), a **key** ("what do I contain?") and a **value** ("what do
+  I pass on?"). Each token scores every earlier token by the dot product of
+  its query with their keys, divided by √(head size) to keep the scores in a
+  workable range. **Softmax** turns those scores into positive weights that
+  sum to 1, and the token's output is the weighted sum of the values. The
+  **causal mask** sets the scores for later tokens to −∞ before the softmax,
+  so a token can never use the future it's being trained to predict.
+  Several **heads** do this side by side, each in a slice of d with its own
+  matrices, so different heads can track different relationships; their
+  outputs are joined and passed through one more learned matrix.
+- **Feed-forward network (FFN): each token on its own.** Two learned linear
+  layers with a nonlinearity between them: d → d_ff (usually 4 × d) →
+  nonlinearity (GELU, a smooth version of "keep positive values, zero the
+  rest") → d. It never looks at other tokens. It holds two-thirds of a block's
+  parameters (8d² against attention's 4d²), and studies such as Geva et al.
+  (2021) find that much of a model's stored knowledge appears to live there.
+- **Residual connections.** Each stage *adds* its result to the vectors it
+  received. A token's vector becomes a running sum that every block reads and
+  writes, often called the **residual stream**. This also gives the training
+  signal a direct path back through a deep stack (He et al., 2016).
+- **Layer normalization.** Applied before each stage, it keeps vectors at a
+  consistent scale however many blocks they have passed through (Ba et al.,
+  2016).
+
+**Position information.** Attention by itself ignores order: shuffling the
+earlier tokens wouldn't change a token's weighted sum. So the model is told
+each token's position. GPT-2 adds a learned **position embedding** (one
+vector per position, up to the context length) to each token's embedding;
+many newer models instead rotate the queries and keys by an angle that
+depends on position (RoPE, rotary position embedding). Which we use is a
+decision for `transformer/`.
+
+**Where each part is built:**
+
+- **`attention/`**: self-attention alone, on toy inputs, small enough to print
+  every number: one head first (queries, keys, values, the scores, the
+  softmax weights, the causal mask), then several heads. It ends with a look
+  ahead at one complete block, adding the FFN, residual connections and
+  layer normalization, so they appear before `transformer/` without being
+  the focus.
+- **`transformer/`**: the real model. Step 3 builds the embedding table,
+  position information, N blocks and the output layer; step 4 trains them
+  all together.
+
 ## Configuration
 
 One file, `config.toml`, holds the settings for every LLM stage, with one
@@ -501,7 +581,7 @@ llm/
 ├── data/          # corpora and example conversations, e.g. text8, chat.txt (git-ignored)
 ├── tokenizer/     # text <-> token IDs: tokenize, encode, decode
 ├── word2vec/      # word vectors, the historical precursor
-├── attention/     # self-attention on its own
+├── attention/     # self-attention on its own, then a look at one full block
 └── transformer/   # the model: build, train, finetune, generate
 ```
 
@@ -680,7 +760,8 @@ text8, matching gensim (a widely used Python library with its own word2vec) at
 1. ~~Finish word2vec.~~ Done.
 2. Tokenizer: ~~stage 2 (`--encode` writing `corpus.ids`)~~ and ~~EOS after
    each document~~ done. Turn markers when post-training needs them.
-3. `attention/`: self-attention alone, on toy inputs.
+3. `attention/`: self-attention alone, on toy inputs, ending with one
+   complete block (see [The transformer block](#the-transformer-block)).
 4. `transformer/`: build, then train, then generate, then finetune.
 5. Throughout: add each step's Makefile target as the step is built
    (`tokenize` exists). At the end, fold this plan into `llm/README.md`.
