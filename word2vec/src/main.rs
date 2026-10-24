@@ -16,7 +16,8 @@ mod matrix;
 mod query;
 mod train;
 
-use std::path::PathBuf;
+use std::fs::{self, OpenOptions};
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Instant;
 
@@ -136,6 +137,8 @@ fn run(args: &Args) -> Result<(), String> {
         Arch::SkipGram => 0.025,
         Arch::Cbow => 0.05,
     });
+    // Fail now, not after a long training run, if the output can't be written.
+    check_writable(&args.output)?;
 
     // --- Phase input: the corpus and its vocabulary ---
     println!("=== Corpus ===");
@@ -275,6 +278,26 @@ fn run(args: &Args) -> Result<(), String> {
     Ok(())
 }
 
+/// Check that `path` can be written, without changing an existing file:
+/// open it for writing without truncating, and if it didn't exist before,
+/// remove the empty file that the check created.
+fn check_writable(path: &Path) -> Result<(), String> {
+    if path.is_dir() {
+        return Err(format!("output {} is a directory", path.display()));
+    }
+    let existed = path.exists();
+    OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(path)
+        .map_err(|e| format!("can't write output {}: {e}", path.display()))?;
+    if !existed {
+        let _ = fs::remove_file(path);
+    }
+    Ok(())
+}
+
 /// Look up the probe words, reporting any that aren't in the vocabulary.
 fn resolve_probes(words: &[String], vocab: &corpus::Vocab) -> Vec<(String, usize)> {
     let mut found = Vec::new();
@@ -315,7 +338,7 @@ fn sep(n: u64) -> String {
     let s = n.to_string();
     let mut out = String::with_capacity(s.len() + s.len() / 3);
     for (i, c) in s.chars().enumerate() {
-        if i > 0 && (s.len() - i).is_multiple_of(3) {
+        if i > 0 && (s.len() - i) % 3 == 0 {
             out.push(',');
         }
         out.push(c);
