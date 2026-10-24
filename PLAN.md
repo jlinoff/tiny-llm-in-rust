@@ -192,22 +192,52 @@ mechanics are the same as in a production model, only the scale differs.
 
 ## Where the stages live
 
+The rule: **one directory per component, one command per step.** A component
+is code that several steps share. The tokenizer's code serves steps 1, 2 and 6;
+the model's code serves steps 3–6. Splitting the steps into separate
+directories would mean copying that code or reaching across directories for it.
+
 ```
 llm/
 ├── PLAN.md        # this file
-├── data/          # corpora, e.g. text8 (git-ignored)
-├── tokenizer/     # text <-> token IDs
+├── data/          # corpora and example conversations, e.g. text8, chat.txt (git-ignored)
+├── tokenizer/     # text <-> token IDs: tokenize, encode, decode
 ├── word2vec/      # word vectors, the historical precursor
 ├── attention/     # self-attention on its own
-└── transformer/   # the model itself
+└── transformer/   # the model: build, train, finetune, generate
 ```
 
 | directory | flow steps | status |
 |---|---|---|
-| `tokenizer/` | LLM 1 tokenize, 2 encode | step 1 done (`mini_bpe.py`) except special tokens; step 2 to do |
+| `tokenizer/` | LLM 1 tokenize, 2 encode; decode for 6 | step 1 done (`mini_bpe.py`) except special tokens; encode to do |
 | `word2vec/` | word2vec 1 train, 2 explore | trainer working; scripts and README to do |
 | `attention/` | none: a learning step before `transformer/` | not started |
 | `transformer/` | LLM 3 build, 4 train, 5 finetune, 6 generate | not started |
+
+The `simple` driver then reads like the flow, one command per step:
+
+```
+python3 tokenizer/mini_bpe.py corpus.txt --save tok.bpe            # 1 tokenize
+python3 tokenizer/mini_bpe.py --load tok.bpe --encode corpus.txt   # 2 encode  (and chat.txt for step 5)
+transformer build    ...                                           # 3 build
+transformer train    ...                                           # 4 train     (end of pretraining)
+transformer finetune ...                                           # 5 finetune  (post-training)
+transformer generate ...                                           # 6 generate
+```
+
+**Where post-training lives.** The example conversations (`chat.txt`) are in
+`data/`. The special tokens are reserved by `tokenizer/` in `tok.bpe`, and
+`chat.txt` is encoded with the same `--encode` as the corpus. Fine-tuning
+itself is `transformer finetune`, the same training loop as `train`, so it
+shares all the model code. Preference tuning, if it's ever added, would be
+another `transformer` subcommand for the same reason.
+
+**A naming note.** The tokenizer script keeps the name `mini_bpe.py`, not
+`tokenize.py`: `tokenize` is a module in Python's standard library, and a
+script of that name would shadow it. Running it puts the script's own
+directory first on the import path, so standard-library code that imports
+`tokenize`, including Python's error-reporting machinery (`linecache`,
+`traceback`), would load the script instead.
 
 ## word2vec: the historical side branch
 
