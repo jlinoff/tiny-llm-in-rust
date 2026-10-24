@@ -71,14 +71,26 @@ in Python and the later stages are in Rust.
 
 #### What crosses each boundary
 
-- **tokenizer → model:** only V (the number of rows in the embedding table and
-  columns in the output layer) and the ID numbering. The merges never enter
-  the network. Token ID 261 means `The` only under this `tok.bpe`, so a model
-  checkpoint is only valid with the tokenizer it was built from.
+In flow order:
+
+- **tokenize → encode:** `tok.bpe`, everything needed to turn text into token
+  IDs: the pre-tokenizer pattern, the ordered merges, and the special tokens.
+- **encode → train and finetune:** `corpus.ids` and `chat.ids`, which hold
+  **only token IDs**. This is where text stops: the model never sees a
+  character of the corpus, nor the tokenizer's pattern or merges, only the
+  integers.
+- **tokenize → build:** only V (the number of rows in the embedding table and
+  columns in the output layer). The IDs themselves carry the rest of the
+  connection: token ID 261 means `The` only under this `tok.bpe`, so a model
+  checkpoint is only valid with the tokenizer it was built from, and the ID
+  files only with the tokenizer that encoded them.
 - **config → build:** the `[model]` settings, read once. From then on the
   checkpoint carries them.
 - **build → train → finetune → generate:** the checkpoint. Training and
   fine-tuning change the values, never the shapes.
+- **tokenize → generate:** `tok.bpe` again, used at both ends of generation:
+  encoding the prompt into IDs, and decoding the predicted IDs back into text.
+  The tokenizer is the first thing the flow uses and the last.
 
 ### 2. The word2vec flow
 
