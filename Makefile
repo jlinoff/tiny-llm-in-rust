@@ -1,4 +1,13 @@
 SRC_FILES := $(shell git ls-files)
+CORPUS    ?= "data/corpus.txt"
+MERGES    ?= 1000
+
+# Stages
+.PHONY: tokenize
+tokenize: ## Learns the tokenizer from the training text.
+	$(call hdr,"$@")
+	@rm -f tok.bpe
+	time python3 tokenizer/mini_bpe.py $(CORPUS) -n $(MERGES) --save tok.bpe
 
 .PHONY: clean
 clean: ## Clean up all generated files.
