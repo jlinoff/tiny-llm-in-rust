@@ -1,6 +1,6 @@
 # mini_bpe
 
-A minimal byte-level BPE (byte-pair encoding) tokenizer in about 720 lines of
+A minimal byte-level BPE (byte-pair encoding) tokenizer in about 850 lines of
 plain Python, written to make one question concrete: **where does an LLM's list
 of tokens come from?**
 
@@ -12,7 +12,8 @@ everything visible:
    chunk boundary.
 2. **Train** — start from the 256 byte values, repeatedly merge the most
    frequent adjacent pair, and record each merge in order. The vocabulary is
-   the 256 bytes plus one new token per merge.
+   the 256 bytes plus one new token per merge (plus EOS; see
+   [Special tokens](#special-tokens)).
 3. **Encode / decode** — apply the merges to new text, giving token IDs;
    decoding concatenates the tokens' bytes back. Tokenization is **lossless**:
    decoding reproduces the input exactly, including every space and newline.
@@ -33,7 +34,7 @@ two steps of the LLM flow:
 A model sizes its embedding table from the tokenizer's vocabulary size, V (one
 row per token), and trains on the token IDs, which select those rows.
 
-It is for understanding, not production use. Training is slow, its only special
+It is for understanding, not production use. It's pure Python, its only special
 token is EOS, and its regex approximates GPT-style pre-tokenization, so its splits
 won't exactly match any real model's.
 
@@ -85,6 +86,8 @@ Options:
 - `-f FILE`, `--test-file FILE`: after training or loading, tokenize each
   non-blank line of FILE separately
 - `-q`, `--quiet`: don't print each merge during training
+- `--reference-trainer`: train with the simple, slow trainer instead (same
+  merges; see [Performance](#performance))
 - `-h`, `--help`: show help
 
 **Files are checked before any work starts.** The output files (`--save`,
@@ -355,10 +358,39 @@ tokenizer's IDs.
 
 ## Performance
 
-Training is the slow part: roughly O(merges × unique chunks) in pure Python,
-because it recounts every pair after every merge. Learning 1,000 merges from
-2 MB of text took about 1¾ minutes; a ~1 MB book with 1,000 merges takes a
-minute or two. Use `-q` to skip the merge log. Encoding is fast (see
+There are two trainers, and they produce exactly the same merges:
+
+- **The reference trainer** (`--reference-trainer`, function
+  `train_reference`) is the simple version: after every merge it recounts
+  every pair in every chunk. It's the easiest to read, but each merge costs
+  time in proportion to the whole corpus.
+- **The default trainer** (function `train`, class `IncrementalPairs`) keeps
+  the pair counts between merges. A merge only changes the chunks that
+  contain the merged pair, so only those are re-examined: their old pairs are
+  subtracted from the counts and their new pairs added. The most frequent pair
+  is found with a heap (a priority queue). Ties between equally frequent pairs
+  go to the pair that occurs first in the corpus, the same rule the reference
+  trainer follows, which is what makes the merges identical.
+
+They were checked against each other on English text, code, multilingual
+text with emoji, and 40 random texts over two- to five-letter alphabets
+(lots of ties and overlapping pairs such as `aaaa`): the merges matched every
+time.
+
+Measured on a 2-processor-core machine:
+
+```
+text                 merges   reference     default
+README.md                1,002     2.4 s       0.10 s
+text8, first 2 MB        1,000   102   s       3.2  s
+text8, first 20 MB       4,000   ~27 min*     17   s
+```
+
+\* Extrapolated from the 2 MB run, not measured.
+
+The 20 MB tokenizer averages 4.08 bytes per token on text8, about what
+production tokenizers reach on English, using a peak of 450 MB of memory.
+Use `-q` to skip the merge log. Encoding is fast (see
 [Encoding a corpus](#encoding-a-corpus)).
 
 ## Further reading

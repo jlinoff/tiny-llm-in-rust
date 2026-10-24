@@ -36,12 +36,14 @@ Run with -h for all options.
 """
 import argparse
 import hashlib
+import heapq
 import os
 import re
 import struct
 import sys
+import time
 from array import array
-from collections import Counter
+from collections import Counter, defaultdict
 from dataclasses import dataclass
 
 # GPT-2-style pre-tokenizer pattern (stdlib `re` version).
@@ -135,13 +137,25 @@ def apply_merge(chunks, pair, new_id):
     return merged
 
 
-def train(texts, num_merges, verbose=True):
-    """Learn up to `num_merges` BPE merges from a list of documents.
+def report_merge(step, vocab, pair, new_id, count):
+    """Print one line of the merge log."""
+    print(f"merge {step+1:3d}: {show(vocab[pair[0]]):>10} + "
+          f"{show(vocab[pair[1]]):<10} -> {show(vocab[new_id]):<14}"
+          f" (count {count})")
+
+
+def train_reference(texts, num_merges, verbose=True):
+    """The simple BPE trainer, kept as the readable reference.
+
+    After every merge it recounts every pair in every chunk, which makes the
+    algorithm easy to see but slow: the cost of each merge is proportional to
+    the whole corpus. train() produces exactly the same merges, faster.
 
     Starts from the 256 byte values and repeatedly merges the most frequent
-    adjacent pair. Stops early once no pair occurs more than once. Returns
-    (merges, vocab): merges is the ordered list of ((left_id, right_id),
-    new_id), and vocab maps every token ID to its bytes.
+    adjacent pair; ties go to the pair that occurs first in the corpus (the
+    first chunk, then the leftmost position). Stops early once no pair occurs
+    more than once. Returns (merges, vocab): merges is the ordered list of
+    ((left_id, right_id), new_id), and vocab maps every token ID to its bytes.
     """
     chunks = count_chunks(texts)
     vocab = {i: bytes([i]) for i in range(256)}
@@ -151,6 +165,8 @@ def train(texts, num_merges, verbose=True):
         pairs = count_pairs(chunks)
         if not pairs:
             break
+        # most_common(1) returns the first maximum in insertion order, i.e.
+        # the pair whose first occurrence comes earliest in the corpus.
         best, count = pairs.most_common(1)[0]
         if count < 2:
             break  # nothing repeats; further merges would be noise
@@ -158,11 +174,122 @@ def train(texts, num_merges, verbose=True):
         merges.append((best, new_id))
         vocab[new_id] = vocab[best[0]] + vocab[best[1]]
         chunks = apply_merge(chunks, best, new_id)
-
         if verbose:
-            print(f"merge {step+1:3d}: {show(vocab[best[0]]):>10} + "
-                  f"{show(vocab[best[1]]):<10} -> {show(vocab[new_id]):<14}"
-                  f" (count {count})")
+            report_merge(step, vocab, best, new_id, count)
+    return merges, vocab
+
+
+class IncrementalPairs:
+    """Pair counts that are updated, not recounted, after each merge.
+
+    A merge only changes the chunks that contain the merged pair, so only
+    those chunks are re-examined: their old pairs are subtracted from the
+    counts and their new pairs added. To find the most frequent pair quickly,
+    every pair's current ranking key is kept in a heap. Entries are never
+    removed when a key changes; a new entry is pushed instead, and old ones
+    are recognized as stale and skipped when they reach the top.
+
+    A pair's ranking key is (-count, first chunk, byte offset): highest count
+    first, ties to the earliest first occurrence, so the merges are identical
+    to train_reference(). Chunks are numbered in the order they first appear,
+    and the byte offset (where the pair's left token starts in the chunk's
+    original bytes) orders positions within a chunk; unlike a token index, it
+    doesn't shift as merges shorten the chunk.
+    """
+
+    def __init__(self, texts):
+        chunks = count_chunks(texts)  # insertion order = first appearance
+        self.chunks = [(tuple(seq), n) for seq, n in chunks.items()]
+        self.tok_len = {i: 1 for i in range(256)}  # token ID -> bytes
+        self.counts = Counter()  # pair -> occurrences, weighted by freq
+        self.where = defaultdict(set)  # pair -> chunks containing it
+        for ci, (seq, n) in enumerate(self.chunks):
+            for pair in zip(seq, seq[1:]):
+                self.counts[pair] += n
+                self.where[pair].add(ci)
+        self.first = {p: min(cs) for p, cs in self.where.items()}
+        self.heap = []
+        self.pushed = {}  # pair -> the key of its newest heap entry
+        for pair in self.counts:
+            self._push(pair)
+
+    def _key(self, pair):
+        """(-count, first chunk, byte offset of the first occurrence)."""
+        seq, offset = self.chunks[self.first[pair]][0], 0
+        for a, b in zip(seq, seq[1:]):
+            if (a, b) == pair:
+                return (-self.counts[pair], self.first[pair], offset)
+            offset += self.tok_len[a]
+        raise AssertionError(f"pair {pair} missing from its first chunk")
+
+    def _push(self, pair):
+        key = self._key(pair)
+        if self.pushed.get(pair) != key:
+            self.pushed[pair] = key
+            heapq.heappush(self.heap, (*key, pair))
+
+    def best(self):
+        """Return (pair, count) for the next merge, or (None, 0) if none."""
+        while self.heap:
+            *key, pair = self.heap[0]
+            if self.pushed.get(pair) == tuple(key):
+                return pair, -key[0]
+            heapq.heappop(self.heap)  # stale: the pair's key has changed
+        return None, 0
+
+    def merge(self, pair, new_id):
+        """Replace `pair` with `new_id` everywhere and update the counts."""
+        self.tok_len[new_id] = self.tok_len[pair[0]] + self.tok_len[pair[1]]
+        touched, recheck = set(), set()
+        for ci in list(self.where[pair]):
+            old, n = self.chunks[ci]
+            new = merge_seq(old, pair, new_id)
+            old_pairs = Counter(zip(old, old[1:]))
+            new_pairs = Counter(zip(new, new[1:]))
+            for p, k in old_pairs.items():
+                self.counts[p] -= k * n
+            for p, k in new_pairs.items():
+                self.counts[p] += k * n
+            for p in old_pairs.keys() - new_pairs.keys():
+                self.where[p].discard(ci)
+                if self.first.get(p) == ci:
+                    recheck.add(p)  # lost its first chunk
+            for p in new_pairs.keys() - old_pairs.keys():
+                self.where[p].add(ci)
+                if p not in self.first or ci < self.first[p]:
+                    self.first[p] = ci
+            self.chunks[ci] = (new, n)
+            touched |= old_pairs.keys() | new_pairs.keys()
+        for p in touched:
+            if self.counts[p] <= 0:
+                for table in (self.counts, self.where, self.first, self.pushed):
+                    table.pop(p, None)
+                continue
+            if p in recheck:
+                self.first[p] = min(self.where[p])
+            self._push(p)
+
+
+def train(texts, num_merges, verbose=True):
+    """Learn up to `num_merges` BPE merges from a list of documents.
+
+    Gives exactly the same merges as train_reference(), but updates the pair
+    counts incrementally (see IncrementalPairs) instead of recounting the
+    whole corpus after every merge. Returns (merges, vocab).
+    """
+    pairs = IncrementalPairs(texts)
+    vocab = {i: bytes([i]) for i in range(256)}
+    merges = []
+    for step in range(num_merges):
+        best, count = pairs.best()
+        if best is None or count < 2:
+            break  # nothing repeats; further merges would be noise
+        new_id = 256 + len(merges)
+        merges.append((best, new_id))
+        vocab[new_id] = vocab[best[0]] + vocab[best[1]]
+        pairs.merge(best, new_id)
+        if verbose:
+            report_merge(step, vocab, best, new_id, count)
     return merges, vocab
 
 
@@ -525,6 +652,9 @@ examples:
                          "one -t per line (not used for training)")
     ap.add_argument("-q", "--quiet", action="store_true",
                     help="don't print each merge during training")
+    ap.add_argument("--reference-trainer", action="store_true",
+                    help="train with the simple, slow reference trainer "
+                         "(same merges; for comparison and reading)")
     return ap
 
 
@@ -578,10 +708,15 @@ def train_mode(ap, args):
     print("First 25 chunks:", fmt([c.encode() for c in chunks[:25]]), "\n")
 
     print(f"=== Training: up to {num_merges} merges ===")
-    merges, vocab = train(texts, num_merges, verbose=not args.quiet)
+    trainer = train_reference if args.reference_trainer else train
+    start = time.time()
+    merges, vocab = trainer(texts, num_merges, verbose=not args.quiet)
+    elapsed = time.time() - start
     tok = Tokenizer(merges, vocab, PATTERN, list(DEFAULT_SPECIALS))
     n_tokens = sum(len(encode(t, merges)) for t in texts)
-    print(f"\nLearned {len(merges)} merges; {describe(tok)}.")
+    print(f"\nLearned {len(merges)} merges in {elapsed:.1f} s"
+          f"{' (reference trainer)' if args.reference_trainer else ''}; "
+          f"{describe(tok)}.")
     print(f"Corpus encodes to {n_tokens:,} tokens "
           f"({total_bytes / n_tokens:.2f} bytes/token).")
     if args.quiet and merges:

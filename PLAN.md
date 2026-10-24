@@ -105,8 +105,13 @@ manipulation. In Rust, the inner loops are written as plain loops that read
 like the math and run at native speed: the full text8 run takes about 8½
 minutes on 2 processor cores, and less on a machine with more cores.
 
-The tokenizer stays in Python because it's fast enough at this scale. It can
-move to Rust later if there's a compelling reason.
+The tokenizer stays in Python because it's fast enough at this scale. Its
+first trainer recounted every pair after every merge and would have needed
+about half an hour for 4,000 merges on 20 MB; the current one updates only
+what each merge changes and takes 17 seconds, with identical results. Fixing
+the algorithm gained more than a Rust port of the old one would have (an
+estimated 30 to 100 times), without the risk of two pre-tokenizers
+disagreeing. It can still move to Rust if there's a compelling reason.
 
 ## The flows
 
