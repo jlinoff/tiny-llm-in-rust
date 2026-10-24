@@ -140,8 +140,11 @@ sign of meaning. Any one pair of random 100-dimensional vectors has a
 similarity near 0, with a standard deviation of about 1/√d = 0.1, but the
 nearest neighbor is the best of the other 71,289 words, and the largest of
 that many such values lies about √(2 ln 71,289) ≈ 4.7 standard deviations
-out. After training, the neighbors are meaningful, and similar words score
-0.7 or more.
+out (about 0.27 at d = 300). After training, the neighbors are meaningful:
+with the default d = 100, close neighbors score about 0.7 to 0.8; with
+d = 300, about 0.5 to 0.6, even though the neighbor lists are better.
+Absolute similarities shrink as d grows, so compare rankings, not values,
+between models of different sizes.
 
 **Training.** One line per epoch with two losses:
 
