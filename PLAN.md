@@ -72,6 +72,19 @@ Grouped so that each definition uses only terms defined above it.
   that token forward. The pair is the main known mechanism of **in-context
   learning**: a model picking up a pattern from its prompt, with no change
   to its weights.
+- **tensor**: in machine learning, simply an n-dimensional array of
+  numbers: a single number, a vector (1-D), a matrix (2-D), or more (a
+  "tensor of shape (B, T, d)" is a B × T × d block of numbers). Every weight
+  matrix is one, as is each bias vector. *Not the physics sense:* there is
+  no transformation law, no metric and no covariant/contravariant
+  distinction; the components are stored in one fixed basis that never
+  changes, so those rules never come into play. (Strictly, a k-index array
+  is the components of an element of a tensor product space in a chosen
+  basis; the name spread through numerical software such as Torch and
+  TensorFlow.) A genuine tensor does appear in attention: the score is a
+  bilinear form, and its "gauge freedom" is a transformation law (see
+  [How attention works](#how-attention-works-queries-keys-and-values):
+  "Why three separate matrices" and "How the weights get their values").
 - **contextual embedding**: a token's vector after attention has mixed in
   information from its context, so the same word gets different vectors in
   different sentences. A row of the embedding table, by contrast, is the
@@ -846,6 +859,11 @@ real model nobody chooses them:
    gauge freedom. Training could land on any of infinitely many equivalent
    pairs, so only M is meaningful, which is why interpretability research
    studies the products W_q W_kᵀ and W_v W_o rather than single matrices.
+   In physics terms, this is the one place where a [tensor](#terms) in the
+   geometric sense appears: a change of basis R in the head's
+   h-dimensional space, under which W_q and W_k transform and M doesn't.
+   The software doesn't know about it; it stores W_q and W_k as plain
+   arrays, in whatever basis training happened to reach.
 
 **Why "query" and "key".** The names come from information retrieval, and a
 library catalog makes them concrete: the **query** is what you type into the
@@ -1520,16 +1538,45 @@ text8, matching gensim (a widely used Python library with its own word2vec) at
      settings (as TOML text), the tokenizer's fingerprint and the provenance
      record, so the checkpoint stays one self-describing file and the "one
      source of truth" rule in [Configuration](#configuration) holds.
-   - **Not taken: GPT-2's tensor names and layouts** (Q, K and V fused into
-     one `c_attn` matrix, weights stored transposed for a historical
-     `Conv1D` class, names like `transformer.h.0.attn.c_attn.weight`). Our
-     names follow this plan instead.
+   - **Not taken: GPT-2's tensor names and fused layout** (Q, K and V
+     joined into one `c_attn` matrix, names like
+     `transformer.h.0.attn.c_attn.weight`). Our names follow this plan
+     instead (below). Orientation is no obstacle: GPT-2 stores each matrix
+     as input × output, as this plan does (x·W); most other PyTorch models
+     store output × input.
    - **Added: optimizer state** (Adam's m and v, and the step count) in
      training checkpoints, so training can resume. Hugging Face's trainer
      keeps those in a separate pickle file.
    - **Later, optional:** a small export script to Hugging Face's GPT-2
      layout, so the trained model can be loaded into PyTorch and its outputs
      compared with ours: an independent check of the whole implementation.
+
+   **Tensor names.** A safetensors file is a set of named arrays
+   ([tensors](#terms)), and a loader matches arrays to weights by name, not
+   by position. Matching by position (the 7th array is block 1's W_q) is
+   fragile: add a bias or reorder something and later arrays load into the
+   wrong slots, silently if their shapes happen to agree. By name, the
+   loader checks that every expected name is present with the expected
+   shape and says exactly which isn't. The names, with i the block number
+   from 0, and every matrix stored input × output, row-major:
+   - `token_embedding`: V × d (E)
+   - `position_embedding`: T × d (P), if learned positions are used
+   - `blocks.i.ln1.gamma`, `blocks.i.ln1.beta`: d each (LN₁'s scale and
+     shift)
+   - `blocks.i.attn.w_q`, `blocks.i.attn.w_k`, `blocks.i.attn.w_v`: d × d
+     each, the heads side by side (head k is columns k·h to (k + 1)·h − 1)
+   - `blocks.i.attn.w_o`: d × d
+   - `blocks.i.ln2.gamma`, `blocks.i.ln2.beta`: d each
+   - `blocks.i.ffn.w1`: d × d_ff; `blocks.i.ffn.b1`: d_ff
+   - `blocks.i.ffn.w2`: d_ff × d; `blocks.i.ffn.b2`: d
+   - `final_ln.gamma`, `final_ln.beta`: d each
+   - `output`: d × V (U), only if the output layer isn't tied to
+     `token_embedding`
+   - attention biases, if `transformer/` uses them: `blocks.i.attn.b_q`
+     and so on
+   - in training checkpoints, Adam's state: `adam.m.` and `adam.v.` followed
+     by the weight's name (same shape), with the step count in
+     `__metadata__`
 
    *A "checkpoint" is a saved snapshot of a model's weights, taken during
    training or at the end. Before this decision, the flow used `.ckpt` as a
