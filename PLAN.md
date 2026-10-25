@@ -131,6 +131,11 @@ Grouped so that each definition uses only terms defined above it.
   writing each formula by hand. In the reverse-mode form used for training,
   every operation records itself on a **tape** as the forward pass runs, and
   backpropagation replays the tape in reverse (open decision 7).
+- **inference**: running a trained model to get its output, with the
+  weights fixed: no backward pass, no optimizer. For a language model,
+  inference is generation, one token at a time (step 6). The term contrasts
+  with **training**; in statistics "inference" means something different
+  (drawing conclusions from data).
 - **gradient check**: testing hand-written gradients against **finite
   differences**: nudge one weight by ±ε, measure how much the loss changes,
   and compare with the computed gradient.
@@ -202,6 +207,10 @@ There are three separate flows:
    small enough to print every number. It shares no files with the LLM flow
    either, but unlike word2vec it is a piece of the LLM: step 3 (build)
    assembles N of these blocks.
+4. **The bench flow**: measurement. It times this computer's matrix
+   multiplies and a real training step for a built model, to turn the
+   training-time estimates into measured figures before committing to a
+   long run. It reads a checkpoint and writes nothing.
 
 ### 1. The LLM flow
 
@@ -384,6 +393,56 @@ This is post-training (see [Post-training](#post-training)).
 repeats; then decodes the IDs back to text. With `model.safetensors` it continues the
 prompt; with `chat.safetensors` it answers as the assistant.
 
+**This is inference.** [Inference](#terms) means running a trained model to
+get its output, as opposed to training it: the weights are fixed, and
+there's no backward pass and no optimizer. For a language model, inference
+is exactly this loop, called **autoregressive generation**: every answer a
+chatbot gives is produced by it. It has two phases:
+
+- **Prefill:** the whole prompt goes through the model at once, as a batch
+  of rows, like a training step's forward pass.
+- **Decode:** one new token at a time. Each pass predicts a single token,
+  which is appended and fed back in.
+
+**How fast it will be (an estimate, to be measured).** Generating one token
+costs about 2 floating-point operations per parameter (the forward pass
+only, against 6 in training), plus attention over the tokens so far, which
+is small at these context lengths. Two things make decoding different from
+training:
+
+- **One token at a time is a matrix-vector product.** Training multiplies
+  thousands of rows by each weight matrix at once, so each weight read from
+  memory is used thousands of times. Decoding multiplies a single row, so
+  each weight is used once per token. Speed is then limited by reading the
+  weights and by per-operation overhead more than by arithmetic, and
+  threads help less. Assume 5–20 GFLOP/s of useful work.
+- **Without a KV cache, every token recomputes the whole context.** The
+  [KV cache](#what-runs-in-parallel) keeps each earlier token's keys and
+  values, so a new token computes only its own. Without it, generating the
+  t-th token reprocesses all t tokens so far.
+
+With a KV cache, at 5–20 GFLOP/s:
+
+- the 0.85M starting model (1.7 MFLOP per token): thousands of tokens per
+  second, so overhead decides
+- an 8M model (16 MFLOP per token): about 300–1,200 tokens per second
+- a 20M model (40 MFLOP per token): about 125–500 tokens per second. Its
+  80 MB of f32 weights, read once per token at the M4's roughly 120 GB/s
+  memory bandwidth, take about 0.7 ms, so memory isn't the limit below
+  about 1,400 tokens per second.
+
+A 200-token story takes about a second at most. Without a KV cache, an 8M
+model recomputing an average 64-token window per token, at roughly three
+times its training speed (the forward pass alone), would still manage
+about 75 tokens per second with a 128-token context, but only about 20
+with a 512-token context. Generation will build the KV cache: it's the
+standard technique, and worth seeing work.
+
+So inference is cheap next to training. Spending days or a week of
+training to get a better model is a good trade: the result still
+generates text faster than you can read it (open decision 6 has what a
+week buys).
+
 #### What crosses each boundary
 
 In flow order:
@@ -483,6 +542,42 @@ What carries over to the LLM flow is the ideas and, as reference
 implementations, the code: `transformer/` will rewrite the pieces for speed
 (f32 instead of f64, batched), and attention/'s versions are what its tests
 compare against.
+
+### 4. The bench flow
+
+```
+bench:
+  item          input(s)                         output
+  1. matmul     (none)                       ──► (printed)   # f32 matrix-multiply speed at training shapes, 1 thread and all
+  2. step       model-init.safetensors       ──► (printed)   # one forward and backward pass: ms per step, tokens per second
+```
+
+Same key as above. Both are `transformer bench` (`make bench`); item 2 runs
+when a checkpoint is given (`--checkpoint`), and checks its tensors against
+its stored config first. The item 1 shapes are a training step's matrix
+products: 16 sequences × 128 tokens = 2,048 rows, times d × d and d × 4d
+matrices.
+
+What it reports:
+
+- **Item 1:** GFLOP/s on one thread and on all of them. This is the ceiling
+  on training speed.
+- **Item 2:** milliseconds per step, tokens per second, the share of the
+  ceiling a real step reaches, and the time for 20 million tokens.
+  Training costs about 6 floating-point operations per parameter per token
+  (2 forward, 4 backward), so tokens per second ≈ useful speed / (6 · N).
+
+Measured on the M4 (MacBook Pro, 10 cores), with the 0.85M-parameter
+starting model:
+
+- matrix multiply: 31–37 GFLOP/s on one thread, 170–192 on all 10
+- a training step (16 × 128 tokens, forward and backward): 135 ms, about
+  15,000 tokens per second, 40% of the ceiling
+
+Run it before planning a long training run; it's how open decision 6's
+time estimates were checked. When step 6 (generate) exists, its speed in
+generated tokens per second belongs here too (see
+[Step 6](#step-6-generate)).
 
 ## Special tokens
 
@@ -1652,6 +1747,18 @@ text8, matching gensim (a widely used Python library with its own word2vec) at
    - 8M parameters, 160M tokens: about 15–30 hours (a weekend)
 
    The planning assumption had been 30 GFLOP/s, five times too pessimistic.
+
+   **A week of training.** At the measured 78 GFLOP/s of useful work (40% of
+   the ceiling; larger matrices usually run more efficiently, so likely an
+   underestimate), a week is about 4.7 × 10¹⁶ floating-point operations.
+   With the compute-efficient D ≈ 20 N, 6 × N × 20 N = 4.7 × 10¹⁶ gives
+   **N ≈ 20M parameters and D ≈ 400M tokens**, about one pass over all of
+   TinyStories. That's close to the paper's 28M model, which scored 9/10
+   for grammar and consistency (with a 512-token context, against our 128;
+   a longer context costs more per token in attention). The alternative
+   use of a week: an 8M model over about 1 billion tokens, roughly two
+   passes. Either way, the trained model generates fast (see
+   [Step 6](#step-6-generate)).
 
    The paper's own evaluations set expectations: their 1M model scored 6/10
    for grammar and 2/10 for consistency, 8.3M scored 7 and 5, and 28M scored
