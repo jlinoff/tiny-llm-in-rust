@@ -1170,9 +1170,11 @@ decision for `transformer/`.
      2022). Result: two attention-only blocks with one head each reach
      96–98% on the repeat over 4 seeds, after a plateau near chance and a
      sudden jump (the phase change), which comes anywhere from step 1,500 to
-     2,750. Block 2's head puts 0.86 of its weight on the position after
-     the earlier copy; block 1's is a loose previous-token head (0.20 on the
-     previous letter, against 0.11 for an even spread). Knocking out
+     2,750. Block 2's head puts about 0.87 of its weight on the position after
+     the earlier copy; block 1's is a loose previous-token head (about 0.20
+     on the previous letter, against 0.11 for an even spread). The exact
+     figures differ slightly between a Mac and Linux, as the phase change
+     amplifies last-bit differences; the jump steps agree. Knocking out
      either head drops accuracy to chance or below; one block with two
      heads reaches only 9%. Getting a fair test took three task fixes: A A
      starts at a random point (otherwise one head solves 72% by position

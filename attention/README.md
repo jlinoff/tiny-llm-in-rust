@@ -27,9 +27,11 @@ Across machines, results can differ slightly: `exp` and `tanh` come from
 each platform's maths library, and Apple's and Linux's may round the last
 bit differently. Runs that converge firmly absorb that, and every figure
 quoted below for `train`, `heads` and `block`'s main run matches between a
-Mac and Linux. Fragile runs can amplify it: `block`'s runs without an FFN
-give different per-seed figures on the two (see that section). Read the
-seed comparisons for their spread, not their exact numbers.
+Mac and Linux. Runs that pass through a decision point can amplify it:
+`block`'s runs without an FFN give different per-seed figures on the two,
+and `induction`'s figures differ by a percent or a few (its phase change is
+such a point), though the shape of the result and the step of each jump
+agree. Read the seed comparisons for their spread, not their exact numbers.
 
 ## What one head computes (`example`, `random`)
 
@@ -366,29 +368,30 @@ every weight in use.
 What it shows, with the defaults:
 
 - **The phase change.** Accuracy on the repeat sits near chance (6%) for
-  about 1,000 steps while the loss barely moves, then jumps from 27% to
-  94% between steps 1,250 and 1,750, ending at 96%. That sudden jump is what
+  about 1,000 steps while the loss barely moves, then jumps to over 90%
+  between steps 1,250 and 1,750, ending at about 96%. That sudden jump is what
   Olsson et al. (2022) see when induction heads form in real models.
 - **Block 2's head is an induction head.** In the second copy, each row puts
   its weight on the position right after the earlier copy of its own letter
-  (0.86 on average over 300 sequences): a stripe parallel to the diagonal,
-  k − 1 places to its left. Rows with nothing to find park their weight on
-  the first positions.
-- **Block 1's head is a loose previous-token head.** It puts 0.20 of its
-  weight on the previous letter, against 0.11 for an even spread, with less
+  (about 0.87 on average over 300 sequences): a stripe parallel to the
+  diagonal, k − 1 places to its left. Rows with nothing to find park their
+  weight on the first positions.
+- **Block 1's head is a loose previous-token head.** It puts about 0.20 of
+  its weight on the previous letter, against 0.11 for an even spread, with less
   on each letter before. So each position carries a blurred record of the
   letters just before it, sharpest for the one right before: not the
   textbook crisp head, but enough.
-- **Knockouts:** both heads 96.2%; without block 1's head 8.5%; without
-  block 2's head 1.3%; chance 6.2%. Block 2's search works only on what block
+- **Knockouts:** both heads about 96%; without block 1's head 8–12%;
+  without block 2's head 1–3%; chance 6.2%. (The ranges are Linux and a
+  Mac.) Block 2's search works only on what block
   1 wrote into the residual stream: one layer's output becomes the next
   layer's key.
 - **One block with two heads** (the same number of heads): 9.3%. A single
   layer can match the current letter against earlier ones, but it finds the
   earlier copy itself, not the letter after it: nothing yet holds "the
   letter before me".
-- **Over seeds 1–4:** 96.2–97.8%, with the jump by steps 1,500, 1,500, 2,000
-  and 2,750. The plateau's length depends on the seed; the jump, when it
+- **Over seeds 1–4:** 96–98%, with the jump by steps 1,500, 1,500, 2,000
+  and 2,750 (the same on both machines). The plateau's length depends on the seed; the jump, when it
   comes, is fast.
 
 Options (the comparisons train `--seeds` more models, in parallel):
