@@ -1,7 +1,8 @@
 # mini_attention
 
-Self-attention, small enough to print every number, with heads and then a
-complete transformer block trained while you watch. This is the learning step
+Self-attention, small enough to print every number: heads, a complete
+transformer block, and two blocks forming an induction head, trained while
+you watch. This is the learning step
 before `../transformer/`: it computes exactly what PLAN.md describes in "The
 transformer block", section "How attention works: queries, keys and values",
 and prints each intermediate table so you can follow it.
@@ -328,6 +329,84 @@ only 25 pairs, few enough for attention's own nonlinearity.
 
 The default run takes about 30 seconds on two cores, less on more.
 
+## Two blocks forming an induction head (`induction`)
+
+Item 6 of the list in PLAN.md, "Where each part is built": the smallest
+case where layers cooperate, and the mechanism behind in-context learning.
+
+The task is plain next-token prediction, the real language-model objective,
+on sequences of 20 letters (a–p) like
+
+```
+filler  A  A  filler        A = 4–7 distinct random letters
+```
+
+The model is never told about the repeat. Inside the second copy of A the
+next letter is predictable, but only by finding where the current letter
+appeared before and copying what came after it. Accuracy is measured there;
+everywhere else the next letter is random.
+
+Three details of the task matter, each found by a version that failed:
+
+- **A starts at a random point.** When A A always began at position 1, a
+  single head learned to look a fixed distance back by position (late
+  positions are only scored when A is long), and reached 72% without any
+  induction.
+- **A's letters are distinct**, so "the letter after the earlier copy" is
+  always well defined. With repeats allowed, two blocks plateaued at 93%.
+- **The filler never uses A's letters**, so an earlier stray copy of a
+  letter can't mislead the search.
+
+The model: two of item 5's blocks, one head each, **attention only** (no
+FFN; `--ffn` adds them). The task needs copying, not computing, and with
+FFNs the circuit formed more slowly and less reliably (3 of 4 seeds by step
+4,000, one stuck near 55%). 10,048 parameters; the gradient check covers
+every weight in use.
+
+What it shows, with the defaults:
+
+- **The phase change.** Accuracy on the repeat sits near chance (6%) for
+  about 1,000 steps while the loss barely moves, then jumps from 27% to
+  94% between steps 1,250 and 1,750, ending at 96%. That sudden jump is what
+  Olsson et al. (2022) see when induction heads form in real models.
+- **Block 2's head is an induction head.** In the second copy, each row puts
+  its weight on the position right after the earlier copy of its own letter
+  (0.86 on average over 300 sequences): a stripe parallel to the diagonal,
+  k − 1 places to its left. Rows with nothing to find park their weight on
+  the first positions.
+- **Block 1's head is a loose previous-token head.** It puts 0.20 of its
+  weight on the previous letter, against 0.11 for an even spread, with less
+  on each letter before. So each position carries a blurred record of the
+  letters just before it, sharpest for the one right before: not the
+  textbook crisp head, but enough.
+- **Knockouts:** both heads 96.2%; without block 1's head 8.5%; without
+  block 2's head 1.3%; chance 6.2%. Block 2's search works only on what block
+  1 wrote into the residual stream: one layer's output becomes the next
+  layer's key.
+- **One block with two heads** (the same number of heads): 9.3%. A single
+  layer can match the current letter against earlier ones, but it finds the
+  earlier copy itself, not the letter after it: nothing yet holds "the
+  letter before me".
+- **Over seeds 1–4:** 96.2–97.8%, with the jump by steps 1,500, 1,500, 2,000
+  and 2,750. The plateau's length depends on the seed; the jump, when it
+  comes, is fast.
+
+Options (the comparisons train `--seeds` more models, in parallel):
+
+- `--vocab N`: number of letters, 2–26 (default 16)
+- `--len N`: sequence length (default 20)
+- `--min N`, `--max N`: the length of A (default 4 to 7); A must leave
+  letters for the filler, and A A must fit
+- `-d N`: vector width (default 32)
+- `--layers N`: number of blocks (default 2); try 3
+- `--heads N`: heads per block (default 1)
+- `--ffn`: include FFN sublayers; `--d-ff N` sets their width (default 128)
+- `--steps N` (default 4000), `--lr X` (default 0.005), `--batch N`,
+  `--seed N`
+- `--seeds N`: seeds in the comparison over seeds (default 4)
+
+The default run takes about a minute on two cores, less on more.
+
 ## The automatic differentiation tape (`src/tape.rs`)
 
 Not a subcommand: the machinery that computes gradients from now on (open
@@ -405,6 +484,12 @@ checked against.
   every weight matrix; the parameter count against PLAN.md's formula; the
   targets; and that it learns the task (over 95%) and fails without
   either sublayer
+- `induction`: the sequences (A distinct and repeated, filler free of A's
+  letters, targets the next token, scored ones predictable); two-block
+  gradients against finite differences, with and without FFNs. One slow
+  test (about 30 seconds) is left out of the normal run: two blocks reach
+  over 90% with a phase change, both knockouts break it, and one block
+  stays under 30%. Run it with `cargo test --release -- --ignored`.
 
 ## Source
 
@@ -415,10 +500,14 @@ checked against.
   backpropagation, Adam, the gradient check, and `train`'s explanation
 - `src/heads.rs`: `heads`: the division-of-labor analysis and the
   one-head comparison
-- `src/block.rs`: `block`: one complete transformer block on the tape, the
-  knockouts and the with/without-FFN comparison
+- `src/block.rs`: blocks on the tape (any number, and the task they're
+  trained on), and `block`: the knockouts and the with/without-FFN
+  comparison
+- `src/induction.rs`: `induction`: the phase change, what each head does,
+  knockouts, one block against two, and the comparison over seeds
 - `src/tape.rs`: the automatic differentiation tape and its tests
-- `src/optim.rs`: the Adam update, shared by `train`, `heads` and `block`
+- `src/optim.rs`: the Adam update, shared by `train`, `heads`, `block` and
+  `induction`
 - `src/rng.rs`: a seedable random number generator, with normal values
 - `src/main.rs`: the command line
 
@@ -433,4 +522,4 @@ As planned in PLAN.md ("Where each part is built"):
 4. ~~Several heads~~ (`heads`)
 5. ~~One complete block: the FFN, residual connections and layer
    normalization~~ (`block`)
-6. Two blocks forming an induction head (`induction`)
+6. ~~Two blocks forming an induction head~~ (`induction`)

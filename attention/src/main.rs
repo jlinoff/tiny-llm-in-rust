@@ -6,10 +6,12 @@
 //!   train     train one head on a task with a known answer, and watch it learn
 //!   heads     several heads dividing a task between them
 //!   block     one complete transformer block
+//!   induction two blocks forming an induction head
 
 mod attention;
 mod block;
 mod heads;
+mod induction;
 mod matrix;
 mod optim;
 mod rng;
@@ -27,7 +29,7 @@ use rng::Rng;
     name = "mini_attention",
     version,
     about = "Self-attention, small enough to print every number.",
-    after_help = "Start with `mini_attention example`, then `random`, `train`, `heads` and `block`."
+    after_help = "Start with `mini_attention example`, then `random`, `train`, `heads`, `block` and `induction`."
 )]
 struct Cli {
     #[command(subcommand)]
@@ -175,6 +177,54 @@ enum Command {
         #[arg(long, default_value_t = 6)]
         seeds: u64,
     },
+    /// Two blocks forming an induction head: next-token prediction on
+    /// sequences with a repeated stretch; shows the phase change, the two
+    /// heads' roles, knockouts, and why one block isn't enough.
+    Induction {
+        /// Number of distinct letters (2–26)
+        #[arg(long, default_value_t = 16)]
+        vocab: usize,
+        /// Sequence length
+        #[arg(long, default_value_t = 20)]
+        len: usize,
+        /// Shortest repeated stretch A
+        #[arg(long, default_value_t = 4)]
+        min: usize,
+        /// Longest repeated stretch A
+        #[arg(long, default_value_t = 7)]
+        max: usize,
+        /// Vector width d
+        #[arg(short, long, default_value_t = 32)]
+        dim: usize,
+        /// Number of blocks
+        #[arg(long, default_value_t = 2)]
+        layers: usize,
+        /// Heads per block (must divide d)
+        #[arg(long, default_value_t = 1)]
+        heads: usize,
+        /// Include FFN sublayers (off by default: the task needs copying, not
+        /// computing, and FFNs slow the circuit's formation)
+        #[arg(long)]
+        ffn: bool,
+        /// Inner width of the FFN, if any
+        #[arg(long, default_value_t = 128)]
+        d_ff: usize,
+        /// Training steps
+        #[arg(long, default_value_t = 4000)]
+        steps: usize,
+        /// Adam learning rate
+        #[arg(long, default_value_t = 0.005)]
+        lr: f64,
+        /// Sequences per step
+        #[arg(long, default_value_t = 16)]
+        batch: usize,
+        /// Random seed (the comparison uses this and the following seeds)
+        #[arg(long, default_value_t = 1)]
+        seed: u64,
+        /// Seeds in the comparison over seeds
+        #[arg(long, default_value_t = 4)]
+        seeds: u64,
+    },
 }
 
 fn main() {
@@ -270,8 +320,66 @@ fn main() {
                 batch,
                 seed,
                 ffn: true,
+                layers: 1,
+                task: block::Task::SumMod,
             };
             block::run_command(&c, seeds);
+        }
+        Command::Induction {
+            vocab,
+            len,
+            min,
+            max,
+            dim,
+            layers,
+            heads,
+            ffn,
+            d_ff,
+            steps,
+            lr,
+            batch,
+            seed,
+            seeds,
+        } => {
+            // Filler draws from the letters not in A, so A must leave some.
+            if !(2..=26).contains(&vocab)
+                || min < 2
+                || max < min
+                || max >= vocab
+                || 2 * max > len
+                || dim == 0
+                || layers == 0
+                || heads == 0
+                || dim % heads != 0
+                || d_ff == 0
+                || batch == 0
+                || seeds == 0
+                || steps < 250
+                || lr.is_nan()
+                || lr <= 0.0
+            {
+                eprintln!(
+                    "mini_attention: error: need --vocab 2–26, 2 ≤ --min ≤ --max < --vocab, \
+                     2 × --max ≤ --len, --heads dividing --dim, --steps of at least 250, \
+                     and positive --layers, --d-ff, --batch, --seeds and --lr"
+                );
+                std::process::exit(2);
+            }
+            let c = block::Config {
+                vocab,
+                len,
+                dim,
+                layers,
+                heads,
+                d_ff,
+                steps,
+                lr,
+                batch,
+                seed,
+                ffn,
+                task: block::Task::Induction { min, max },
+            };
+            induction::run_command(&c, &induction::Options { seeds });
         }
         Command::Heads {
             lags,

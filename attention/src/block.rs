@@ -21,6 +21,9 @@ pub struct Config {
     pub vocab: usize,
     pub len: usize,
     pub dim: usize,
+    /// Number of blocks, applied one after another.
+    pub layers: usize,
+    /// Heads per block.
     pub heads: usize,
     pub d_ff: usize,
     pub steps: usize,
@@ -29,13 +32,93 @@ pub struct Config {
     pub seed: u64,
     /// Include the FFN sublayer (false for the ablation).
     pub ffn: bool,
+    pub task: Task,
 }
 
-/// The block's weights, by name.
+/// What the model is trained to predict.
+#[derive(Clone, Copy)]
+pub enum Task {
+    /// (token one back + token two back) mod V, at each position from 3 on.
+    SumMod,
+    /// Next-token prediction on sequences A A tail, where A is k random
+    /// tokens, k from `min` to `max`. Accuracy is measured where the next
+    /// token is predictable: inside the second copy of A.
+    Induction { min: usize, max: usize },
+}
+
+/// One training or test example: the tokens, the target at each position
+/// (None where there is no loss), and which positions count for accuracy.
+pub struct Example {
+    pub tokens: Vec<usize>,
+    pub targets: Vec<Option<usize>>,
+    pub scored: Vec<bool>,
+}
+
+impl Task {
+    pub fn sample(&self, c: &Config, rng: &mut Rng) -> Example {
+        match *self {
+            Task::SumMod => {
+                let tokens: Vec<usize> = (0..c.len).map(|_| rng.below(c.vocab)).collect();
+                let targets: Vec<Option<usize>> =
+                    (0..c.len).map(|t| target(&tokens, t, c.vocab)).collect();
+                let scored = targets.iter().map(Option::is_some).collect();
+                Example {
+                    tokens,
+                    targets,
+                    scored,
+                }
+            }
+            Task::Induction { min, max } => {
+                // A has k distinct tokens, so "the token that followed the
+                // earlier copy of this one" is always well defined.
+                let k = min + rng.below(max - min + 1);
+                let mut a: Vec<usize> = Vec::with_capacity(k);
+                while a.len() < k {
+                    let tok = rng.below(c.vocab);
+                    if !a.contains(&tok) {
+                        a.push(tok);
+                    }
+                }
+                // A A starts at a random point, after filler, so a token's
+                // position says nothing about where the earlier copy is.
+                // Filler never uses A's tokens, so there's no false match.
+                let start = rng.below(c.len - 2 * k + 1);
+                let mut filler = || loop {
+                    let tok = rng.below(c.vocab);
+                    if !a.contains(&tok) {
+                        break tok;
+                    }
+                };
+                let mut tokens: Vec<usize> = (0..start).map(|_| filler()).collect();
+                tokens.extend(&a);
+                tokens.extend(&a);
+                while tokens.len() < c.len {
+                    tokens.push(filler());
+                }
+                // Next-token prediction everywhere; the last position has
+                // nothing after it.
+                let targets = (0..c.len)
+                    .map(|t| (t + 1 < c.len).then(|| tokens[t + 1]))
+                    .collect();
+                // Predictable: the positions inside the second copy of A
+                // whose next token is also in it.
+                let second = start + k;
+                let scored = (0..c.len)
+                    .map(|t| t >= second && t + 1 < second + k)
+                    .collect();
+                Example {
+                    tokens,
+                    targets,
+                    scored,
+                }
+            }
+        }
+    }
+}
+
+/// One block's weights.
 #[derive(Clone)]
-pub struct Weights {
-    pub e: Mat,
-    pub p: Mat,
+pub struct Layer {
     pub ln1_g: Mat,
     pub ln1_b: Mat,
     /// Per head: W_q, W_k, W_v, each d × h.
@@ -48,6 +131,14 @@ pub struct Weights {
     pub b1: Mat,
     pub w2: Mat,
     pub b2: Mat,
+}
+
+/// The model's weights, by name.
+#[derive(Clone)]
+pub struct Weights {
+    pub e: Mat,
+    pub p: Mat,
+    pub layers: Vec<Layer>,
     pub lnf_g: Mat,
     pub lnf_b: Mat,
     pub u: Mat,
@@ -63,84 +154,103 @@ impl Weights {
             m
         };
         let s = 1.0 / (d as f64).sqrt();
+        let e = Mat::random_normal(c.vocab, d, 1.0, rng);
+        let p = Mat::random_normal(c.len, d, 1.0, rng);
+        let layers = (0..c.layers)
+            .map(|_| Layer {
+                ln1_g: ones(d),
+                ln1_b: Mat::zeros(1, d),
+                heads: (0..c.heads)
+                    .map(|_| {
+                        [
+                            Mat::random_normal(d, h, 0.02, rng),
+                            Mat::random_normal(d, h, 0.02, rng),
+                            Mat::random_normal(d, h, s, rng),
+                        ]
+                    })
+                    .collect(),
+                wo: Mat::random_normal(d, d, s, rng),
+                ln2_g: ones(d),
+                ln2_b: Mat::zeros(1, d),
+                w1: Mat::random_normal(d, c.d_ff, s, rng),
+                b1: Mat::zeros(1, c.d_ff),
+                w2: Mat::random_normal(c.d_ff, d, 1.0 / (c.d_ff as f64).sqrt(), rng),
+                b2: Mat::zeros(1, d),
+            })
+            .collect();
+        let u = Mat::random_normal(d, c.vocab, s, rng);
         Weights {
-            e: Mat::random_normal(c.vocab, d, 1.0, rng),
-            p: Mat::random_normal(c.len, d, 1.0, rng),
-            ln1_g: ones(d),
-            ln1_b: Mat::zeros(1, d),
-            heads: (0..c.heads)
-                .map(|_| {
-                    [
-                        Mat::random_normal(d, h, 0.02, rng),
-                        Mat::random_normal(d, h, 0.02, rng),
-                        Mat::random_normal(d, h, s, rng),
-                    ]
-                })
-                .collect(),
-            wo: Mat::random_normal(d, d, s, rng),
-            ln2_g: ones(d),
-            ln2_b: Mat::zeros(1, d),
-            w1: Mat::random_normal(d, c.d_ff, s, rng),
-            b1: Mat::zeros(1, c.d_ff),
-            w2: Mat::random_normal(c.d_ff, d, 1.0 / (c.d_ff as f64).sqrt(), rng),
-            b2: Mat::zeros(1, d),
+            e,
+            p,
+            layers,
             lnf_g: ones(d),
             lnf_b: Mat::zeros(1, d),
-            u: Mat::random_normal(d, c.vocab, s, rng),
+            u,
         }
     }
 
+    /// Every weight matrix, in a fixed order: E, P, each block's (LN₁, the
+    /// heads' W_q, W_k, W_v, W_o, LN₂, the FFN), LN_f, U.
     pub fn all(&self) -> Vec<&Mat> {
-        let mut v = vec![&self.e, &self.p, &self.ln1_g, &self.ln1_b];
-        for h in &self.heads {
-            v.extend(h.iter());
+        let mut v = vec![&self.e, &self.p];
+        for l in &self.layers {
+            v.extend([&l.ln1_g, &l.ln1_b]);
+            for h in &l.heads {
+                v.extend(h.iter());
+            }
+            v.extend([&l.wo, &l.ln2_g, &l.ln2_b, &l.w1, &l.b1, &l.w2, &l.b2]);
         }
-        v.extend([
-            &self.wo,
-            &self.ln2_g,
-            &self.ln2_b,
-            &self.w1,
-            &self.b1,
-            &self.w2,
-            &self.b2,
-            &self.lnf_g,
-            &self.lnf_b,
-            &self.u,
-        ]);
+        v.extend([&self.lnf_g, &self.lnf_b, &self.u]);
+        v
+    }
+
+    /// Which of the matrices in `all()` the model uses: without the FFN
+    /// sublayer, each block's LN₂ and FFN weights exist but never take part.
+    pub fn used(&self, ffn: bool) -> Vec<bool> {
+        let mut v = vec![true, true];
+        for l in &self.layers {
+            v.extend([true, true]);
+            v.extend(std::iter::repeat_n(true, 3 * l.heads.len()));
+            v.push(true); // W_o
+            v.extend([ffn; 6]); // LN₂ (2), W₁, b₁, W₂, b₂
+        }
+        v.extend([true, true, true]);
         v
     }
 
     pub fn all_mut(&mut self) -> Vec<&mut Mat> {
-        let mut v = vec![&mut self.e, &mut self.p, &mut self.ln1_g, &mut self.ln1_b];
-        for h in &mut self.heads {
-            v.extend(h.iter_mut());
+        let mut v = vec![&mut self.e, &mut self.p];
+        for l in &mut self.layers {
+            v.extend([&mut l.ln1_g, &mut l.ln1_b]);
+            for h in &mut l.heads {
+                v.extend(h.iter_mut());
+            }
+            v.extend([
+                &mut l.wo,
+                &mut l.ln2_g,
+                &mut l.ln2_b,
+                &mut l.w1,
+                &mut l.b1,
+                &mut l.w2,
+                &mut l.b2,
+            ]);
         }
-        v.extend([
-            &mut self.wo,
-            &mut self.ln2_g,
-            &mut self.ln2_b,
-            &mut self.w1,
-            &mut self.b1,
-            &mut self.w2,
-            &mut self.b2,
-            &mut self.lnf_g,
-            &mut self.lnf_b,
-            &mut self.u,
-        ]);
+        v.extend([&mut self.lnf_g, &mut self.lnf_b, &mut self.u]);
         v
     }
 }
 
-/// The target at position t: (token one back + token two back) mod V.
+/// The target at position t for the sum task: (one back + two back) mod V.
 pub fn target(tokens: &[usize], t: usize, vocab: usize) -> Option<usize> {
     (t >= 2).then(|| (tokens[t - 1] + tokens[t - 2]) % vocab)
 }
 
-/// What to leave out at run time, to see what each sublayer contributes.
+/// What to leave out at run time, to see what each part contributes: one
+/// block's attention addition, or one block's FFN addition.
 #[derive(Clone, Copy, Default)]
 pub struct Knockout {
-    pub attention: bool,
-    pub ffn: bool,
+    pub attention: Option<usize>,
+    pub ffn: Option<usize>,
 }
 
 /// The forward pass, recorded on a tape.
@@ -149,75 +259,87 @@ pub struct Run {
     pub leaves: Vec<Var>,
     pub loss: Var,
     pub logits: Var,
-    /// Each head's attention weights.
-    pub attn: Vec<Var>,
-    /// The residual stream's parts: x (embeddings), what attention added,
-    /// what the FFN added.
+    /// Each block's heads' attention weights.
+    pub attn: Vec<Vec<Var>>,
+    /// The residual stream's parts: x (embeddings), and what each block's
+    /// attention and FFN added.
     pub x: Var,
-    pub attn_out: Var,
-    pub ffn_out: Option<Var>,
+    pub attn_out: Vec<Var>,
+    pub ffn_out: Vec<Option<Var>>,
 }
 
-pub fn run(w: &Weights, c: &Config, tokens: &[usize], ko: Knockout) -> Run {
+pub fn run(w: &Weights, c: &Config, ex: &Example, ko: Knockout) -> Run {
     let mut t = Tape::new();
     let leaves: Vec<Var> = w.all().into_iter().map(|m| t.leaf(m.clone())).collect();
-    // The leaves in Weights::all() order.
-    let (e, p, ln1_g, ln1_b) = (leaves[0], leaves[1], leaves[2], leaves[3]);
-    let nh = w.heads.len();
-    let heads: Vec<[Var; 3]> = (0..nh)
-        .map(|k| [leaves[4 + 3 * k], leaves[5 + 3 * k], leaves[6 + 3 * k]])
-        .collect();
-    let r = &leaves[4 + 3 * nh..];
-    let (wo, ln2_g, ln2_b, w1, b1, w2, b2, lnf_g, lnf_b, u) =
-        (r[0], r[1], r[2], r[3], r[4], r[5], r[6], r[7], r[8], r[9]);
+    // Walk the leaves in Weights::all() order.
+    let mut next = leaves.iter().copied();
+    let mut take = || next.next().unwrap();
+    let (e, p) = (take(), take());
 
     // x = E[token] + P[t]: the residual stream starts here.
-    let tok = t.gather(e, tokens);
-    let positions: Vec<usize> = (0..tokens.len()).collect();
+    let tok = t.gather(e, &ex.tokens);
+    let positions: Vec<usize> = (0..ex.tokens.len()).collect();
     let pos = t.gather(p, &positions);
     let x = t.add(tok, pos);
 
-    // Attention sublayer: h = x + W_o·[heads](LN₁(x))
-    let z = t.layer_norm(x, ln1_g, ln1_b, 1e-5);
-    let hs = (c.dim / nh) as f64;
-    let mut attn = Vec::new();
-    let mut outs = Vec::new();
-    for &[wq, wk, wv] in &heads {
-        let q = t.matmul(z, wq);
-        let k = t.matmul(z, wk);
-        let v = t.matmul(z, wv);
-        let kt = t.transpose(k);
-        let s = t.matmul(q, kt);
-        let s = t.scale(s, 1.0 / hs.sqrt());
-        let a = t.causal_softmax(s);
-        attn.push(a);
-        outs.push(t.matmul(a, v));
-    }
-    let joined = t.concat(&outs);
-    let attn_out = t.matmul(joined, wo);
-    let h = if ko.attention { x } else { t.add(x, attn_out) };
+    let mut stream = x;
+    let (mut attn, mut attn_out, mut ffn_out) = (Vec::new(), Vec::new(), Vec::new());
+    for (li, layer) in w.layers.iter().enumerate() {
+        let (ln1_g, ln1_b) = (take(), take());
+        let heads: Vec<[Var; 3]> = layer
+            .heads
+            .iter()
+            .map(|_| [take(), take(), take()])
+            .collect();
+        let (wo, ln2_g, ln2_b, w1, b1, w2, b2) =
+            (take(), take(), take(), take(), take(), take(), take());
 
-    // FFN sublayer: y = h + W₂·GELU(W₁·LN₂(h) + b₁) + b₂
-    let (y, ffn_out) = if c.ffn {
-        let z2 = t.layer_norm(h, ln2_g, ln2_b, 1e-5);
-        let a1 = t.matmul(z2, w1);
-        let a1 = t.add_row(a1, b1);
-        let g = t.gelu(a1);
-        let f = t.matmul(g, w2);
-        let f = t.add_row(f, b2);
-        let y = if ko.ffn { h } else { t.add(h, f) };
-        (y, Some(f))
-    } else {
-        (h, None)
-    };
+        // Attention sublayer: h = x + W_o·[heads](LN₁(x))
+        let z = t.layer_norm(stream, ln1_g, ln1_b, 1e-5);
+        let hs = (c.dim / heads.len()) as f64;
+        let mut weights = Vec::new();
+        let mut outs = Vec::new();
+        for &[wq, wk, wv] in &heads {
+            let q = t.matmul(z, wq);
+            let k = t.matmul(z, wk);
+            let v = t.matmul(z, wv);
+            let kt = t.transpose(k);
+            let s = t.matmul(q, kt);
+            let s = t.scale(s, 1.0 / hs.sqrt());
+            let a = t.causal_softmax(s);
+            weights.push(a);
+            outs.push(t.matmul(a, v));
+        }
+        let joined = t.concat(&outs);
+        let a_out = t.matmul(joined, wo);
+        if ko.attention != Some(li) {
+            stream = t.add(stream, a_out);
+        }
+        attn.push(weights);
+        attn_out.push(a_out);
+
+        // FFN sublayer: y = h + W₂·GELU(W₁·LN₂(h) + b₁) + b₂
+        if c.ffn {
+            let z2 = t.layer_norm(stream, ln2_g, ln2_b, 1e-5);
+            let a1 = t.matmul(z2, w1);
+            let a1 = t.add_row(a1, b1);
+            let g = t.gelu(a1);
+            let f = t.matmul(g, w2);
+            let f = t.add_row(f, b2);
+            if ko.ffn != Some(li) {
+                stream = t.add(stream, f);
+            }
+            ffn_out.push(Some(f));
+        } else {
+            ffn_out.push(None);
+        }
+    }
 
     // Output: logits = LN_f(y)·U
-    let zf = t.layer_norm(y, lnf_g, lnf_b, 1e-5);
+    let (lnf_g, lnf_b, u) = (take(), take(), take());
+    let zf = t.layer_norm(stream, lnf_g, lnf_b, 1e-5);
     let logits = t.matmul(zf, u);
-    let targets: Vec<Option<usize>> = (0..tokens.len())
-        .map(|i| target(tokens, i, c.vocab))
-        .collect();
-    let loss = t.softmax_cross_entropy(logits, &targets);
+    let loss = t.softmax_cross_entropy(logits, &ex.targets);
     Run {
         tape: t,
         leaves,
@@ -230,31 +352,33 @@ pub fn run(w: &Weights, c: &Config, tokens: &[usize], ko: Knockout) -> Run {
     }
 }
 
-pub fn random_tokens(c: &Config, rng: &mut Rng) -> Vec<usize> {
-    (0..c.len).map(|_| rng.below(c.vocab)).collect()
+/// The index of the largest entry.
+fn argmax(row: &[f64]) -> usize {
+    (0..row.len()).fold(0, |b, i| if row[i] > row[b] { i } else { b })
 }
 
-/// Correct predictions and the number of positions with a target.
-pub fn score(r: &Run, tokens: &[usize], c: &Config) -> (usize, usize) {
+/// Correct predictions at the scored positions, and how many there are.
+pub fn score(r: &Run, ex: &Example) -> (usize, usize) {
     let l = r.tape.value(r.logits);
-    let mut correct = 0;
-    for t in 2..tokens.len() {
-        let row = l.row(t);
-        let best = (0..row.len()).fold(0, |b, i| if row[i] > row[b] { i } else { b });
-        correct += usize::from(Some(best) == target(tokens, t, c.vocab));
+    let (mut correct, mut total) = (0, 0);
+    for (t, &counted) in ex.scored.iter().enumerate() {
+        if counted {
+            correct += usize::from(Some(argmax(l.row(t))) == ex.targets[t]);
+            total += 1;
+        }
     }
-    (correct, tokens.len() - 2)
+    (correct, total)
 }
 
 pub fn evaluate(w: &Weights, c: &Config, rng: &mut Rng, n: usize, ko: Knockout) -> f64 {
     let (mut correct, mut total) = (0, 0);
     for _ in 0..n {
-        let tokens = random_tokens(c, rng);
-        let (a, b) = score(&run(w, c, &tokens, ko), &tokens, c);
+        let ex = c.task.sample(c, rng);
+        let (a, b) = score(&run(w, c, &ex, ko), &ex);
         correct += a;
         total += b;
     }
-    correct as f64 / total as f64
+    correct as f64 / total.max(1) as f64
 }
 
 pub struct Trainer {
@@ -274,18 +398,19 @@ impl Trainer {
     }
 
     /// One step: gradients from the tape, averaged over a batch, then Adam.
+    /// Returns the batch's mean loss and accuracy.
     pub fn step(&mut self, w: &mut Weights, c: &Config, rng: &mut Rng) -> (f64, f64) {
         let mut grad: Vec<Mat> = w.all().iter().map(|m| Mat::zeros(m.rows, m.cols)).collect();
         let (mut loss, mut correct, mut total) = (0.0, 0, 0);
         for _ in 0..c.batch {
-            let tokens = random_tokens(c, rng);
-            let mut r = run(w, c, &tokens, Knockout::default());
+            let ex = c.task.sample(c, rng);
+            let mut r = run(w, c, &ex, Knockout::default());
             r.tape.backward(r.loss);
             for (g, &leaf) in grad.iter_mut().zip(&r.leaves) {
                 g.add_scaled(&r.tape.grad(leaf), 1.0 / c.batch as f64);
             }
             loss += r.tape.value(r.loss).data[0];
-            let (a, b) = score(&r, &tokens, c);
+            let (a, b) = score(&r, &ex);
             correct += a;
             total += b;
         }
@@ -299,7 +424,7 @@ impl Trainer {
         {
             adam_update(m, v, w, g, self.t, c.lr);
         }
-        (loss / c.batch as f64, correct as f64 / total as f64)
+        (loss / c.batch as f64, correct as f64 / total.max(1) as f64)
     }
 }
 
@@ -322,18 +447,22 @@ fn labels(tokens: &[usize]) -> Vec<String> {
 
 /// Finite-difference check of the whole block's tape gradients, on a few
 /// entries of every weight matrix. Returns the worst relative error.
-fn gradient_check(w: &Weights, c: &Config, tokens: &[usize], rng: &mut Rng) -> (f64, usize) {
-    let mut r = run(w, c, tokens, Knockout::default());
+pub fn gradient_check(w: &Weights, c: &Config, ex: &Example, rng: &mut Rng) -> (f64, usize) {
+    let mut r = run(w, c, ex, Knockout::default());
     r.tape.backward(r.loss);
     let grads: Vec<Mat> = r.leaves.iter().map(|&l| r.tape.grad(l)).collect();
     let loss_at = |w: &Weights| {
-        let r = run(w, c, tokens, Knockout::default());
+        let r = run(w, c, ex, Knockout::default());
         r.tape.value(r.loss).data[0]
     };
     let eps = 1e-6;
     let mut probe = w.clone();
+    let used = w.used(c.ffn);
     let (mut worst, mut checked): (f64, usize) = (0.0, 0);
     for (k, grad) in grads.iter().enumerate() {
+        if !used[k] {
+            continue; // not part of this model: its gradient is 0
+        }
         for _ in 0..3 {
             let len = probe.all()[k].data.len();
             let i = rng.below(len);
@@ -356,7 +485,7 @@ fn gradient_check(w: &Weights, c: &Config, tokens: &[usize], rng: &mut Rng) -> (
 }
 
 /// Train quietly; returns the weights and the accuracy on fresh sequences.
-fn train_quietly(c: &Config, seed: u64) -> (Weights, f64) {
+pub fn train_quietly(c: &Config, seed: u64) -> (Weights, f64) {
     let c = Config { seed, ..c.clone() };
     let mut rng = Rng::new(seed);
     let mut w = Weights::new(&c, &mut rng);
@@ -381,12 +510,12 @@ fn stream_sizes(w: &Weights, c: &Config, rng: &mut Rng, n: usize) -> [f64; 3] {
     let mut sizes = [0.0; 3];
     let mut rows = 0;
     for _ in 0..n {
-        let tokens = random_tokens(c, rng);
-        let r = run(w, c, &tokens, Knockout::default());
-        for t in 2..tokens.len() {
+        let ex = c.task.sample(c, rng);
+        let r = run(w, c, &ex, Knockout::default());
+        for t in 2..ex.tokens.len() {
             sizes[0] += norm(r.tape.value(r.x), t);
-            sizes[1] += norm(r.tape.value(r.attn_out), t);
-            if let Some(f) = r.ffn_out {
+            sizes[1] += norm(r.tape.value(r.attn_out[0]), t);
+            if let Some(f) = r.ffn_out[0] {
                 sizes[2] += norm(r.tape.value(f), t);
             }
             rows += 1;
@@ -439,8 +568,9 @@ pub fn run_command(c: &Config, seeds: u64) {
         formula - 4 * d + v * d
     );
 
-    let demo = random_tokens(c, &mut rng);
-    let (worst, checked) = gradient_check(&w, c, &demo, &mut Rng::new(c.seed ^ 0x6C));
+    let ex = c.task.sample(c, &mut rng);
+    let demo = ex.tokens.clone();
+    let (worst, checked) = gradient_check(&w, c, &ex, &mut Rng::new(c.seed ^ 0x6C));
     println!(
         "Gradient check (tape vs finite differences, {checked} weights in all {} matrices):",
         w.all().len()
@@ -483,8 +613,8 @@ pub fn run_command(c: &Config, seeds: u64) {
     println!("=== After training ===");
     println!("Accuracy on 500 fresh sequences: {:.1}%\n", 100.0 * full);
 
-    let r = run(&w, c, &demo, Knockout::default());
-    for (k, &a) in r.attn.iter().enumerate() {
+    let r = run(&w, c, &ex, Knockout::default());
+    for (k, &a) in r.attn[0].iter().enumerate() {
         print_weights(
             &format!(
                 "head {}: attention on the sequence {}",
@@ -526,8 +656,8 @@ pub fn run_command(c: &Config, seeds: u64) {
         &mut eval,
         500,
         Knockout {
-            attention: true,
-            ffn: false,
+            attention: Some(0),
+            ffn: None,
         },
     );
     let mut eval = Rng::new(c.seed ^ 0xE7A1);
@@ -537,8 +667,8 @@ pub fn run_command(c: &Config, seeds: u64) {
         &mut eval,
         500,
         Knockout {
-            attention: false,
-            ffn: true,
+            attention: None,
+            ffn: Some(0),
         },
     );
     println!("Knocking out one sublayer at test time (its addition to the stream left");
@@ -612,6 +742,7 @@ mod tests {
             vocab: 10,
             len: 8,
             dim: 32,
+            layers: 1,
             heads: 2,
             d_ff: 128,
             steps: 1000,
@@ -619,6 +750,7 @@ mod tests {
             batch: 16,
             seed: 1,
             ffn: true,
+            task: Task::SumMod,
         }
     }
 
@@ -627,8 +759,8 @@ mod tests {
         let c = config();
         let mut rng = Rng::new(4);
         let w = Weights::new(&c, &mut rng);
-        let tokens = random_tokens(&c, &mut rng);
-        let (worst, checked) = gradient_check(&w, &c, &tokens, &mut rng);
+        let ex = c.task.sample(&c, &mut rng);
+        let (worst, checked) = gradient_check(&w, &c, &ex, &mut rng);
         assert_eq!(checked, 3 * w.all().len());
         assert!(worst < 1e-5, "{worst}");
     }
@@ -660,7 +792,7 @@ mod tests {
         assert!(acc > 0.95, "accuracy {acc}");
         let ko =
             |attention, ffn| evaluate(&w, &c, &mut Rng::new(3), 200, Knockout { attention, ffn });
-        assert!(ko(true, false) < 0.3, "without attention");
-        assert!(ko(false, true) < 0.4, "without the FFN");
+        assert!(ko(Some(0), None) < 0.3, "without attention");
+        assert!(ko(None, Some(0)) < 0.4, "without the FFN");
     }
 }

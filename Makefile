@@ -81,6 +81,8 @@ data/text8:
 
 .PHONY: clean
 clean: ## Remove generated files (keeps data/ and uncommitted work).
+	cd word2vec && cargo clean
+	cd attention && cargo clean
 	rm -rf $(OUT) project.zip
 	rm -f *~
 

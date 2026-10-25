@@ -424,7 +424,7 @@ attention:
   3. train      generated sequences + a task      ──► (printed)   # one head learning "predict the token 2 back"
   4. heads      generated sequences + a task      ──► (printed)   # several heads dividing a task, vs one head
   5. block      generated sequences + a task      ──► (printed)   # one complete transformer block
-  6. induction  generated sequences + a task      ──► (printed)   # two blocks forming an induction head (to do)
+  6. induction  generated sequences + a task      ──► (printed)   # two blocks forming an induction head
 ```
 
 Same key as above, with one difference: the items don't feed each other.
@@ -1143,6 +1143,20 @@ decision for `transformer/`.
      differ between a Mac and Linux); with the FFN, 100% every time,
      unaffected. First model written on
      the automatic differentiation tape (decision 7).
+
+     *Aside, a curiosity that nothing later depends on: why those no-FFN
+     runs differ between machines.* Two runs from the same seed, one with
+     the learning rate changed by 3 × 10⁻¹⁶ (two units in its last place),
+     stay within a few units of the last digit of each other for about 400
+     steps, although every weight's update differs slightly at every step.
+     When the model commits to a solution (around steps 400–750, where
+     accuracy jumps), the run without an FFN amplifies the difference to
+     10⁻³ in about 250 steps (roughly ×1.12 per step), and the two end in
+     different solutions (99.6% and 90.7%). The full block's difference
+     grows only to 10⁻¹² and stops: both runs fall into the same solution.
+     It's a ball balanced on a ridge, where a tiny push decides the valley.
+     One last-bit difference in exp or tanh, present at that moment, is
+     enough, which is why per-seed figures differ between a Mac and Linux.
   6. **Two blocks forming an induction head** (`induction`): the smallest
      case where layers cooperate, and the mechanism behind in-context
      learning (continuing a pattern seen earlier in the context). A head in
@@ -1153,7 +1167,18 @@ decision for `transformer/`.
      the first. It needs two layers (block 2's search depends on what block
      1 wrote), it tests the residual stream from item 5, and it is the first
      head that looks by content rather than by position (Olsson et al.,
-     2022).
+     2022). Result: two attention-only blocks with one head each reach
+     96–98% on the repeat over 4 seeds, after a plateau near chance and a
+     sudden jump (the phase change), which comes anywhere from step 1,500 to
+     2,750. Block 2's head puts 0.86 of its weight on the position after
+     the earlier copy; block 1's is a loose previous-token head (0.20 on the
+     previous letter, against 0.11 for an even spread). Knocking out
+     either head drops accuracy to chance or below; one block with two
+     heads reaches only 9%. Getting a fair test took three task fixes: A A
+     starts at a random point (otherwise one head solves 72% by position
+     alone), A's letters are distinct, and the filler avoids them. With
+     FFNs the circuit forms more slowly, so the blocks are attention-only
+     by default.
 
   These are called items ("item 3"), or by the `mini_attention` subcommand
   that runs each one, never steps or stages: "step" always means a step of
@@ -1353,7 +1378,7 @@ llm/
 |---|---|---|
 | `tokenizer/` | LLM 1 tokenize, 2 encode; decode for 6 | steps 1 and 2 done (`mini_bpe.py`), with EOS; turn markers to do |
 | `word2vec/` | word2vec 1 train, 2 explore | done |
-| `attention/` | none: a learning exercise before `transformer/` | items 1–5 of [its list](#where-each-part-is-built) done (`example`, `random`, `train`, `heads`, `block`); 6 (`induction`) to do |
+| `attention/` | none: a learning exercise before `transformer/` | all 6 items of [its list](#where-each-part-is-built) done (`example`, `random`, `train`, `heads`, `block`, `induction`) |
 | `transformer/` | LLM 3 build, 4 train, 5 finetune, 6 generate | not started |
 
 The Makefile in `llm/` drives the flow, with one target per step. Each target
@@ -1561,11 +1586,10 @@ text8, matching gensim (a widely used Python library with its own word2vec) at
    each document~~ done. Turn markers when post-training needs them.
 3. `attention/`: self-attention alone, on toy inputs, ending with one
    complete block and then two blocks forming an induction head (see
-   [The transformer block](#the-transformer-block)). Items 1–5 (hand-set,
-   random and trained weights; several heads; one complete block) done;
-   item 6 (`induction`) next. The automatic differentiation tape (decision
-   7) is done, checked against the hand-written gradients of items 3 and 4,
-   and item 5 is the first model built on it.
+   [The transformer block](#the-transformer-block)). Done: all 6 items,
+   from hand-set weights to two blocks forming an induction head, and the
+   automatic differentiation tape (decision 7), checked against the
+   hand-written gradients of items 3 and 4 and used by items 5 and 6.
 4. `transformer/`: build, then train, then generate, then finetune.
 5. Throughout: add each step's Makefile target as the step is built
    (`tokenize` exists). At the end, fold this plan into `llm/README.md`.
