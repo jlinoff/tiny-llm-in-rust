@@ -1,7 +1,9 @@
 # transformer
 
 The real model: a small GPT-style language model, and the LLM flow's steps 3
-to 6 in PLAN.md (build, train, finetune, generate). So far, step 3 is done.
+to 6 in PLAN.md (build, train, finetune, generate). So far: step 3 is done,
+and step 4 (train) has its forward and backward passes; the training loop
+comes next.
 
 Terms (tensor, checkpoint, safetensors, layer norm, …) are defined in
 [`../PLAN.md`](../PLAN.md#terms).
@@ -14,8 +16,9 @@ cargo test --release
 ```
 
 Rust 1.85 or later. Dependencies: `clap` (command line), `serde` with `toml`
-(the config) and `serde_json` (the safetensors header), and `sha2` (the
-tokenizer fingerprint). The binary is `target/release/transformer`.
+(the config) and `serde_json` (the safetensors header), `sha2` (the
+tokenizer fingerprint), and `rayon` (threads). The binary is
+`target/release/transformer`.
 
 Unlike attention/, which uses 64-bit floats so every number prints cleanly,
 the model uses 32-bit floats (f32): half the memory and about twice the
@@ -106,6 +109,58 @@ against the layout that config implies: every expected name present, with
 the right shape, and nothing unexpected. It ends with the weights
 fingerprint. `-v` lists every tensor.
 
+## The forward and backward passes (step 4, in progress)
+
+`src/gpt.rs` writes the model's forward pass for a batch of B sequences of T
+tokens, one row per token, on an automatic differentiation tape
+(`src/tape.rs`), the same idea as attention/'s, so there is no hand-written
+backward pass for the model:
+
+```
+x      = E[token] + P[position]
+for each block:
+  h    = x + (attention(LN₁(x)) · W_o + b_o)        Q, K, V = LN₁(x)·W + b
+  x    = h + (GELU(LN₂(h)·W₁ + b₁)·W₂ + b₂)
+logits = LN_f(x) · Eᵀ                              the output tied to E
+loss   = mean cross-entropy against the next tokens
+```
+
+The tape differs from attention/'s in three ways:
+
+- **Generic over the float type.** It's the same code for f32 (training)
+  and f64 (gradient checks: finite differences in f32 are too noisy to
+  catch subtle errors).
+- **Batched.** A batch is one (B·T) × d matrix, so per-token operations
+  handle every token at once.
+- **Fused operations,** each with one hand-written backward rule:
+  - layer norm, with the closed-form gradient attention/'s tape verified
+  - multi-head causal attention over the whole batch, one parallel task
+    per (sequence, head)
+  - softmax with cross-entropy
+
+**Threads.** Matrix products split their output into blocks of 8 rows,
+which `rayon`'s worker threads take as they become free (work stealing), so
+fast performance cores don't wait for slower efficiency cores. Weight
+gradients (dW = Xᵀ·dY, summed over every token in the batch) are computed as
+a sum of per-token updates in fixed blocks of 64 tokens, which keeps dW in
+the cache. Element-by-element and row-by-row operations (GELU, biases,
+residual additions, layer norm) run in parallel too. Without that, a
+profile showed GELU alone taking 20% of a step on one thread, a share that
+grows with more cores (Amdahl's law). Every result is the same whatever the
+number of threads: each element is summed in a fixed order (tests check
+this).
+
+**Checks.**
+
+- Every operation's gradient against finite differences in f64.
+- Then every weight of a small two-block model at once: embeddings, both
+  blocks' attention and FFN, all layer norms and biases, and the tied
+  output layer.
+- The initial loss is about ln V, a uniform guess.
+- A later token never changes an earlier prediction.
+- The tests catch deliberate errors: removing attention's 1/√h scale, or
+  the softmax rule's −rowsum term, fails them.
+
 ## `transformer bench`
 
 ```
@@ -124,6 +179,12 @@ vectorizes, rows split across threads); a tuned kernel, or Apple's
 Accelerate library, could be several times faster. These measurements
 decide whether that's worth doing (PLAN.md, open decision 6).
 
+With `--checkpoint`, `bench` also times a real training step for that
+model: forward and backward on a batch of 16 sequences of up to 128 tokens,
+in f32, on all threads (the optimizer isn't included yet). For PLAN.md's
+starting shape with a small vocabulary, a 2-core Linux machine takes about
+870 ms per step: 2,350 tokens per second, 36% of its matrix-multiply speed.
+
 ## Tests
 
 `cargo test` checks:
@@ -141,8 +202,13 @@ decide whether that's worth doing (PLAN.md, open decision 6).
   starting model; 124,439,808 for GPT-2 small); initialization is
   reproducible, with the planned standard deviations; a layout check names
   a missing tensor and a wrong shape
-- the benchmark's threaded matrix multiply equals the definition exactly,
-  for 1 to 8 threads
+- the matrix multiplies (`matmul`, and `matmul_tn` for Aᵀ·B) equal the
+  definition, and give identical results for 1 and several threads
+- the tape: each operation against finite differences in f64; attention is
+  causal and keeps sequences separate; f32 and f64 agree
+- the model: every weight of a two-block model against finite differences;
+  the initial loss is about ln V; a later token never changes an earlier
+  prediction
 
 ## Source
 
@@ -152,11 +218,17 @@ decide whether that's worth doing (PLAN.md, open decision 6).
 - `src/safetensors.rs`: the checkpoint format
 - `src/model.rs`: weight names, shapes, the parameter formula,
   initialization and the layout check
-- `src/bench.rs`: the matrix-multiply benchmark
+- `src/tensor.rs`: the matrix type (f32 or f64) and the threaded multiplies
+- `src/tape.rs`: the batched automatic differentiation tape
+- `src/gpt.rs`: the model's forward pass, from a checkpoint's tensors
+- `src/bench.rs`: the matrix-multiply benchmark and the training-step timing
 - `src/rng.rs`: the seeded random number generator (from attention/)
 
 ## Next
 
-Step 4, `transformer train`: the f32 forward and backward passes for the
-whole model, checked against attention/'s f64 reference versions, reading
-`corpus.ids` and writing `model.safetensors` with Adam's state.
+The rest of step 4, `transformer train`:
+
+- read `corpus.ids`, checking its tokenizer fingerprint against the
+  checkpoint's
+- the training loop with Adam, reporting loss and tokens per second
+- write `model.safetensors` with Adam's state, so training can resume

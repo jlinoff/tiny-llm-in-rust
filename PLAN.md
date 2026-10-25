@@ -328,7 +328,10 @@ the step-0, untrained checkpoints of its Pythia models.)
   ```
   transformer train --model model-init.safetensors --data corpus.ids --config config.toml -o model.safetensors
   ```
-- **Status:** not started
+- **Status:** in progress. The forward and backward passes are done
+  (`transformer/src/gpt.rs` on an automatic differentiation tape, f32,
+  multi-threaded, gradient-checked in f64 on every weight of a small model);
+  the data reader, Adam and checkpointing are next.
 
 **What it does:** repeatedly predicts the next token ID, compares the
 prediction with the real one, and adjusts every weight slightly, including
@@ -1404,7 +1407,7 @@ llm/
 | `tokenizer/` | LLM 1 tokenize, 2 encode; decode for 6 | steps 1 and 2 done (`mini_bpe.py`), with EOS; turn markers to do |
 | `word2vec/` | word2vec 1 train, 2 explore | done |
 | `attention/` | none: a learning exercise before `transformer/` | all 6 items of [its list](#where-each-part-is-built) done (`example`, `random`, `train`, `heads`, `block`, `induction`) |
-| `transformer/` | LLM 3 build, 4 train, 5 finetune, 6 generate | step 3 done (`transformer build`, plus `inspect` and `bench`); train next |
+| `transformer/` | LLM 3 build, 4 train, 5 finetune, 6 generate | step 3 done (`transformer build`, plus `inspect` and `bench`); step 4's forward and backward passes done, the training loop next |
 
 The Makefile in `llm/` drives the flow, with one target per step. Each target
 knows which files it needs, so `make train`, for example, first reruns any

@@ -44,9 +44,9 @@ $(TRANSFORMER): $(TRANSFORMER_SRC)
 	cargo build --release --manifest-path transformer/Cargo.toml
 
 .PHONY: bench
-bench: $(TRANSFORMER) ## Measure this machine's matrix-multiply speed.
+bench: $(TRANSFORMER) $(OUT)/model-init.safetensors ## Measure matrix-multiply speed and a real training step.
 	$(call hdr,$@)
-	$(TRANSFORMER) bench
+	$(TRANSFORMER) bench --checkpoint $(OUT)/model-init.safetensors
 
 # attention (the learning step before transformer/)
 ATTN       := attention/target/release/mini_attention

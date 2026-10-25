@@ -5,9 +5,12 @@
 
 mod bench;
 mod config;
+mod gpt;
 mod model;
 mod rng;
 mod safetensors;
+mod tape;
+mod tensor;
 mod tokenizer;
 
 use clap::{Parser, Subcommand};
@@ -293,19 +296,36 @@ fn inspect(path: &Path, verbose: bool) -> Result<(), String> {
 }
 
 fn bench_command(checkpoint: Option<&Path>) -> Result<(), String> {
-    let params = match checkpoint {
+    let model = match checkpoint {
         None => None,
         Some(p) => {
             let f = safetensors::read(p)?;
-            Some(
-                f.tensors
-                    .iter()
-                    .filter(|t| !t.name.starts_with("adam."))
-                    .map(|t| t.data.len())
-                    .sum(),
-            )
+            let meta = |k: &str| {
+                f.metadata
+                    .get(k)
+                    .cloned()
+                    .ok_or(format!("{}: no {k} in the metadata", p.display()))
+            };
+            let config = ModelConfig::from_toml(&meta("model")?)?;
+            let vocab: usize = meta("vocab_size")?
+                .parse()
+                .map_err(|_| "vocab_size isn't a number")?;
+            let problems = model::check_layout(&f.tensors, &config, vocab);
+            if !problems.is_empty() {
+                return Err(format!("{}: {}", p.display(), problems.join("; ")));
+            }
+            let tensors = f
+                .tensors
+                .into_iter()
+                .filter(|t| !t.name.starts_with("adam."))
+                .collect();
+            Some(bench::Model {
+                config,
+                vocab,
+                tensors,
+            })
         }
     };
-    bench::run(params);
+    bench::run(model.as_ref());
     Ok(())
 }
