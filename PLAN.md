@@ -328,10 +328,15 @@ the step-0, untrained checkpoints of its Pythia models.)
   ```
   transformer train --model model-init.safetensors --data corpus.ids --config config.toml -o model.safetensors
   ```
-- **Status:** in progress. The forward and backward passes are done
-  (`transformer/src/gpt.rs` on an automatic differentiation tape, f32,
-  multi-threaded, gradient-checked in f64 on every weight of a small model);
-  the data reader, Adam and checkpointing are next.
+- **Status:** done (`transformer train`): AdamW with warm-up and cosine
+  decay, gradient clipping, a held-out validation split, and checkpoints
+  that hold Adam's state, so a stopped run resumes exactly (a test checks
+  that 10 + 10 steps equal 20, bit for bit). The forward and backward
+  passes are written on an automatic differentiation tape, in f32, on all
+  cores, gradient-checked in f64 on every weight of a small model. On the
+  M4, a training step for the 0.85M-parameter starting model (16 × 128
+  tokens) takes 135 ms: about 15,000 tokens per second, 40% of the
+  matrix-multiply speed.
 
 **What it does:** repeatedly predicts the next token ID, compares the
 prediction with the real one, and adjusts every weight slightly, including
@@ -1407,7 +1412,7 @@ llm/
 | `tokenizer/` | LLM 1 tokenize, 2 encode; decode for 6 | steps 1 and 2 done (`mini_bpe.py`), with EOS; turn markers to do |
 | `word2vec/` | word2vec 1 train, 2 explore | done |
 | `attention/` | none: a learning exercise before `transformer/` | all 6 items of [its list](#where-each-part-is-built) done (`example`, `random`, `train`, `heads`, `block`, `induction`) |
-| `transformer/` | LLM 3 build, 4 train, 5 finetune, 6 generate | step 3 done (`transformer build`, plus `inspect` and `bench`); step 4's forward and backward passes done, the training loop next |
+| `transformer/` | LLM 3 build, 4 train, 5 finetune, 6 generate | steps 3 and 4 done (`transformer build`, `train`, plus `inspect` and `bench`); generate next |
 
 The Makefile in `llm/` drives the flow, with one target per step. Each target
 knows which files it needs, so `make train`, for example, first reruns any
@@ -1714,10 +1719,8 @@ text8, matching gensim (a widely used Python library with its own word2vec) at
    from hand-set weights to two blocks forming an induction head, and the
    automatic differentiation tape (decision 7), checked against the
    hand-written gradients of items 3 and 4 and used by items 5 and 6.
-4. `transformer/`: ~~build~~ (done), then train, then generate, then
-   finetune. First for train: measure the M4's speed with `transformer
-   bench`, then the f32 forward and backward passes, checked against
-   attention/'s f64 reference versions.
+4. `transformer/`: ~~build~~, ~~train~~ (done), then generate, then the
+   TinyStories run, then finetune.
 5. Throughout: add each step's Makefile target as the step is built
    (`tokenize` exists). At the end, fold this plan into `llm/README.md`.
 

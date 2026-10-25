@@ -12,7 +12,25 @@ context = 128   # the most tokens the model sees at once (T)
 d_ff    = 512   # the FFN's inner width, conventionally 4 × d_model
 seed    = 1     # random seed for the initial weights
 
+# [training] is read by step 4, train, and copied into each checkpoint it
+# writes. Only the first three are required; the rest show their defaults.
+[training]
+learning_rate = 0.002   # peak learning rate, reached after the warm-up
+steps         = 2000    # train until this step (counted across resumes)
+batch_size    = 16      # sequences per step, each `context` tokens long
+warmup_steps  = 100     # the learning rate rises linearly from 0 over these
+min_lr_fraction = 0.1   # then falls along a cosine curve to this fraction
+weight_decay  = 0.1     # AdamW decay, for matrices and embeddings only
+grad_clip     = 1.0     # scale the gradient down if its length exceeds this
+beta1         = 0.9     # Adam's averaging rate for the gradient…
+beta2         = 0.95    # …and for its square
+seed          = 1       # for choosing the training windows
+validation_fraction = 0.05  # the last 5% of the data, held out
+log_every     = 50      # print a progress line every this many steps
+eval_every    = 250     # measure the validation loss every this many steps
+eval_batches  = 10      # validation batches per measurement
+checkpoint_every = 500  # write a checkpoint every this many steps
+
 # Later steps (not yet built):
-# [training]   read by step 4, train: learning rate, steps, batch size
 # [finetune]   read by step 5, finetune
 # [generate]   read by step 6, generate: temperature, maximum length

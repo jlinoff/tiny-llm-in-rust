@@ -1,0 +1,607 @@
+//! Step 4, train: the training loop.
+//!
+//! Each step: take a batch of random windows from the training data, run
+//! the model forward and backward (the tape works out every gradient),
+//! limit the gradient's overall size, and let AdamW update every weight.
+//! Every so often: report the loss, measure the loss on held-out validation
+//! data, and write a checkpoint that holds everything needed to resume.
+
+use crate::config::ModelConfig;
+use crate::data::{self, Batch, Corpus};
+use crate::gpt::{forward, Params};
+use crate::safetensors::{self, Tensor};
+use crate::tensor::Mat;
+use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
+use std::path::Path;
+use std::time::Instant;
+
+/// The `[training]` section of config.toml. Only `learning_rate`, `steps`
+/// and `batch_size` are required; the rest have the defaults below.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct TrainingConfig {
+    /// Peak learning rate, reached after the warm-up.
+    pub learning_rate: f64,
+    /// Train until this step (counting from the start, across resumes).
+    pub steps: u64,
+    /// Sequences per step; each is the model's full context length.
+    pub batch_size: usize,
+    /// Steps over which the learning rate rises from 0 to its peak.
+    #[serde(default = "d_warmup")]
+    pub warmup_steps: u64,
+    /// After the warm-up, the learning rate follows a cosine curve down to
+    /// this fraction of the peak at the last step.
+    #[serde(default = "d_min_lr")]
+    pub min_lr_fraction: f64,
+    /// AdamW's weight decay, applied to the matrices and embeddings only
+    /// (not to biases or layer norm's γ and β).
+    #[serde(default = "d_wd")]
+    pub weight_decay: f64,
+    /// If the gradient's overall length (all weights together) exceeds
+    /// this, it's scaled down to it. 0 turns clipping off.
+    #[serde(default = "d_clip")]
+    pub grad_clip: f64,
+    #[serde(default = "d_beta1")]
+    pub beta1: f64,
+    #[serde(default = "d_beta2")]
+    pub beta2: f64,
+    /// Seed for choosing the batches.
+    #[serde(default = "d_seed")]
+    pub seed: u64,
+    /// The last fraction of the data, held out for validation.
+    #[serde(default = "d_valid")]
+    pub validation_fraction: f64,
+    #[serde(default = "d_log")]
+    pub log_every: u64,
+    #[serde(default = "d_eval")]
+    pub eval_every: u64,
+    /// Validation batches per evaluation.
+    #[serde(default = "d_eval_batches")]
+    pub eval_batches: usize,
+    #[serde(default = "d_ckpt")]
+    pub checkpoint_every: u64,
+}
+
+fn d_warmup() -> u64 {
+    100
+}
+fn d_min_lr() -> f64 {
+    0.1
+}
+fn d_wd() -> f64 {
+    0.1
+}
+fn d_clip() -> f64 {
+    1.0
+}
+fn d_beta1() -> f64 {
+    0.9
+}
+fn d_beta2() -> f64 {
+    0.95
+}
+fn d_seed() -> u64 {
+    1
+}
+fn d_valid() -> f64 {
+    0.05
+}
+fn d_log() -> u64 {
+    50
+}
+fn d_eval() -> u64 {
+    250
+}
+fn d_eval_batches() -> usize {
+    10
+}
+fn d_ckpt() -> u64 {
+    500
+}
+
+#[derive(Deserialize)]
+struct File {
+    training: TrainingConfig,
+}
+
+impl TrainingConfig {
+    pub fn load(path: &Path) -> Result<TrainingConfig, String> {
+        let text = std::fs::read_to_string(path)
+            .map_err(|e| format!("can't read config {}: {e}", path.display()))?;
+        let f: File =
+            toml::from_str(&text).map_err(|e| format!("config {}: {e}", path.display()))?;
+        f.training.check()?;
+        Ok(f.training)
+    }
+
+    pub fn check(&self) -> Result<(), String> {
+        if self.learning_rate.is_nan() || self.learning_rate <= 0.0 {
+            return Err("[training] learning_rate must be positive".into());
+        }
+        if self.batch_size == 0 || self.steps == 0 {
+            return Err("[training] steps and batch_size must be at least 1".into());
+        }
+        if !(0.0..1.0).contains(&self.validation_fraction) {
+            return Err(
+                "[training] validation_fraction must be from 0 up to (not including) 1".into(),
+            );
+        }
+        if !(0.0..=1.0).contains(&self.min_lr_fraction) {
+            return Err("[training] min_lr_fraction must be from 0 to 1".into());
+        }
+        if self.log_every == 0 || self.eval_every == 0 || self.checkpoint_every == 0 {
+            return Err(
+                "[training] log_every, eval_every and checkpoint_every must be at least 1".into(),
+            );
+        }
+        Ok(())
+    }
+
+    /// The learning rate at a step (counting from 1): a linear warm-up, then
+    /// a cosine decay to min_lr_fraction of the peak at the last step.
+    pub fn lr(&self, step: u64) -> f64 {
+        let peak = self.learning_rate;
+        if step <= self.warmup_steps {
+            return peak * step as f64 / self.warmup_steps.max(1) as f64;
+        }
+        let span = (self.steps.saturating_sub(self.warmup_steps)).max(1) as f64;
+        let progress = ((step - self.warmup_steps) as f64 / span).min(1.0);
+        let floor = peak * self.min_lr_fraction;
+        floor + (peak - floor) * 0.5 * (1.0 + (std::f64::consts::PI * progress).cos())
+    }
+}
+
+/// Everything training needs: the weights, Adam's running averages for
+/// each weight (m, the gradient; v, its square), and how far it has got.
+pub struct State {
+    pub params: Params<f32>,
+    pub m: Vec<Mat<f32>>,
+    pub v: Vec<Mat<f32>>,
+    pub step: u64,
+    pub tokens: u64,
+}
+
+impl State {
+    /// From a checkpoint's tensors: resume if it holds Adam's state
+    /// (`adam.m.<name>`, `adam.v.<name>`), otherwise start from step 0.
+    pub fn from_checkpoint(f: &safetensors::File) -> Result<State, String> {
+        let weights: Vec<Tensor> = f
+            .tensors
+            .iter()
+            .filter(|t| !t.name.starts_with("adam."))
+            .cloned()
+            .collect();
+        let params = Params::<f32>::from_tensors(&weights);
+        let find = |prefix: &str| -> Option<Vec<Mat<f32>>> {
+            params
+                .names
+                .iter()
+                .zip(&params.mats)
+                .map(|(n, w)| {
+                    f.tensors
+                        .iter()
+                        .find(|t| t.name == format!("{prefix}{n}"))
+                        .map(|t| Mat::from_vec(w.rows, w.cols, t.data.clone()))
+                })
+                .collect()
+        };
+        let zeros = || {
+            params
+                .mats
+                .iter()
+                .map(|w| Mat::zeros(w.rows, w.cols))
+                .collect()
+        };
+        let num = |k: &str| {
+            f.metadata
+                .get(k)
+                .and_then(|s| s.parse::<u64>().ok())
+                .unwrap_or(0)
+        };
+        Ok(match (find("adam.m."), find("adam.v.")) {
+            (Some(m), Some(v)) => State {
+                step: num("step"),
+                tokens: num("tokens_seen"),
+                params,
+                m,
+                v,
+            },
+            _ => State {
+                m: zeros(),
+                v: zeros(),
+                step: 0,
+                tokens: 0,
+                params,
+            },
+        })
+    }
+
+    /// The weights followed by Adam's state, as named tensors.
+    pub fn tensors(&self) -> Vec<Tensor> {
+        let mut out = Vec::new();
+        let to_tensor = |name: &str, m: &Mat<f32>| {
+            let shape = if m.rows == 1 {
+                vec![m.cols]
+            } else {
+                vec![m.rows, m.cols]
+            };
+            Tensor::new(name, &shape, m.data.clone())
+        };
+        for (n, w) in self.params.names.iter().zip(&self.params.mats) {
+            out.push(to_tensor(n, w));
+        }
+        for (prefix, mats) in [("adam.m.", &self.m), ("adam.v.", &self.v)] {
+            for (n, a) in self.params.names.iter().zip(mats) {
+                out.push(to_tensor(&format!("{prefix}{n}"), a));
+            }
+        }
+        out
+    }
+}
+
+/// One training step on one batch. Returns the loss and the gradient's
+/// overall length before clipping.
+pub fn step(
+    state: &mut State,
+    c: &ModelConfig,
+    t: &TrainingConfig,
+    batch: &Batch,
+    seq: usize,
+) -> (f64, f64) {
+    let mut f = forward(&state.params, c, &batch.inputs, &batch.targets, seq);
+    let loss = f.tape.value(f.loss).data[0] as f64;
+    f.tape.backward(f.loss);
+    let grads: Vec<Mat<f32>> = f.leaves.iter().map(|&l| f.tape.take_grad(l)).collect();
+
+    // The gradient's overall length, all weights together (summed in a fixed
+    // order, in f64), and clipping.
+    let norm = grads
+        .iter()
+        .flat_map(|g| g.data.iter())
+        .map(|&x| (x as f64) * (x as f64))
+        .sum::<f64>()
+        .sqrt();
+    let clip = if t.grad_clip > 0.0 && norm > t.grad_clip {
+        t.grad_clip / norm
+    } else {
+        1.0
+    };
+
+    // AdamW. With bias correction for the averages' start at 0.
+    state.step += 1;
+    state.tokens += batch.inputs.len() as u64;
+    let k = state.step as i32;
+    let lr = t.lr(state.step);
+    let (b1, b2) = (t.beta1, t.beta2);
+    let (c1, c2) = (1.0 - b1.powi(k), 1.0 - b2.powi(k));
+    for (((w, m), v), g) in state
+        .params
+        .mats
+        .iter_mut()
+        .zip(&mut state.m)
+        .zip(&mut state.v)
+        .zip(&grads)
+    {
+        // Decay the matrices and embeddings; not biases or γ, β (1 × n).
+        let decay = if w.rows > 1 { t.weight_decay } else { 0.0 };
+        for i in 0..w.data.len() {
+            let gi = g.data[i] as f64 * clip;
+            let mi = b1 * m.data[i] as f64 + (1.0 - b1) * gi;
+            let vi = b2 * v.data[i] as f64 + (1.0 - b2) * gi * gi;
+            m.data[i] = mi as f32;
+            v.data[i] = vi as f32;
+            let wi = w.data[i] as f64;
+            let update = (mi / c1) / ((vi / c2).sqrt() + 1e-8) + decay * wi;
+            w.data[i] = (wi - lr * update) as f32;
+        }
+    }
+    (loss, norm)
+}
+
+/// The mean loss over the validation batches (forward only).
+pub fn validation_loss(
+    state: &State,
+    c: &ModelConfig,
+    batches: &[Batch],
+    seq: usize,
+) -> Option<f64> {
+    if batches.is_empty() {
+        return None;
+    }
+    let total: f64 = batches
+        .iter()
+        .map(|b| {
+            let f = forward(&state.params, c, &b.inputs, &b.targets, seq);
+            f.tape.value(f.loss).data[0] as f64
+        })
+        .sum();
+    Some(total / batches.len() as f64)
+}
+
+/// What a checkpoint records about how it was made.
+pub struct Provenance {
+    /// The input checkpoint's metadata, carried forward (model, tokenizer…).
+    pub base: BTreeMap<String, String>,
+    pub training_toml: String,
+    pub data_file: String,
+    pub data_sha256: String,
+    pub parent_file: String,
+    pub parent_sha256: String,
+}
+
+/// Write a checkpoint safely: to a temporary file, then renamed over the
+/// output, so an interrupted write never leaves a damaged checkpoint.
+pub fn save(
+    path: &Path,
+    state: &State,
+    prov: &Provenance,
+    train_loss: Option<f64>,
+    valid_loss: Option<f64>,
+) -> Result<(), String> {
+    let mut meta = prov.base.clone();
+    meta.insert("kind".into(), "train".into());
+    meta.insert("training".into(), prov.training_toml.clone());
+    meta.insert("step".into(), state.step.to_string());
+    meta.insert("tokens_seen".into(), state.tokens.to_string());
+    if let Some(l) = train_loss {
+        meta.insert("train_loss".into(), format!("{l:.6}"));
+    }
+    if let Some(l) = valid_loss {
+        meta.insert("valid_loss".into(), format!("{l:.6}"));
+    }
+    meta.insert("data_file".into(), prov.data_file.clone());
+    meta.insert("data_sha256".into(), prov.data_sha256.clone());
+    meta.insert("parent_file".into(), prov.parent_file.clone());
+    meta.insert("parent_sha256".into(), prov.parent_sha256.clone());
+    meta.insert(
+        "producer".into(),
+        format!("transformer train {}", env!("CARGO_PKG_VERSION")),
+    );
+    let tensors = state.tensors();
+    let tmp = path.with_extension("safetensors.tmp");
+    safetensors::write(&tmp, &tensors, &meta)?;
+    std::fs::rename(&tmp, path)
+        .map_err(|e| format!("can't rename {} to {}: {e}", tmp.display(), path.display()))?;
+    Ok(())
+}
+
+/// Check that the data belongs to the model: same vocabulary size, made by
+/// the same tokenizer (fingerprints equal).
+pub fn check_data(corpus: &Corpus, vocab: usize, fingerprint_hex: &str) -> Result<(), String> {
+    if corpus.vocab_size != vocab {
+        return Err(format!(
+            "the data's V ({}) differs from the model's ({vocab})",
+            corpus.vocab_size
+        ));
+    }
+    let fp = crate::tokenizer::hex(&corpus.fingerprint);
+    if fp != fingerprint_hex {
+        return Err(format!(
+            "the data was encoded by a different tokenizer (fingerprint {fp}, model's {fingerprint_hex})"
+        ));
+    }
+    Ok(())
+}
+
+/// Report progress after a window of steps.
+pub struct Window {
+    pub loss_sum: f64,
+    pub norm_sum: f64,
+    pub steps: u64,
+    pub start: Instant,
+}
+
+impl Window {
+    pub fn new() -> Window {
+        Window {
+            loss_sum: 0.0,
+            norm_sum: 0.0,
+            steps: 0,
+            start: Instant::now(),
+        }
+    }
+}
+
+/// Run training until `t.steps`; `report` receives each log line. Returns
+/// the final state and the last training-window loss.
+#[allow(clippy::too_many_arguments)]
+pub fn run(
+    mut state: State,
+    c: &ModelConfig,
+    t: &TrainingConfig,
+    corpus_ids: &[u32],
+    output: &Path,
+    prov: &Provenance,
+    mut report: impl FnMut(&str),
+) -> Result<State, String> {
+    let seq = c.context;
+    let split = data::split(corpus_ids, t.validation_fraction, seq)?;
+    let valid = data::valid_batches(split.valid, t.eval_batches, t.batch_size, seq);
+    let tokens_per_step = (t.batch_size * seq) as f64;
+    let mut win = Window::new();
+    let mut last_loss = None;
+    let mut last_valid = None;
+    report("   step    loss   valid      lr  grad norm  tokens/s");
+    while state.step < t.steps {
+        let batch = data::train_batch(split.train, t.batch_size, seq, t.seed, state.step + 1);
+        let (loss, norm) = step(&mut state, c, t, &batch, seq);
+        if !loss.is_finite() {
+            return Err(format!("the loss became {loss} at step {}", state.step));
+        }
+        win.loss_sum += loss;
+        win.norm_sum += norm;
+        win.steps += 1;
+        let s = state.step;
+        let last = s == t.steps;
+        let evaluate = s % t.eval_every == 0 || last;
+        if evaluate {
+            last_valid = validation_loss(&state, c, &valid, seq);
+        }
+        if s % t.log_every == 0 || last || evaluate {
+            let mean = win.loss_sum / win.steps as f64;
+            let tps = tokens_per_step * win.steps as f64 / win.start.elapsed().as_secs_f64();
+            let v = if evaluate {
+                last_valid.map_or("     —".into(), |l| format!("{l:7.3}"))
+            } else {
+                "       ".into()
+            };
+            report(&format!(
+                "  {s:>5}   {mean:.3} {v}  {:.2e}  {:9.3}  {tps:8.0}",
+                t.lr(s),
+                win.norm_sum / win.steps as f64
+            ));
+            last_loss = Some(mean);
+            win = Window::new();
+        }
+        if s % t.checkpoint_every == 0 || last {
+            save(output, &state, prov, last_loss, last_valid)?;
+        }
+    }
+    Ok(state)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model;
+
+    fn tiny_model() -> ModelConfig {
+        ModelConfig {
+            d_model: 32,
+            layers: 2,
+            heads: 2,
+            context: 16,
+            d_ff: 64,
+            seed: 2,
+        }
+    }
+
+    fn training(steps: u64) -> TrainingConfig {
+        toml::from_str::<TrainingConfig>(&format!(
+            "learning_rate = 0.003\nsteps = {steps}\nbatch_size = 8\nwarmup_steps = 10\nvalidation_fraction = 0.0\nlog_every = 1000\neval_every = 1000\ncheckpoint_every = 1000\n"
+        ))
+        .unwrap()
+    }
+
+    fn fresh(c: &ModelConfig, vocab: usize) -> State {
+        let f = safetensors::File {
+            tensors: model::init(c, vocab),
+            metadata: BTreeMap::new(),
+        };
+        State::from_checkpoint(&f).unwrap()
+    }
+
+    #[test]
+    fn learning_rate_schedule() {
+        let t = toml::from_str::<TrainingConfig>(
+            "learning_rate = 0.01\nsteps = 1100\nbatch_size = 1\nwarmup_steps = 100\n",
+        )
+        .unwrap();
+        assert!((t.lr(50) - 0.005).abs() < 1e-12); // halfway up the warm-up
+        assert!((t.lr(100) - 0.01).abs() < 1e-12); // the peak
+        assert!((t.lr(600) - 0.0055).abs() < 1e-12); // halfway down: (peak + floor) / 2
+        assert!((t.lr(1100) - 0.001).abs() < 1e-12); // the floor, 10% of the peak
+    }
+
+    /// A tiny model on a short repeating text should memorize it: the loss
+    /// must fall from about ln V to near 0.
+    #[test]
+    fn a_tiny_model_memorizes_a_repeating_text() {
+        let c = tiny_model();
+        let vocab = 12;
+        let ids: Vec<u32> = (0..400)
+            .map(|i| [3, 1, 4, 1, 5, 9, 2, 6, 5, 3, 5][i % 11])
+            .collect();
+        let t = training(300);
+        let mut s = fresh(&c, vocab);
+        let mut losses = Vec::new();
+        for step_no in 1..=t.steps {
+            let b = data::train_batch(&ids, 8, 16, t.seed, step_no);
+            losses.push(step(&mut s, &c, &t, &b, 16).0);
+        }
+        assert!(
+            (losses[0] - (vocab as f64).ln()).abs() < 0.1,
+            "start {}",
+            losses[0]
+        );
+        assert!(
+            *losses.last().unwrap() < 0.2,
+            "end {}",
+            losses.last().unwrap()
+        );
+    }
+
+    /// Training 20 steps without stopping gives exactly the same weights and
+    /// Adam state as 10 steps, a checkpoint, a resume and 10 more: the
+    /// checkpoint holds everything training needs.
+    #[test]
+    fn resuming_from_a_checkpoint_is_exact() {
+        let c = tiny_model();
+        let vocab = 30;
+        let ids: Vec<u32> = (0..2000u32)
+            .map(|i| (i * 7 + i / 13) % vocab as u32)
+            .collect();
+        let dir =
+            std::env::temp_dir().join(format!("mini_transformer_test_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let prov = Provenance {
+            base: BTreeMap::new(),
+            training_toml: String::new(),
+            data_file: "test".into(),
+            data_sha256: String::new(),
+            parent_file: String::new(),
+            parent_sha256: String::new(),
+        };
+
+        let straight = run(
+            fresh(&c, vocab),
+            &c,
+            &training(20),
+            &ids,
+            &dir.join("a.safetensors"),
+            &prov,
+            |_| {},
+        )
+        .unwrap();
+
+        let half = dir.join("b.safetensors");
+        run(
+            fresh(&c, vocab),
+            &c,
+            &training(10),
+            &ids,
+            &half,
+            &prov,
+            |_| {},
+        )
+        .unwrap();
+        let loaded = safetensors::read(&half).unwrap();
+        let resumed_state = State::from_checkpoint(&loaded).unwrap();
+        assert_eq!(resumed_state.step, 10);
+        let resumed = run(
+            resumed_state,
+            &c,
+            &training(20),
+            &ids,
+            &dir.join("c.safetensors"),
+            &prov,
+            |_| {},
+        )
+        .unwrap();
+
+        assert_eq!(straight.step, resumed.step);
+        assert_eq!(straight.tokens, resumed.tokens);
+        assert_eq!(straight.tensors(), resumed.tensors()); // bit for bit
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn refuses_data_from_another_tokenizer() {
+        let corpus = Corpus::decode(include_bytes!("../tests/data/tiny.ids")).unwrap();
+        let fp = crate::tokenizer::hex(&corpus.fingerprint);
+        assert!(check_data(&corpus, 317, &fp).is_ok());
+        assert!(check_data(&corpus, 318, &fp).is_err());
+        assert!(check_data(&corpus, 317, &"0".repeat(64)).is_err());
+    }
+}

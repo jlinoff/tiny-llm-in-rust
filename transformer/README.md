@@ -1,9 +1,8 @@
 # transformer
 
 The real model: a small GPT-style language model, and the LLM flow's steps 3
-to 6 in PLAN.md (build, train, finetune, generate). So far: step 3 is done,
-and step 4 (train) has its forward and backward passes; the training loop
-comes next.
+to 6 in PLAN.md (build, train, finetune, generate). Steps 3 (build) and 4
+(train) are done.
 
 Terms (tensor, checkpoint, safetensors, layer norm, …) are defined in
 [`../PLAN.md`](../PLAN.md#terms).
@@ -97,6 +96,84 @@ The file is checked to work with Hugging Face's own `safetensors` library
 (version 0.8.0) both ways. That library reads build's output correctly,
 tensors and metadata. In the other direction, `tests/data/hf_written.safetensors`
 was written by that library and is read correctly by ours (a test).
+
+## `transformer train` (step 4)
+
+```
+transformer train --model model-init.safetensors --data corpus.ids --config config.toml -o model.safetensors
+```
+
+Trains the model on token IDs. It reads only the `[training]` section of
+`config.toml` (see the comments there): the learning rate, the number of
+steps and the batch size are required, and everything else has a default.
+
+Before any work, it checks:
+
+- the inputs are readable and the output writable
+- the data file is made by the model's tokenizer: same V, and the
+  fingerprint in `corpus.ids` equal to the one the checkpoint recorded at
+  build time
+
+The output may be the input checkpoint itself (resuming in place); it may
+not be the data or the config.
+
+**What it does each step.**
+
+- Takes a batch of `batch_size` windows of `context` + 1 tokens, at random
+  places in the training data. The last `validation_fraction` of the data
+  (5%) is held out and never trained on.
+- Runs the model forward and backward (the tape works out every gradient).
+- Measures the gradient's overall length. If it's over `grad_clip`, scales
+  the gradient down to that length, a guard against one unusual batch
+  throwing the weights off.
+- Updates every weight with **AdamW**: Adam, plus a small pull of each
+  matrix and embedding toward zero (weight decay; biases and layer norm's
+  γ and β are left alone).
+
+The learning rate rises linearly over `warmup_steps`, then falls along a
+cosine curve to `min_lr_fraction` of its peak at the last step.
+
+It prints a line every `log_every` steps:
+
+- the step
+- the mean training loss since the last line
+- the validation loss, every `eval_every` steps, measured on fixed windows
+  from the held-out data, so the numbers are comparable over time
+- the learning rate
+- the mean gradient length before clipping
+- tokens per second
+
+**Checkpoints and resuming.** Every `checkpoint_every` steps, and at the
+end, it writes the output checkpoint: the weights, Adam's state for every
+weight (`adam.m.<name>`, `adam.v.<name>`), the step count and the tokens
+seen. It writes to a temporary file first and then renames it, so an
+interrupted write never leaves a damaged checkpoint.
+
+The metadata carries forward everything from the input (the model, the
+tokenizer, the config and their checksums) and adds:
+
+- the `[training]` settings
+- the step and the losses
+- the data file and its SHA-256
+- the parent checkpoint and its SHA-256, so a chain of checkpoints records
+  its own history
+
+To train further, raise `steps` in the config and pass the checkpoint
+back as `--model`. A resumed run is exact: each step's batch depends only on
+the seed and the step number, and Adam's state is saved, so stopping and
+resuming gives bit-for-bit the same weights as not stopping (a test checks
+this).
+
+**A bug worth knowing about.** The first version picked each step's windows
+with a random-number generator seeded by `seed ^ step × 0x9E37…`. That
+constant is also the amount by which SplitMix64 steps its own state, so step
+k + 1's numbers nearly repeated step k's, in exactly the low bits used to
+choose a window. In 600 steps of 16 windows, training visited only about
+1,200 distinct places out of 720,000, partly memorizing them. The symptom
+was a training loss well below the validation loss from the very start, and
+rising later. Each step now gets its own generator through SplitMix64's
+scrambling function (`Rng::stream`), and a test requires the windows of
+many steps to be as varied as random picks.
 
 ## `transformer inspect`
 
@@ -209,6 +286,14 @@ starting shape with a small vocabulary, a 2-core Linux machine takes about
 - the model: every weight of a two-block model against finite differences;
   the initial loss is about ln V; a later token never changes an earlier
   prediction
+- data: reading a `.ids` file written by mini_bpe.py (V, fingerprint,
+  IDs); rejecting damaged files; batches shifted by one, reproducible, and
+  as varied as random picks over many steps; the validation split is the
+  held-out tail
+- training: the learning-rate schedule; a tiny model memorizes a repeating
+  text (loss from ln V to under 0.2); data from another tokenizer is
+  refused; and 10 steps + checkpoint + resume + 10 steps gives exactly the
+  weights and Adam state of 20 steps
 
 ## Source
 
@@ -221,14 +306,13 @@ starting shape with a small vocabulary, a 2-core Linux machine takes about
 - `src/tensor.rs`: the matrix type (f32 or f64) and the threaded multiplies
 - `src/tape.rs`: the batched automatic differentiation tape
 - `src/gpt.rs`: the model's forward pass, from a checkpoint's tensors
+- `src/data.rs`: reading `corpus.ids`, the validation split, and batches
+- `src/train.rs`: `[training]`, AdamW, the schedule, checkpoints, resuming
 - `src/bench.rs`: the matrix-multiply benchmark and the training-step timing
 - `src/rng.rs`: the seeded random number generator (from attention/)
 
 ## Next
 
-The rest of step 4, `transformer train`:
-
-- read `corpus.ids`, checking its tokenizer fingerprint against the
-  checkpoint's
-- the training loop with Adam, reporting loss and tokens per second
-- write `model.safetensors` with Adam's state, so training can resume
+Step 6, `transformer generate`: sample text from a trained checkpoint, one
+token at a time, with a temperature. Then the TinyStories run, and step 5,
+fine-tuning.

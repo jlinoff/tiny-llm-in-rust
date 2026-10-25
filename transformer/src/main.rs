@@ -1,10 +1,12 @@
 //! transformer: the LLM flow's steps 3–6 (PLAN.md, "The flows"). So far:
 //!   build     step 3: create the model with random weights
+//!   train     step 4: train it on token IDs (resumable)
 //!   inspect   show what a checkpoint holds, and check it against its config
 //!   bench     measure this machine's matrix-multiply speed
 
 mod bench;
 mod config;
+mod data;
 mod gpt;
 mod model;
 mod rng;
@@ -12,6 +14,7 @@ mod safetensors;
 mod tape;
 mod tensor;
 mod tokenizer;
+mod train;
 
 use clap::{Parser, Subcommand};
 use sha2::{Digest, Sha256};
@@ -52,6 +55,24 @@ enum Command {
         #[arg(short, long)]
         output: PathBuf,
     },
+    /// Step 4: train the model on token IDs (corpus.ids). Resumes if the
+    /// input checkpoint holds Adam's state (a checkpoint written by train).
+    Train {
+        /// The checkpoint to start from (model-init.safetensors, or a
+        /// training checkpoint to resume)
+        #[arg(long)]
+        model: PathBuf,
+        /// The token IDs (corpus.ids), made by the model's tokenizer
+        #[arg(long)]
+        data: PathBuf,
+        /// The config file; only [training] is read
+        #[arg(long)]
+        config: PathBuf,
+        /// The checkpoint to write (model.safetensors); may be the same file
+        /// as --model, to resume in place
+        #[arg(short, long)]
+        output: PathBuf,
+    },
     /// Show a checkpoint's metadata and tensors, and check them against its
     /// stored config.
     Inspect {
@@ -77,6 +98,12 @@ fn main() -> ExitCode {
             config,
             output,
         } => build(&tokenizer, &config, &output),
+        Command::Train {
+            model,
+            data,
+            config,
+            output,
+        } => train_command(&model, &data, &config, &output),
         Command::Inspect {
             checkpoint,
             verbose,
@@ -239,6 +266,163 @@ fn build(tok_path: &Path, config_path: &Path, output: &Path) -> Result<(), Strin
     );
     println!("  weights fingerprint {}", weights_fingerprint(&tensors));
     println!("  (same seed and shapes on another machine should give the same fingerprint)");
+    Ok(())
+}
+
+/// Metadata keys that describe one training run; the rest of an input
+/// checkpoint's metadata (model, tokenizer, …) is carried forward.
+const RUN_KEYS: [&str; 11] = [
+    "kind",
+    "training",
+    "step",
+    "tokens_seen",
+    "train_loss",
+    "valid_loss",
+    "data_file",
+    "data_sha256",
+    "parent_file",
+    "parent_sha256",
+    "producer",
+];
+
+fn train_command(
+    model_path: &Path,
+    data_path: &Path,
+    config_path: &Path,
+    output: &Path,
+) -> Result<(), String> {
+    // Check every input and output first, before doing any work. The output
+    // may be the input checkpoint (resuming in place: it's read in full
+    // first, and replaced by a rename), but not the data or the config.
+    check_readable(model_path, "checkpoint")?;
+    check_readable(data_path, "data")?;
+    check_readable(config_path, "config")?;
+    for input in [data_path, config_path] {
+        if same_file(input, output) {
+            return Err(format!(
+                "output {} would overwrite an input",
+                output.display()
+            ));
+        }
+    }
+    check_writable(output)?;
+
+    let ckpt = safetensors::read(model_path)?;
+    let meta = |k: &str| {
+        ckpt.metadata
+            .get(k)
+            .cloned()
+            .ok_or(format!("{}: no {k} in the metadata", model_path.display()))
+    };
+    if meta("format")? != FORMAT {
+        return Err(format!(
+            "{}: not a mini_transformer checkpoint",
+            model_path.display()
+        ));
+    }
+    let config = ModelConfig::from_toml(&meta("model")?)?;
+    let vocab: usize = meta("vocab_size")?
+        .parse()
+        .map_err(|_| "vocab_size isn't a number")?;
+    let problems = model::check_layout(&ckpt.tensors, &config, vocab);
+    if !problems.is_empty() {
+        return Err(format!("{}: {}", model_path.display(), problems.join("; ")));
+    }
+    let corpus = data::Corpus::load(data_path)?;
+    train::check_data(&corpus, vocab, &meta("tokenizer_fingerprint")?)?;
+    let tcfg = train::TrainingConfig::load(config_path)?;
+    let state = train::State::from_checkpoint(&ckpt)?;
+    if state.step >= tcfg.steps {
+        return Err(format!(
+            "{} is already at step {}; raise [training] steps to train further",
+            model_path.display(),
+            state.step
+        ));
+    }
+
+    let n: usize = state.params.mats.iter().map(|m| m.data.len()).sum();
+    let seq = config.context;
+    let n_valid = (corpus.ids.len() as f64 * tcfg.validation_fraction).round() as usize;
+    let n_train = corpus.ids.len() - n_valid;
+    let tokens_per_step = tcfg.batch_size * seq;
+    let remaining = (tcfg.steps - state.step) as usize * tokens_per_step;
+    println!("=== transformer train ===");
+    println!(
+        "Model {}: {n} parameters, context {seq}, V = {vocab}",
+        model_path.display()
+    );
+    if state.step > 0 {
+        println!(
+            "  resuming at step {} ({} tokens seen so far)",
+            state.step, state.tokens
+        );
+    }
+    println!(
+        "Data {}: {} tokens: {n_train} for training, {n_valid} held out for validation",
+        data_path.display(),
+        corpus.ids.len()
+    );
+    println!(
+        "Training: steps {} to {}, {} sequences × {seq} tokens = {tokens_per_step} tokens per step",
+        state.step + 1,
+        tcfg.steps,
+        tcfg.batch_size
+    );
+    println!(
+        "  {remaining} tokens to go, about {:.1} passes over the training data",
+        remaining as f64 / n_train.max(1) as f64
+    );
+    println!(
+        "  AdamW: peak learning rate {} after {} warm-up steps, cosine down to {} of it;",
+        tcfg.learning_rate, tcfg.warmup_steps, tcfg.min_lr_fraction
+    );
+    println!(
+        "  weight decay {}; gradient clipped at length {}",
+        tcfg.weight_decay, tcfg.grad_clip
+    );
+    println!(
+        "  chance-level loss: ln {vocab} = {:.3}\n",
+        (vocab as f64).ln()
+    );
+
+    let mut base = ckpt.metadata.clone();
+    for k in RUN_KEYS {
+        base.remove(k);
+    }
+    let prov = train::Provenance {
+        base,
+        training_toml: toml::to_string(&tcfg).expect("a flat struct always serializes"),
+        data_file: data_path.display().to_string(),
+        data_sha256: sha256_file(data_path)?,
+        parent_file: model_path.display().to_string(),
+        parent_sha256: sha256_file(model_path)?,
+    };
+    let start = std::time::Instant::now();
+    let state = train::run(state, &config, &tcfg, &corpus.ids, output, &prov, |line| {
+        println!("{line}")
+    })?;
+    let secs = start.elapsed().as_secs_f64();
+
+    // Verify: read the final checkpoint back and compare.
+    let tensors = state.tensors();
+    if safetensors::read(output)?.tensors != tensors {
+        return Err(format!(
+            "{}: read-back doesn't match what was written",
+            output.display()
+        ));
+    }
+    println!(
+        "\nTrained to step {} in {:.1} minutes ({:.0} tokens per second overall).",
+        state.step,
+        secs / 60.0,
+        remaining as f64 / secs
+    );
+    println!(
+        "Wrote {} with Adam's state (resumable); read back and verified.",
+        output.display()
+    );
+    let weights = &tensors[..state.params.mats.len()];
+    println!("  weights fingerprint {}", weights_fingerprint(weights));
     Ok(())
 }
 

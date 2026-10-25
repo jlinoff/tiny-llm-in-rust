@@ -48,6 +48,15 @@ bench: $(TRANSFORMER) $(OUT)/model-init.safetensors ## Measure matrix-multiply s
 	$(call hdr,$@)
 	$(TRANSFORMER) bench --checkpoint $(OUT)/model-init.safetensors
 
+# Step 4: train. Starts from model-init.safetensors; to resume a stopped run
+# instead, run the command with --model $(OUT)/model.safetensors.
+.PHONY: train
+train: $(OUT)/model.safetensors ## Step 4: train the model on corpus.ids.
+
+$(OUT)/model.safetensors: $(OUT)/model-init.safetensors $(OUT)/corpus.ids config.toml $(TRANSFORMER) | $(OUT)
+	$(call hdr,train)
+	time $(TRANSFORMER) train --model $(OUT)/model-init.safetensors --data $(OUT)/corpus.ids --config config.toml -o $@
+
 # attention (the learning step before transformer/)
 ATTN       := attention/target/release/mini_attention
 ATTN_SRC   := attention/Cargo.toml $(wildcard attention/src/*.rs)
