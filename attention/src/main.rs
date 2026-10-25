@@ -5,10 +5,13 @@
 //!   random    an untrained head: random weights, near-uniform attention
 //!   train     train one head on a task with a known answer, and watch it learn
 //!   heads     several heads dividing a task between them
+//!   block     one complete transformer block
 
 mod attention;
+mod block;
 mod heads;
 mod matrix;
+mod optim;
 mod rng;
 mod tape;
 mod train;
@@ -24,7 +27,7 @@ use rng::Rng;
     name = "mini_attention",
     version,
     about = "Self-attention, small enough to print every number.",
-    after_help = "Start with `mini_attention example`, then `random`, `train` and `heads`."
+    after_help = "Start with `mini_attention example`, then `random`, `train`, `heads` and `block`."
 )]
 struct Cli {
     #[command(subcommand)]
@@ -137,6 +140,41 @@ enum Command {
         #[arg(long, value_delimiter = ',', default_value = "0,100,250")]
         show: Vec<usize>,
     },
+    /// One complete transformer block: residual stream, layer norm, several
+    /// heads joined by W_o, and the FFN. Learns (one back + two back) mod V,
+    /// then shows what each sublayer contributes.
+    Block {
+        /// Number of distinct digits (2–100)
+        #[arg(long, default_value_t = 10)]
+        vocab: usize,
+        /// Sequence length (at least 3)
+        #[arg(long, default_value_t = 8)]
+        len: usize,
+        /// Vector width d
+        #[arg(short, long, default_value_t = 32)]
+        dim: usize,
+        /// Number of heads (must divide d)
+        #[arg(long, default_value_t = 2)]
+        heads: usize,
+        /// Inner width of the FFN
+        #[arg(long, default_value_t = 128)]
+        d_ff: usize,
+        /// Training steps
+        #[arg(long, default_value_t = 2000)]
+        steps: usize,
+        /// Adam learning rate
+        #[arg(long, default_value_t = 0.003)]
+        lr: f64,
+        /// Sequences per step
+        #[arg(long, default_value_t = 16)]
+        batch: usize,
+        /// Random seed (the comparison uses this and the following seeds)
+        #[arg(long, default_value_t = 1)]
+        seed: u64,
+        /// Seeds in the with/without-FFN comparison
+        #[arg(long, default_value_t = 6)]
+        seeds: u64,
+    },
 }
 
 fn main() {
@@ -191,6 +229,49 @@ fn main() {
                 std::process::exit(2);
             }
             train::run(&c);
+        }
+        Command::Block {
+            vocab,
+            len,
+            dim,
+            heads,
+            d_ff,
+            steps,
+            lr,
+            batch,
+            seed,
+            seeds,
+        } => {
+            if !(2..=100).contains(&vocab)
+                || len < 3
+                || dim == 0
+                || heads == 0
+                || dim % heads != 0
+                || d_ff == 0
+                || batch == 0
+                || seeds == 0
+                || lr.is_nan()
+                || lr <= 0.0
+            {
+                eprintln!(
+                    "mini_attention: error: need --vocab 2–100, --len of at least 3, --heads \
+                     dividing --dim, and positive --d-ff, --batch, --seeds and --lr"
+                );
+                std::process::exit(2);
+            }
+            let c = block::Config {
+                vocab,
+                len,
+                dim,
+                heads,
+                d_ff,
+                steps,
+                lr,
+                batch,
+                seed,
+                ffn: true,
+            };
+            block::run_command(&c, seeds);
         }
         Command::Heads {
             lags,

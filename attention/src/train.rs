@@ -24,6 +24,7 @@
 
 use crate::attention::{attend, causal_mask, softmax_rows, Trace};
 use crate::matrix::{print_weights, Mat};
+use crate::optim::adam_update;
 use crate::rng::Rng;
 use crate::tape::{Tape, Var};
 
@@ -407,9 +408,7 @@ pub fn gradient_check(w: &Params, tokens: &[usize], lags: &[usize], rng: &mut Rn
     worst
 }
 
-/// Adam: gradient descent that keeps running averages of each weight's
-/// gradient (m) and squared gradient (v), and scales each step by them,
-/// so every weight moves at a sensible rate.
+/// Adam's state for every weight matrix (see optim.rs).
 pub struct Adam {
     m: Params,
     v: Params,
@@ -417,9 +416,6 @@ pub struct Adam {
 }
 
 impl Adam {
-    const B1: f64 = 0.9;
-    const B2: f64 = 0.999;
-
     pub fn new(w: &Params) -> Adam {
         Adam {
             m: w.zeros_like(),
@@ -430,15 +426,9 @@ impl Adam {
 
     fn step(&mut self, w: &mut Params, g: &Params, lr: f64) {
         self.t += 1;
-        let (c1, c2) = (1.0 - Self::B1.powi(self.t), 1.0 - Self::B2.powi(self.t));
         let (ms, vs, ws) = (self.m.all_mut(), self.v.all_mut(), w.all_mut());
         for (((m, v), w), g) in ms.into_iter().zip(vs).zip(ws).zip(g.all()) {
-            for i in 0..w.data.len() {
-                let gi = g.data[i];
-                m.data[i] = Self::B1 * m.data[i] + (1.0 - Self::B1) * gi;
-                v.data[i] = Self::B2 * v.data[i] + (1.0 - Self::B2) * gi * gi;
-                w.data[i] -= lr * (m.data[i] / c1) / ((v.data[i] / c2).sqrt() + 1e-8);
-            }
+            adam_update(m, v, w, g, self.t, lr);
         }
     }
 }

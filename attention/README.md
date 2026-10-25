@@ -1,7 +1,7 @@
 # mini_attention
 
-Self-attention, small enough to print every number, with heads trained
-while you watch. This is the learning step
+Self-attention, small enough to print every number, with heads and then a
+complete transformer block trained while you watch. This is the learning step
 before `../transformer/`: it computes exactly what PLAN.md describes in "The
 transformer block", section "How attention works: queries, keys and values",
 and prints each intermediate table so you can follow it.
@@ -241,12 +241,82 @@ Options (the comparison trains 2 × `--seeds` models, in parallel):
 The default run takes a few seconds on a multi-core machine (40 training
 runs of 1,500 steps; the matrix products for the 64 output scores dominate).
 
+## One complete block (`block`)
+
+Item 5 of the list in PLAN.md, "Where each part is built": the pre-norm
+transformer block, with everything around attention that the earlier items
+left out.
+
+```
+x      = E[token] + P[t]                    the residual stream starts
+h      = x + W_o·[heads](LN₁(x))            attention sublayer
+y      = h + W₂·GELU(W₁·LN₂(h) + b₁) + b₂   FFN sublayer
+logits = LN_f(y)·U
+```
+
+- **Residual stream:** each sublayer *adds* its result to x instead of
+  replacing it.
+- **Layer norm** (LN₁, LN₂, LN_f), each with a learned scale and shift,
+  applied to the copy entering each sublayer and before the output layer.
+- **W_o**, which takes the heads' joined outputs back to width d for the
+  stream. (In `heads`, U absorbed it; here it can't, because the result is
+  added to x.)
+- **The FFN:** d → d_ff → GELU → d, on each token separately.
+
+It is the first model written as forward code only: the automatic
+differentiation tape (below) works out every gradient. The output starts
+with the parameter count, 13,536, worked out from PLAN.md's formula, and a
+finite-difference check covering all 20 weight matrices.
+
+The task: random sequences of digits 0–9; at each position from 3 on,
+predict (one back + two back) mod 10. Attention has to bring the two
+digits to the current position, and adding them mod 10 is a nonlinear
+function of the pair, the kind of computation the FFN is for.
+
+What it shows, with the defaults:
+
+- **Training:** 10% (chance) at first, 55% by step 500, 100% by step 750.
+- **Attention:** head 1 mostly looks one back and head 2 two back, though
+  some rows mix the two; the predictions on the demo sequence are printed
+  as "two back + one back → answer".
+- **The residual stream:** the average length of each part: the embeddings
+  (7.6), what attention added (21.9), what the FFN added (30.8).
+- **Knockouts** (one sublayer's addition left out at test time, nothing
+  retrained): full block 100%; without attention 9.4%; without the FFN
+  12.7%; chance 10%. Both are needed: attention moves information between
+  tokens, and the FFN computes with it.
+- **Trained without an FFN**, from scratch, over seeds 1–6: 72–100%, mean
+  85.8%, against 100% on every seed with the FFN.
+
+That last result is again not the clean "can't" I expected. Attention is
+itself nonlinear: its weights depend on which tokens are where, so a head
+can blend the two digits differently for different pairs. The final layer
+norm adds a little more. That gets a block without an FFN partway, often
+far, but not reliably. With an FFN, the block learns the task every time,
+and the knockout shows it hands the arithmetic to the FFN.
+
+Options (the comparison trains 2 × `--seeds` − 1 more models, in parallel):
+
+- `--vocab N`: number of digits, 2–100 (default 10)
+- `--len N`: sequence length, at least 3 (default 8)
+- `-d N`, `--dim N`: vector width d (default 32)
+- `--heads N`: number of heads, dividing d (default 2)
+- `--d-ff N`: the FFN's inner width (default 128, 4 × d)
+- `--steps N` (default 2000), `--lr X` (default 0.003), `--batch N`,
+  `--seed N`: as for `train`
+- `--seeds N`: seeds in the with/without-FFN comparison (default 6)
+
+With 5 digits (`--vocab 5`), a block without an FFN learns the task too:
+only 25 pairs, few enough for attention's own nonlinearity.
+
+The default run takes about 30 seconds on two cores, less on more.
+
 ## The automatic differentiation tape (`src/tape.rs`)
 
 Not a subcommand: the machinery that computes gradients from now on (open
 decision 7 in PLAN.md). `train` and `heads` have hand-written backward
-passes; from item 5 on, models are written as forward code only, and the
-tape works out the gradients.
+passes; from item 5 on (`block`), models are written as forward code only,
+and the tape works out the gradients.
 
 How it works. Every operation in the forward pass is recorded on the tape as
 it runs: its result, and which earlier entries it used. `backward` then walks
@@ -314,6 +384,10 @@ checked against.
   layer norm against its closed-form gradient; an entry used twice gets
   both contributions; and the tape reproduces the hand-written gradients of
   `train`'s model and of three heads
+- `block`: the whole block's tape gradients against finite differences, in
+  every weight matrix; the parameter count against PLAN.md's formula; the
+  targets; and that it learns the task (over 95%) and fails without
+  either sublayer
 
 ## Source
 
@@ -324,7 +398,10 @@ checked against.
   backpropagation, Adam, the gradient check, and `train`'s explanation
 - `src/heads.rs`: `heads`: the division-of-labor analysis and the
   one-head comparison
+- `src/block.rs`: `block`: one complete transformer block on the tape, the
+  knockouts and the with/without-FFN comparison
 - `src/tape.rs`: the automatic differentiation tape and its tests
+- `src/optim.rs`: the Adam update, shared by `train`, `heads` and `block`
 - `src/rng.rs`: a seedable random number generator, with normal values
 - `src/main.rs`: the command line
 
@@ -337,6 +414,6 @@ As planned in PLAN.md ("Where each part is built"):
 3. ~~Weights trained on a task whose right attention pattern is known in
    advance, to watch W_q and W_k learn it~~ (`train`)
 4. ~~Several heads~~ (`heads`)
-5. One complete block: the FFN, residual connections and layer normalization
-   (`block`)
+5. ~~One complete block: the FFN, residual connections and layer
+   normalization~~ (`block`)
 6. Two blocks forming an induction head (`induction`)

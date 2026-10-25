@@ -423,7 +423,7 @@ attention:
   2. random     words + random weights            ──► (printed)   # an untrained head: near-uniform attention
   3. train      generated sequences + a task      ──► (printed)   # one head learning "predict the token 2 back"
   4. heads      generated sequences + a task      ──► (printed)   # several heads dividing a task, vs one head
-  5. block      generated sequences + a task      ──► (printed)   # one complete transformer block (to do)
+  5. block      generated sequences + a task      ──► (printed)   # one complete transformer block
   6. induction  generated sequences + a task      ──► (printed)   # two blocks forming an induction head (to do)
 ```
 
@@ -1132,7 +1132,14 @@ decision for `transformer/`.
      find and to read, rather than possible at all.
   5. **A look ahead at one complete block** (`block`), adding the FFN,
      residual connections and layer normalization, so they appear before
-     `transformer/` without being the focus.
+     `transformer/` without being the focus. Result: on predicting
+     (one back + two back) mod 10, the block reaches 100%. Knocking out
+     attention at test time drops it to chance (9%), and knocking out the
+     FFN nearly so (13%): attention brings the digits, the FFN does the
+     arithmetic. Trained without an FFN, a block still reaches 72–100%
+     (mean 86% over 6 seeds), because attention is itself nonlinear, but
+     not reliably; with the FFN, 100% every time. First model written on
+     the automatic differentiation tape (decision 7).
   6. **Two blocks forming an induction head** (`induction`): the smallest
      case where layers cooperate, and the mechanism behind in-context
      learning (continuing a pattern seen earlier in the context). A head in
@@ -1336,7 +1343,7 @@ llm/
 |---|---|---|
 | `tokenizer/` | LLM 1 tokenize, 2 encode; decode for 6 | steps 1 and 2 done (`mini_bpe.py`), with EOS; turn markers to do |
 | `word2vec/` | word2vec 1 train, 2 explore | done |
-| `attention/` | none: a learning exercise before `transformer/` | items 1–4 of [its list](#where-each-part-is-built) done (`example`, `random`, `train`, `heads`); 5 (`block`) and 6 (`induction`) to do |
+| `attention/` | none: a learning exercise before `transformer/` | items 1–5 of [its list](#where-each-part-is-built) done (`example`, `random`, `train`, `heads`, `block`); 6 (`induction`) to do |
 | `transformer/` | LLM 3 build, 4 train, 5 finetune, 6 generate | not started |
 
 The Makefile in `llm/` drives the flow, with one target per step. Each target
@@ -1544,10 +1551,11 @@ text8, matching gensim (a widely used Python library with its own word2vec) at
    each document~~ done. Turn markers when post-training needs them.
 3. `attention/`: self-attention alone, on toy inputs, ending with one
    complete block and then two blocks forming an induction head (see
-   [The transformer block](#the-transformer-block)). Items 1–4 (hand-set,
-   random and trained weights; several heads) done; item 5 (`block`) next,
-   then item 6 (`induction`). The automatic differentiation tape (decision
-   7) is done, checked against the hand-written gradients of items 3 and 4.
+   [The transformer block](#the-transformer-block)). Items 1–5 (hand-set,
+   random and trained weights; several heads; one complete block) done;
+   item 6 (`induction`) next. The automatic differentiation tape (decision
+   7) is done, checked against the hand-written gradients of items 3 and 4,
+   and item 5 is the first model built on it.
 4. `transformer/`: build, then train, then generate, then finetune.
 5. Throughout: add each step's Makefile target as the step is built
    (`tokenize` exists). At the end, fold this plan into `llm/README.md`.
