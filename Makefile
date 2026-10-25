@@ -33,7 +33,7 @@ ATTN       := attention/target/release/mini_attention
 ATTN_SRC   := attention/Cargo.toml $(wildcard attention/src/*.rs)
 
 .PHONY: attention
-attention: $(ATTN) ## Show one attention head: the worked example, then random weights.
+attention: $(ATTN) ## Self-attention: simple example -> random -> train -> heads -> block -> induction
 	$(call hdr,attention example)
 	$(ATTN) example
 	$(call hdr,attention random)
@@ -44,6 +44,8 @@ attention: $(ATTN) ## Show one attention head: the worked example, then random w
 	$(ATTN) heads
 	$(call hdr,attention block)
 	$(ATTN) block
+	$(call hdr,attention induction)
+	$(ATTN) induction
 
 # Rebuilt only when the Rust source changes.
 $(ATTN): $(ATTN_SRC)
