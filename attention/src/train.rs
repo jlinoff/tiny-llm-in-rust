@@ -25,6 +25,7 @@
 use crate::attention::{attend, causal_mask, softmax_rows, Trace};
 use crate::matrix::{print_weights, Mat};
 use crate::rng::Rng;
+use crate::tape::{Tape, Var};
 
 pub struct Config {
     pub vocab: usize,
@@ -293,6 +294,89 @@ fn head_backward(a: &Trace, d_out: &Mat, h: f64) -> (Mat, Mat, Mat) {
     (d_q, d_k, d_v)
 }
 
+/// The same model written on the automatic differentiation tape: forward
+/// code only, no backward code at all. The tape records each operation and
+/// derives the gradients. Returns the loss and every weight's gradient,
+/// which must match `backward`'s (see `tape_agreement`).
+pub fn tape_gradients(w: &Params, tokens: &[usize], lags: &[usize]) -> (f64, Params) {
+    let mut t = Tape::new();
+    let e = t.leaf(w.e.clone());
+    let p = t.leaf(w.p.clone());
+    let heads: Vec<[Var; 3]> = w
+        .heads
+        .iter()
+        .map(|h| {
+            [
+                t.leaf(h.wq.clone()),
+                t.leaf(h.wk.clone()),
+                t.leaf(h.wv.clone()),
+            ]
+        })
+        .collect();
+    let u = t.leaf(w.u.clone());
+
+    // x_t = E[token_t] + P[t]
+    let tok = t.gather(e, tokens);
+    let positions: Vec<usize> = (0..tokens.len()).collect();
+    let pos = t.gather(p, &positions);
+    let x = t.add(tok, pos);
+
+    // Each head: softmax(mask(Q·Kᵀ/√h))·V
+    let mut outs = Vec::new();
+    for (&[wq, wk, wv], hw) in heads.iter().zip(&w.heads) {
+        let q = t.matmul(x, wq);
+        let k = t.matmul(x, wk);
+        let v = t.matmul(x, wv);
+        let kt = t.transpose(k);
+        let scores = t.matmul(q, kt);
+        let scores = t.scale(scores, 1.0 / (hw.wq.cols as f64).sqrt());
+        let weights = t.causal_softmax(scores);
+        outs.push(t.matmul(weights, v));
+    }
+
+    // The heads side by side, the output layer, and the loss.
+    let o = t.concat(&outs);
+    let logits = t.matmul(o, u);
+    let vocab = w.e.rows;
+    let targets: Vec<Option<usize>> = (0..tokens.len())
+        .map(|i| target(tokens, i, lags, vocab))
+        .collect();
+    let loss = t.softmax_cross_entropy(logits, &targets);
+
+    t.backward(loss);
+    let grads = Params {
+        e: t.grad(e),
+        p: t.grad(p),
+        heads: heads
+            .iter()
+            .map(|&[wq, wk, wv]| HeadWeights {
+                wq: t.grad(wq),
+                wk: t.grad(wk),
+                wv: t.grad(wv),
+            })
+            .collect(),
+        u: t.grad(u),
+    };
+    (t.value(loss).data[0], grads)
+}
+
+/// Compare the tape's gradients with the hand-written backpropagation:
+/// the largest difference over every weight, relative to the largest
+/// gradient. The two add the same numbers in slightly different orders,
+/// so expect rounding-level agreement (around 10⁻¹⁶), not exact equality.
+pub fn tape_agreement(w: &Params, tokens: &[usize], lags: &[usize]) -> f64 {
+    let hand = backward(w, tokens, lags, &forward(w, tokens, lags));
+    let (_, tape) = tape_gradients(w, tokens, lags);
+    let (mut diff, mut size): (f64, f64) = (0.0, 0.0);
+    for (a, b) in hand.all().into_iter().zip(tape.all()) {
+        for (x, y) in a.data.iter().zip(&b.data) {
+            diff = diff.max((x - y).abs());
+            size = size.max(x.abs());
+        }
+    }
+    diff / size
+}
+
 /// Check backpropagation against finite differences: nudge single weights
 /// by ±ε, measure the change in the loss directly, and compare with the
 /// computed gradient. Returns the worst relative error.
@@ -479,6 +563,17 @@ pub fn run(c: &Config) {
         }
     );
 
+    let agree = tape_agreement(&w, &demo, &c.lags);
+    println!(
+        "Automatic differentiation tape vs hand-written backpropagation: largest\n\
+         difference {agree:.1e} of the largest gradient {}\n",
+        if agree < 1e-12 {
+            "— they agree"
+        } else {
+            "— WARNING: they disagree"
+        }
+    );
+
     let snapshot = |w: &Params, step: usize, loss: f64, acc: f64| {
         let f = forward(w, &demo, &c.lags);
         print_weights(
@@ -574,6 +669,20 @@ mod tests {
         let w = Params::new(&c, &mut rng);
         let tokens = random_tokens(&c, &mut rng);
         assert!(gradient_check(&w, &tokens, &c.lags, &mut rng) < 1e-5);
+    }
+
+    #[test]
+    fn tape_reproduces_the_hand_written_gradients() {
+        let c = config(0);
+        let mut rng = Rng::new(11);
+        for _ in 0..5 {
+            let w = Params::new(&c, &mut rng);
+            let tokens = random_tokens(&c, &mut rng);
+            assert!(tape_agreement(&w, &tokens, &c.lags) < 1e-12);
+            // Same loss too.
+            let (loss, _) = tape_gradients(&w, &tokens, &c.lags);
+            assert!((loss - forward(&w, &tokens, &c.lags).loss).abs() < 1e-12);
+        }
     }
 
     #[test]

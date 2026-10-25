@@ -12,7 +12,7 @@ use crate::matrix::{print_weights, Mat};
 use crate::rng::Rng;
 use crate::train::{
     argmax, classes, evaluate, forward, gradient_check, labels, letter, position_attention,
-    random_tokens, train_step, word, Adam, Config, Params,
+    random_tokens, tape_agreement, train_step, word, Adam, Config, Params,
 };
 
 pub struct Options {
@@ -86,6 +86,17 @@ pub fn run(c: &Config, o: &Options) {
             "— OK"
         } else {
             "— WARNING: gradients disagree"
+        }
+    );
+
+    let agree = tape_agreement(&w, &demo, &c.lags);
+    println!(
+        "Automatic differentiation tape vs hand-written backpropagation: largest\n\
+         difference {agree:.1e} of the largest gradient {}\n",
+        if agree < 1e-12 {
+            "— they agree"
+        } else {
+            "— WARNING: they disagree"
         }
     );
 
@@ -409,6 +420,17 @@ mod tests {
         let w = Params::new(&c, &mut rng);
         let tokens = random_tokens(&c, &mut rng);
         assert!(gradient_check(&w, &tokens, &c.lags, &mut rng) < 1e-5);
+    }
+
+    #[test]
+    fn tape_reproduces_the_hand_written_gradients_with_three_heads() {
+        let c = config();
+        let mut rng = Rng::new(5);
+        for _ in 0..5 {
+            let w = Params::new(&c, &mut rng);
+            let tokens = random_tokens(&c, &mut rng);
+            assert!(crate::train::tape_agreement(&w, &tokens, &c.lags) < 1e-12);
+        }
     }
 
     #[test]

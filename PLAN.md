@@ -1505,6 +1505,9 @@ text8, matching gensim (a widely used Python library with its own word2vec) at
    on its own, so every formula stays visible, one operation at a time.
    The tape must reproduce the hand-written gradients of
    `mini_attention train` and `heads`, which stay as its references.
+   *Built:* `attention/src/tape.rs`. It reproduces both to about 10⁻¹⁷ of
+   the largest gradient (rounding), and layer norm built from its parts
+   matches the closed-form gradient.
 
    The background: so far backpropagation is written by
    hand for each model (`mini_attention train` and `heads`), checked
@@ -1535,9 +1538,8 @@ text8, matching gensim (a widely used Python library with its own word2vec) at
    complete block and then two blocks forming an induction head (see
    [The transformer block](#the-transformer-block)). Items 1–4 (hand-set,
    random and trained weights; several heads) done; item 5 (`block`) next,
-   then item 6 (`induction`). First, the automatic differentiation tape
-   (decision 7), checked against the hand-written gradients of items 3
-   and 4.
+   then item 6 (`induction`). The automatic differentiation tape (decision
+   7) is done, checked against the hand-written gradients of items 3 and 4.
 4. `transformer/`: build, then train, then generate, then finetune.
 5. Throughout: add each step's Makefile target as the step is built
    (`tokenize` exists). At the end, fold this plan into `llm/README.md`.

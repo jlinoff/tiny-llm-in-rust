@@ -110,6 +110,11 @@ gradients against finite differences: it nudges 30 individual weights by
 is about 10⁻⁷; a mistake in the backward pass would show up as 10⁻¹ or
 worse.
 
+A second check follows: the same gradients computed by the automatic
+differentiation tape (see below), from forward code alone. They agree with
+the hand-written ones to about 10⁻¹⁷ of the largest gradient, which is
+rounding: the two add the same numbers in slightly different orders.
+
 Options:
 
 - `--lag N`: how far back the token to predict is (default 2)
@@ -236,6 +241,56 @@ Options (the comparison trains 2 × `--seeds` models, in parallel):
 The default run takes a few seconds on a multi-core machine (40 training
 runs of 1,500 steps; the matrix products for the 64 output scores dominate).
 
+## The automatic differentiation tape (`src/tape.rs`)
+
+Not a subcommand: the machinery that computes gradients from now on (open
+decision 7 in PLAN.md). `train` and `heads` have hand-written backward
+passes; from item 5 on, models are written as forward code only, and the
+tape works out the gradients.
+
+How it works. Every operation in the forward pass is recorded on the tape as
+it runs: its result, and which earlier entries it used. `backward` then walks
+the tape in reverse, starting from the loss (whose gradient with respect to
+itself is 1). Each entry applies its own backward rule: given the gradient
+with respect to its result, it adds its share to its inputs' gradients. That
+is the chain rule, one operation at a time.
+
+```
+forward (recorded):  E, P ─► gather ─► add ─► matmul ─► … ─► softmax_cross_entropy ─► loss
+backward (replayed):  ◄──────────────── each entry passes gradient to its inputs ◄── 1
+```
+
+The backward rules are still written by hand, but each is local and short,
+for example:
+
+- matmul, C = A·B: dA = dC·Bᵀ, dB = Aᵀ·dC
+- causal softmax, by row: dA_ij = C_ij (dC_ij − Σ_k C_ik dC_ik)
+- gather (an embedding lookup): each row of dC goes back to the row it came
+  from, adding up when a row was used more than once
+
+It records whole matrices, not single numbers, so the tape for one sequence
+is a few dozen entries. Some operations are **fused**: softmax followed by
+cross-entropy is one operation, whose backward rule (probabilities −
+one-hot) is much simpler than chaining the two rules.
+
+Layer normalization isn't an operation of its own: `layer_norm` builds it
+from the primitives (row mean, subtract, square, square root, divide), so
+the tape derives its gradient. A test checks that against the textbook
+closed form, dx = (d − mean(d) − x̂·mean(d ⊙ x̂)) / σ with d = dy ⊙ γ.
+
+How it's checked:
+
+- every operation's backward rule against finite differences, on its own
+- layer norm against the closed form, as above
+- the whole model of `train` and `heads` against their hand-written
+  backward passes: the tape must reproduce every weight's gradient to within
+  10⁻¹² (in practice about 10⁻¹⁷), and the loss
+- the checks themselves: breaking matmul's backward rule by 1%, or the
+  square root's, makes the tests fail
+
+The hand-written backward passes stay: they're the references the tape is
+checked against.
+
 ## Tests
 
 `cargo test` checks:
@@ -255,6 +310,10 @@ runs of 1,500 steps; the matrix products for the 64 output scores dominate).
 - backpropagation with three heads matches finite differences
 - three heads trained on lags 1, 2 and 3 reach over 99% accuracy, each
   favoring a different lag
+- the tape: each operation's backward rule against finite differences;
+  layer norm against its closed-form gradient; an entry used twice gets
+  both contributions; and the tape reproduces the hand-written gradients of
+  `train`'s model and of three heads
 
 ## Source
 
@@ -265,6 +324,7 @@ runs of 1,500 steps; the matrix products for the 64 output scores dominate).
   backpropagation, Adam, the gradient check, and `train`'s explanation
 - `src/heads.rs`: `heads`: the division-of-labor analysis and the
   one-head comparison
+- `src/tape.rs`: the automatic differentiation tape and its tests
 - `src/rng.rs`: a seedable random number generator, with normal values
 - `src/main.rs`: the command line
 

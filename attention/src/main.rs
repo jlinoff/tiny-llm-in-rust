@@ -10,6 +10,7 @@ mod attention;
 mod heads;
 mod matrix;
 mod rng;
+mod tape;
 mod train;
 
 use clap::{Parser, Subcommand};
