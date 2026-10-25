@@ -1,0 +1,13 @@
+[package]
+name = "mini_attention"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+description = "Self-attention, small enough to print every number, written for understanding"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+
+[profile.release]
+codegen-units = 1
+lto = true

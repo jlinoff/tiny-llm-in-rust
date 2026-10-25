@@ -1009,17 +1009,23 @@ decision for `transformer/`.
 
 - **`attention/`**: self-attention alone, on toy inputs, small enough to print
   every number, in this order:
-  1. **Hand-set weights**, reproducing the worked example in
+  1. **Hand-set weights** (`example`), reproducing the worked example in
      [How attention works](#how-attention-works-queries-keys-and-values), to
      check the mechanics.
-  2. **Random weights**, to see an untrained head's near-uniform attention.
+  2. **Random weights** (`random`), to see an untrained head's near-uniform
+     attention.
   3. **Weights trained on a tiny task whose right attention pattern is known
-     in advance**, for example "predict the token two positions back", to
-     watch W_q and W_k move from random to the pattern the task requires.
+     in advance** (`train`), for example "predict the token two positions
+     back", to watch W_q and W_k move from random to the pattern the task
+     requires.
   4. **Several heads.**
   5. **A look ahead at one complete block,** adding the FFN, residual
      connections and layer normalization, so they appear before
      `transformer/` without being the focus.
+
+  These are called items ("item 3"), or by the `mini_attention` subcommand
+  that runs each one, never steps or stages: "step" always means a step of
+  the LLM flow.
 - **`transformer/`**: the real model. Step 3 builds the embedding table,
   position information, N blocks and the output layer; step 4 trains them
   all together.
@@ -1157,7 +1163,7 @@ llm/
 |---|---|---|
 | `tokenizer/` | LLM 1 tokenize, 2 encode; decode for 6 | steps 1 and 2 done (`mini_bpe.py`), with EOS; turn markers to do |
 | `word2vec/` | word2vec 1 train, 2 explore | done |
-| `attention/` | none: a learning step before `transformer/` | steps 1–3 done (`mini_attention example`, `random`, `train`); several heads and the full block to do |
+| `attention/` | none: a learning exercise before `transformer/` | items 1–3 of [its list](#where-each-part-is-built) done (`example`, `random`, `train`); 4 (several heads) and 5 (one complete block) to do |
 | `transformer/` | LLM 3 build, 4 train, 5 finetune, 6 generate | not started |
 
 The Makefile in `llm/` drives the flow, with one target per step. Each target
@@ -1326,11 +1332,12 @@ text8, matching gensim (a widely used Python library with its own word2vec) at
 ## Order of work
 
 1. ~~Finish word2vec.~~ Done.
-2. Tokenizer: ~~stage 2 (`--encode` writing `corpus.ids`)~~ and ~~EOS after
+2. Tokenizer: ~~step 2 (`--encode` writing `corpus.ids`)~~ and ~~EOS after
    each document~~ done. Turn markers when post-training needs them.
 3. `attention/`: self-attention alone, on toy inputs, ending with one
    complete block (see [The transformer block](#the-transformer-block)).
-   Hand-set, random and trained weights done; several heads next.
+   Items 1–3 (hand-set, random and trained weights) done; item 4, several
+   heads, next.
 4. `transformer/`: build, then train, then generate, then finetune.
 5. Throughout: add each step's Makefile target as the step is built
    (`tokenize` exists). At the end, fold this plan into `llm/README.md`.
