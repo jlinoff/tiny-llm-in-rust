@@ -1,0 +1,18 @@
+# config.toml: settings for the LLM flow's steps 3–6 (PLAN.md, "Configuration").
+# Each step reads only its own section. TOML: "key = value", '#' starts a comment.
+
+# [model] is read by step 3, build, and copied into the checkpoint; the later
+# steps read the shapes from the checkpoint, never from here. V (the
+# vocabulary size) isn't set here: it comes from the tokenizer (tok.bpe).
+[model]
+d_model = 128   # the model width d: the length of every token's vector
+layers  = 4     # transformer blocks, applied one after another
+heads   = 4     # attention heads per block; must divide d_model (head size 32)
+context = 128   # the most tokens the model sees at once (T)
+d_ff    = 512   # the FFN's inner width, conventionally 4 × d_model
+seed    = 1     # random seed for the initial weights
+
+# Later steps (not yet built):
+# [training]   read by step 4, train: learning rate, steps, batch size
+# [finetune]   read by step 5, finetune
+# [generate]   read by step 6, generate: temperature, maximum length

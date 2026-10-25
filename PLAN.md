@@ -296,13 +296,18 @@ message of `chat.txt` will be wrapped in turn markers (planned; see
   - config `[model]`: d, layers, heads, context length, d_ff, seed
 - **Output:**
   - `model-init.safetensors`: all the model's weights, random, plus the `[model]`
-    settings
-- **Command** (proposed):
+    settings, the tokenizer's fingerprint and provenance in its metadata
+- **Command:**
 
   ```
   transformer build --tokenizer tok.bpe --config config.toml -o model-init.safetensors
   ```
-- **Status:** not started
+- **Status:** done (`transformer build`), with `transformer inspect` to show
+  and check a checkpoint, and `transformer bench` to measure this machine's
+  matrix-multiply speed. GPT-2's design and initialization; the parameter
+  count is checked against the formula in [Configuration](#configuration);
+  the file is read back and verified, and is read correctly by Hugging
+  Face's own safetensors library.
 
 **What it does:** creates the **whole** model: the V × d embedding table,
 every block's attention and FFN sublayers, and the output layer, all randomly
@@ -1399,7 +1404,7 @@ llm/
 | `tokenizer/` | LLM 1 tokenize, 2 encode; decode for 6 | steps 1 and 2 done (`mini_bpe.py`), with EOS; turn markers to do |
 | `word2vec/` | word2vec 1 train, 2 explore | done |
 | `attention/` | none: a learning exercise before `transformer/` | all 6 items of [its list](#where-each-part-is-built) done (`example`, `random`, `train`, `heads`, `block`, `induction`) |
-| `transformer/` | LLM 3 build, 4 train, 5 finetune, 6 generate | not started |
+| `transformer/` | LLM 3 build, 4 train, 5 finetune, 6 generate | step 3 done (`transformer build`, plus `inspect` and `bench`); train next |
 
 The Makefile in `llm/` drives the flow, with one target per step. Each target
 knows which files it needs, so `make train`, for example, first reruns any
@@ -1695,7 +1700,10 @@ text8, matching gensim (a widely used Python library with its own word2vec) at
    from hand-set weights to two blocks forming an induction head, and the
    automatic differentiation tape (decision 7), checked against the
    hand-written gradients of items 3 and 4 and used by items 5 and 6.
-4. `transformer/`: build, then train, then generate, then finetune.
+4. `transformer/`: ~~build~~ (done), then train, then generate, then
+   finetune. First for train: measure the M4's speed with `transformer
+   bench`, then the f32 forward and backward passes, checked against
+   attention/'s f64 reference versions.
 5. Throughout: add each step's Makefile target as the step is built
    (`tokenize` exists). At the end, fold this plan into `llm/README.md`.
 

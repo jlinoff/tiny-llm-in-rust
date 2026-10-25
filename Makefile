@@ -28,6 +28,26 @@ $(OUT)/corpus.ids: $(OUT)/tok.bpe $(CORPUS) tokenizer/mini_bpe.py | $(OUT)
 $(OUT):
 	mkdir -p $@
 
+# Step 3: build. Rebuilt when the tokenizer, the config or the Rust source changes.
+TRANSFORMER     := transformer/target/release/transformer
+TRANSFORMER_SRC := transformer/Cargo.toml $(wildcard transformer/src/*.rs)
+
+.PHONY: build
+build: $(OUT)/model-init.safetensors ## Step 3: create the model with random weights.
+
+$(OUT)/model-init.safetensors: $(OUT)/tok.bpe config.toml $(TRANSFORMER) | $(OUT)
+	$(call hdr,build)
+	$(TRANSFORMER) build --tokenizer $(OUT)/tok.bpe --config config.toml -o $@
+
+$(TRANSFORMER): $(TRANSFORMER_SRC)
+	$(call hdr,build transformer)
+	cargo build --release --manifest-path transformer/Cargo.toml
+
+.PHONY: bench
+bench: $(TRANSFORMER) ## Measure this machine's matrix-multiply speed.
+	$(call hdr,$@)
+	$(TRANSFORMER) bench
+
 # attention (the learning step before transformer/)
 ATTN       := attention/target/release/mini_attention
 ATTN_SRC   := attention/Cargo.toml $(wildcard attention/src/*.rs)

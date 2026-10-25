@@ -1,0 +1,21 @@
+[package]
+name = "mini_transformer"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+description = "A small GPT-style language model: build, train, generate, finetune"
+
+[[bin]]
+name = "transformer"
+path = "src/main.rs"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+toml = "0.8"
+
+[profile.release]
+codegen-units = 1
+lto = true
