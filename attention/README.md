@@ -278,3 +278,5 @@ As planned in PLAN.md ("Where each part is built"):
    advance, to watch W_q and W_k learn it~~ (`train`)
 4. ~~Several heads~~ (`heads`)
 5. One complete block: the FFN, residual connections and layer normalization
+   (`block`)
+6. Two blocks forming an induction head (`induction`)

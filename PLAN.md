@@ -59,6 +59,14 @@ Grouped so that each definition uses only terms defined above it.
   vector is turned into a **query** (what it looks for), a **key** (what it
   offers to be matched on) and a **value** (what it passes on); see
   [How attention works](#how-attention-works-queries-keys-and-values).
+- **induction head**: a head that continues a pattern seen earlier in the
+  context: after "… A B … A", it predicts B. It works with a
+  **previous-token head** in an earlier block, which records in each
+  token's vector what came just before it; the induction head then finds the
+  earlier token whose predecessor matches the current token, and copies
+  that token forward. The pair is the main known mechanism of **in-context
+  learning**: a model picking up a pattern from its prompt, with no change
+  to its weights.
 - **contextual embedding**: a token's vector after attention has mixed in
   information from its context, so the same word gets different vectors in
   different sentences. A row of the embedding table, by contrast, is the
@@ -101,6 +109,13 @@ Grouped so that each definition uses only terms defined above it.
   applying the chain rule backward through the network. **Gradient descent**
   then moves each weight a little against its gradient; **Adam** is the
   improved variant nearly every transformer is trained with.
+- **automatic differentiation**: computing gradients mechanically instead of
+  writing each formula by hand. In the reverse-mode form used for training,
+  every operation records itself on a **tape** as the forward pass runs, and
+  backpropagation replays the tape in reverse (open decision 7).
+- **gradient check**: testing hand-written gradients against **finite
+  differences**: nudge one weight by ±ε, measure how much the loss changes,
+  and compare with the computed gradient.
 - **learning rate**: how large each adjustment is.
 - **step**, **batch size**: one adjustment; the number of examples used to
   compute it.
@@ -155,7 +170,7 @@ disagreeing. It can still move to Rust if there's a compelling reason.
 
 ## The flows
 
-There are two separate flows:
+There are three separate flows:
 
 1. **The LLM flow**: the main goal. It builds a small GPT-style language
    model, from text to a trained model that generates text, and then
@@ -163,6 +178,12 @@ There are two separate flows:
 2. **The word2vec flow**: a historical precursor (2013) that learns word
    vectors and nothing else. It shares no files with the LLM flow; it's here
    because it shows, in isolation, how an embedding table learns meaning.
+3. **The attention flow**: a learning exercise. It builds the LLM's core
+   part, attention, then one complete transformer block, then two blocks
+   working together, on toy inputs
+   small enough to print every number. It shares no files with the LLM flow
+   either, but unlike word2vec it is a piece of the LLM: step 3 (build)
+   assembles N of these blocks.
 
 ### 1. The LLM flow
 
@@ -387,6 +408,50 @@ between them. Each LLM step and its word2vec equivalent:
 
 - **generate:** none. word2vec can't produce text. Its product is the trained
   input table itself, written to `vectors.txt`.
+
+### 3. The attention flow
+
+```
+attention:
+  item          input(s)                              output
+  1. example    hand-set X and weights            ──► (printed)   # every step of one head; the worked example below
+  2. random     words + random weights            ──► (printed)   # an untrained head: near-uniform attention
+  3. train      generated sequences + a task      ──► (printed)   # one head learning "predict the token 2 back"
+  4. heads      generated sequences + a task      ──► (printed)   # several heads dividing a task, vs one head
+  5. block      generated sequences + a task      ──► (printed)   # one complete transformer block (to do)
+  6. induction  generated sequences + a task      ──► (printed)   # two blocks forming an induction head (to do)
+```
+
+Same key as above, with one difference: the items don't feed each other.
+Each is a separate run of `mini_attention` (the item name is its subcommand)
+that prints its results and writes no files. They are numbered as *items*,
+never steps, which always means the LLM flow's (see
+[Where each part is built](#where-each-part-is-built) for what each item
+shows and what it found).
+
+Each LLM step and its attention-flow equivalent:
+
+- **tokenize, encode:** none. The tokens are letters, a–z, generated at
+  random inside the program for each training sequence.
+
+- **build:** create the weights, random: the token embeddings E, the position
+  embeddings P, each head's W_q, W_k and W_v, and the output layer U. This is
+  step 3 in miniature, but nothing is saved.
+
+- **train:** Adam on a task whose right attention pattern is known in
+  advance (such as "predict the token two back"), instead of next-token
+  prediction on a corpus, so you can check that attention learned the right
+  thing. This is step 4 in miniature.
+
+- **finetune:** none.
+
+- **generate:** none. The product is understanding: printed tables of
+  attention weights and what they show.
+
+What carries over to the LLM flow is the ideas and, as reference
+implementations, the code: `transformer/` will rewrite the pieces for speed
+(f32 instead of f64, batched), and attention/'s versions are what its tests
+compare against.
 
 ## Special tokens
 
@@ -1057,9 +1122,20 @@ decision for `transformer/`.
      decodable. One head solved 15 of 20 seeds in about 880 steps, three
      heads 20 of 20 in about 230. Several heads make the solution easy to
      find and to read, rather than possible at all.
-  5. **A look ahead at one complete block,** adding the FFN, residual
-     connections and layer normalization, so they appear before
+  5. **A look ahead at one complete block** (`block`), adding the FFN,
+     residual connections and layer normalization, so they appear before
      `transformer/` without being the focus.
+  6. **Two blocks forming an induction head** (`induction`): the smallest
+     case where layers cooperate, and the mechanism behind in-context
+     learning (continuing a pattern seen earlier in the context). A head in
+     block 1 copies "the token before me was X" into each token's vector,
+     through the residual stream; a head in block 2 then searches for
+     earlier tokens whose previous token matches the current one, and
+     copies what followed. Task: random sequences whose second half repeats
+     the first. It needs two layers (block 2's search depends on what block
+     1 wrote), it tests the residual stream from item 5, and it is the first
+     head that looks by content rather than by position (Olsson et al.,
+     2022).
 
   These are called items ("item 3"), or by the `mini_attention` subcommand
   that runs each one, never steps or stages: "step" always means a step of
@@ -1101,6 +1177,57 @@ holds parameters.
 Starting values will be chosen for a model that trains in minutes on a laptop
 (roughly d = 128, 4 layers, 4 heads, context 128) and then varied as
 experiments.
+
+**Counting the parameters.** Write L for layers, T for the context length,
+and V for the vocabulary size (from `tok.bpe`). For the GPT-2 design (learned
+position embeddings, layer normalization with a scale and a shift, bias terms
+on every matrix, and an output layer that reuses the token embedding table,
+called **weight tying**):
+
+```
+N = V·d + T·d + L·(4d² + 2·d·d_ff + 9d + d_ff) + 2d
+```
+
+Where each term comes from:
+
+- V·d: the token embedding table, one d-number row per token. With weight
+  tying it is also the output layer, so it's counted once.
+- T·d: the position embeddings, one row per position.
+- Per block, L times:
+  - 4d²: attention's W_q, W_k, W_v and W_o, each d × d. Each head's
+    matrices are d × (d / heads), and the heads together fill d × d, so the
+    number of heads doesn't change the count.
+  - 4d: their bias vectors, d numbers each.
+  - 2·d·d_ff: the FFN's two matrices, d × d_ff and d_ff × d.
+  - d_ff + d: the FFN's two bias vectors.
+  - 4d: two layer norms, each with a d-number scale and a d-number shift.
+- 2d: the final layer norm, before the output layer.
+
+With the usual d_ff = 4d, a block is 12d² + 13d, and the d² terms dominate:
+the familiar rule of thumb is N ≈ 12·L·d² plus the embeddings.
+
+Check: GPT-2 small (V = 50,257, T = 1024, d = 768, L = 12, d_ff = 3072) gives
+N = 124,439,808, its published size exactly.
+
+For the starting values (d = 128, L = 4, T = 128, d_ff = 512) with the
+Makefile's default tokenizer (1,000 merges, so V = 256 + 1000 + 1 = 1,257):
+
+- embeddings: 1,257 · 128 + 128 · 128 = 177,280
+- blocks: 4 · 198,272 = 793,088
+- final layer norm: 256
+- N = 970,624, just under a million
+
+The embeddings are 18% of that model, against 32% of GPT-2 small: the
+smaller d is, the larger the share the embedding table takes.
+
+If `transformer/` makes different choices, adjust N:
+
+- rotary position encoding (RoPE) instead of learned positions: subtract
+  T·d (RoPE has no parameters)
+- no bias terms (as in Llama): subtract L·(5d + d_ff)
+- RMSNorm instead of layer norm (a scale but no shift): subtract
+  L·2d + d
+- separate output layer instead of weight tying: add V·d
 
 **Guaranteeing consistency.** d and the other `[model]` values must be the
 same in every stage. Rather than every stage rereading the config (someone
@@ -1201,7 +1328,7 @@ llm/
 |---|---|---|
 | `tokenizer/` | LLM 1 tokenize, 2 encode; decode for 6 | steps 1 and 2 done (`mini_bpe.py`), with EOS; turn markers to do |
 | `word2vec/` | word2vec 1 train, 2 explore | done |
-| `attention/` | none: a learning exercise before `transformer/` | items 1–4 of [its list](#where-each-part-is-built) done (`example`, `random`, `train`, `heads`); 5 (one complete block) to do |
+| `attention/` | none: a learning exercise before `transformer/` | items 1–4 of [its list](#where-each-part-is-built) done (`example`, `random`, `train`, `heads`); 5 (`block`) and 6 (`induction`) to do |
 | `transformer/` | LLM 3 build, 4 train, 5 finetune, 6 generate | not started |
 
 The Makefile in `llm/` drives the flow, with one target per step. Each target
@@ -1367,15 +1494,50 @@ text8, matching gensim (a widely used Python library with its own word2vec) at
    example conversations: hand-written, generated, or from a small public
    dataset.
 
+7. **How gradients are computed.** *Decided:* (b), a small reverse-mode
+   automatic differentiation tape in Rust, built before item 5, so items 5
+   and 6 and `transformer/` are written as forward code only. Its
+   operations work on whole matrices, not single numbers, and some are
+   **fused** (combined into one operation, with one backward rule) where
+   the combined gradient is simpler than its parts: softmax followed by
+   cross-entropy has the backward rule "probabilities − one-hot". Each
+   operation's backward rule is still written by hand and gradient-checked
+   on its own, so every formula stays visible, one operation at a time.
+   The tape must reproduce the hand-written gradients of
+   `mini_attention train` and `heads`, which stay as its references.
+
+   The background: so far backpropagation is written by
+   hand for each model (`mini_attention train` and `heads`), checked
+   against finite differences. That gets long and fragile as the model
+   grows: item 5 adds layer norm, the FFN and residual connections, item 6
+   doubles it, and `transformer/` adds N blocks. The options:
+   - (a) keep writing it by hand: every formula visible, but every
+     architecture change means rewriting the backward pass
+   - (b) write a small reverse-mode **automatic differentiation** tape in
+     Rust: each operation records itself as it runs, and the backward pass
+     replays the record in reverse, so models need only forward code;
+     roughly 400–600 lines
+   - (c) use an existing Rust ML crate (candle or burn): fastest, but the
+     gradient machinery is hidden
+
+   (a) was first suggested for item 5, to see layer norm's and the FFN's
+   backward passes once. It was dropped: the tape still needs each
+   operation's backward rule written out, and building layer norm on the
+   tape from its parts lets a test compare the derived gradient with the
+   closed-form formula.
+
 ## Order of work
 
 1. ~~Finish word2vec.~~ Done.
 2. Tokenizer: ~~step 2 (`--encode` writing `corpus.ids`)~~ and ~~EOS after
    each document~~ done. Turn markers when post-training needs them.
 3. `attention/`: self-attention alone, on toy inputs, ending with one
-   complete block (see [The transformer block](#the-transformer-block)).
-   Items 1–4 (hand-set, random and trained weights; several heads) done;
-   item 5, one complete block, next.
+   complete block and then two blocks forming an induction head (see
+   [The transformer block](#the-transformer-block)). Items 1–4 (hand-set,
+   random and trained weights; several heads) done; item 5 (`block`) next,
+   then item 6 (`induction`). First, the automatic differentiation tape
+   (decision 7), checked against the hand-written gradients of items 3
+   and 4.
 4. `transformer/`: build, then train, then generate, then finetune.
 5. Throughout: add each step's Makefile target as the step is built
    (`tokenize` exists). At the end, fold this plan into `llm/README.md`.
