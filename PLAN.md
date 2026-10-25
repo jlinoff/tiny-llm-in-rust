@@ -1629,19 +1629,30 @@ text8, matching gensim (a widely used Python library with its own word2vec) at
    The limit is compute, not memory: the token IDs fit easily in the
    Mac's 32 GB. Training costs about 6 × N × D floating-point operations for
    N parameters and D tokens, and a compute-efficient run uses D ≈ 20 N (the
-   Chinchilla rule of thumb). At an assumed 30 GFLOP/s for our own Rust on
-   the M4's CPU (to be measured):
-   - 1M parameters, 20M tokens: about an hour
-   - 2.5M parameters, 50M tokens: about 7 hours
-   - 5M parameters, 100M tokens: about a day
+   Chinchilla rule of thumb).
+
+   *Measured* with `transformer bench` on the M4 (MacBook Pro, 10 cores: 4
+   performance, 6 efficiency): 32–39 GFLOP/s on one thread, 140–155 on all
+   10. That's about 4.4× one thread, not 10×: the efficiency cores are
+   slower, and the benchmark splits rows evenly, so fast cores wait for
+   slow ones (smaller work chunks would help). Real training will reach
+   perhaps a third to a half of 150 GFLOP/s, once softmax, layer norm, the
+   optimizer and memory traffic are counted. So:
+   - 1M parameters, 20M tokens: about 15–35 minutes
+   - 2.5M parameters, 50M tokens: about 1.5–3 hours
+   - 5M parameters, 100M tokens: about 6–12 hours (overnight)
+   - 8M parameters, 160M tokens: about 15–30 hours (a weekend)
+
+   The planning assumption had been 30 GFLOP/s, five times too pessimistic.
 
    The paper's own evaluations set expectations: their 1M model scored 6/10
    for grammar and 2/10 for consistency, 8.3M scored 7 and 5, and 28M scored
-   9 and 9, trained on a single GPU in up to 30 hours. So on the CPU, expect
-   grammatical but loosely coherent stories. Apple's Accelerate library,
-   using the M4's matrix hardware, could make matrix products many times
-   faster, at the cost of a platform-specific dependency; that's a later
-   decision, once our own speed is measured. The plan:
+   9 and 9, trained on a single GPU in up to 30 hours. With the measured
+   speed, an 8M-class model (grammatical, partly coherent stories) is within
+   reach of our own Rust on the CPU. Apple's Accelerate library, using the
+   M4's matrix hardware, could make matrix products faster still, at the
+   cost of a platform-specific dependency; that's a later decision, once
+   `train` reports its real tokens per second. The plan:
    - develop and debug on the validation file (a few million tokens, minutes
      to train)
    - then train on a subset of the training file, 20–100M tokens
