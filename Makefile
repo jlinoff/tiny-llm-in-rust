@@ -28,16 +28,23 @@ $(OUT)/corpus.ids: $(OUT)/tok.bpe $(CORPUS) tokenizer/mini_bpe.py | $(OUT)
 $(OUT):
 	mkdir -p $@
 
-.PHONY: clean
-clean: ## Remove generated files (keeps data/ and uncommitted work).
-	rm -rf $(OUT) project.zip
-	rm -f *~
+# attention (the learning step before transformer/)
+ATTN       := attention/target/release/mini_attention
+ATTN_SRC   := attention/Cargo.toml $(wildcard attention/src/*.rs)
 
-.PHONY: zip
-zip: project.zip ## Create the project zip file: project.zip.
+.PHONY: attention
+attention: $(ATTN) ## Show one attention head: the worked example, then random weights.
+	$(call hdr,attention example)
+	$(ATTN) example
+	$(call hdr,attention random)
+	$(ATTN) random
+	$(call hdr,attention train)
+	$(ATTN) train
 
-project.zip: $(SRC_FILES)
-	zip $@ $(SRC_FILES)
+# Rebuilt only when the Rust source changes.
+$(ATTN): $(ATTN_SRC)
+	$(call hdr,build mini_attention)
+	cargo build --release --manifest-path attention/Cargo.toml
 
 # word2vec (the historical side branch; not part of the LLM flow)
 W2V        := word2vec/target/release/mini_w2v
@@ -64,6 +71,18 @@ data/text8:
 	rm -f data/text8.gz
 	curl -fL -o data/text8.gz https://github.com/RaRe-Technologies/gensim-data/releases/download/text8/text8.gz
 	gunzip data/text8.gz
+
+
+.PHONY: clean
+clean: ## Remove generated files (keeps data/ and uncommitted work).
+	rm -rf $(OUT) project.zip
+	rm -f *~
+
+.PHONY: zip
+zip: project.zip ## Create the project zip file: project.zip.
+
+project.zip: $(SRC_FILES)
+	zip $@ $(SRC_FILES)
 
 .PHONY: help
 help:  ## This help message.

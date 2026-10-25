@@ -1157,7 +1157,7 @@ llm/
 |---|---|---|
 | `tokenizer/` | LLM 1 tokenize, 2 encode; decode for 6 | steps 1 and 2 done (`mini_bpe.py`), with EOS; turn markers to do |
 | `word2vec/` | word2vec 1 train, 2 explore | done |
-| `attention/` | none: a learning step before `transformer/` | not started |
+| `attention/` | none: a learning step before `transformer/` | steps 1–3 done (`mini_attention example`, `random`, `train`); several heads and the full block to do |
 | `transformer/` | LLM 3 build, 4 train, 5 finetune, 6 generate | not started |
 
 The Makefile in `llm/` drives the flow, with one target per step. Each target
@@ -1330,6 +1330,7 @@ text8, matching gensim (a widely used Python library with its own word2vec) at
    each document~~ done. Turn markers when post-training needs them.
 3. `attention/`: self-attention alone, on toy inputs, ending with one
    complete block (see [The transformer block](#the-transformer-block)).
+   Hand-set, random and trained weights done; several heads next.
 4. `transformer/`: build, then train, then generate, then finetune.
 5. Throughout: add each step's Makefile target as the step is built
    (`tokenize` exists). At the end, fold this plan into `llm/README.md`.
