@@ -42,6 +42,8 @@ attention: $(ATTN) ## Show one attention head: the worked example, then random w
 	$(ATTN) train
 	$(call hdr,attention heads)
 	$(ATTN) heads
+	$(call hdr,attention block)
+	$(ATTN) block
 
 # Rebuilt only when the Rust source changes.
 $(ATTN): $(ATTN_SRC)
