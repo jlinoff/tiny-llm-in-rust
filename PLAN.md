@@ -194,13 +194,13 @@ There are three separate flows:
 
 ```
 LLM flow:
-  step          input(s)                                       output
-  1. tokenize   corpus.txt                                 ──► tok.bpe          # contains: pattern, merges, special tokens; V
-  2. encode     corpus.txt + tok.bpe                       ──► corpus.ids       # contains: the corpus as token IDs
-  3. build      tok.bpe + config [model]                   ──► model-init.ckpt  # contains: all weights, random; the model settings
-  4. train      model-init.ckpt + corpus.ids + [training]  ──► model.ckpt       # contains: the same weights, pretrained
-  5. finetune   model.ckpt + chat.ids + [finetune]         ──► chat.ckpt        # contains: the same weights, tuned on conversations
-  6. generate   chat.ckpt + tok.bpe + prompt + [generate]  ──► text
+  step          input(s)                                             output
+  1. tokenize   corpus.txt                                        ──► tok.bpe                 # contains: pattern, merges, special tokens; V
+  2. encode     corpus.txt + tok.bpe                              ──► corpus.ids              # contains: the corpus as token IDs
+  3. build      tok.bpe + config [model]                          ──► model-init.safetensors  # contains: all weights, random; the model settings
+  4. train      model-init.safetensors + corpus.ids + [training]  ──► model.safetensors       # contains: the same weights, pretrained
+  5. finetune   model.safetensors + chat.ids + [finetune]         ──► chat.safetensors        # contains: the same weights, tuned on conversations
+  6. generate   chat.safetensors + tok.bpe + prompt + [generate]  ──► text
 ```
 
 Key: each step reads the files to the left of `──►` and writes the one file to
@@ -211,7 +211,7 @@ file (see [Configuration](#configuration)). `chat.ids` is step 2 run on
 
 Steps 1–4 are **pretraining**; step 5 is **post-training** (see
 [Post-training](#post-training)). Step 6 works after either: with
-`model.ckpt` it continues text, with `chat.ckpt` it answers in turns.
+`model.safetensors` it continues text, with `chat.safetensors` it answers in turns.
 
 The files are the interfaces between stages, so their
 formats must be defined exactly. This matters doubly because the tokenizer is
@@ -282,12 +282,12 @@ message of `chat.txt` will be wrapped in turn markers (planned; see
   - V, from `tok.bpe`
   - config `[model]`: d, layers, heads, context length, d_ff, seed
 - **Output:**
-  - `model-init.ckpt`: all the model's weights, random, plus the `[model]`
+  - `model-init.safetensors`: all the model's weights, random, plus the `[model]`
     settings
 - **Command** (proposed):
 
   ```
-  transformer build --tokenizer tok.bpe --config config.toml -o model-init.ckpt
+  transformer build --tokenizer tok.bpe --config config.toml -o model-init.safetensors
   ```
 - **Status:** not started
 
@@ -300,15 +300,15 @@ the step-0, untrained checkpoints of its Pythia models.)
 ##### Step 4: train
 
 - **Inputs:**
-  - `model-init.ckpt`
+  - `model-init.safetensors`
   - `corpus.ids`
   - config `[training]`: learning rate, steps, batch size
 - **Output:**
-  - `model.ckpt`: the same weights, pretrained
+  - `model.safetensors`: the same weights, pretrained
 - **Command** (proposed):
 
   ```
-  transformer train --model model-init.ckpt --data corpus.ids --config config.toml -o model.ckpt
+  transformer train --model model-init.safetensors --data corpus.ids --config config.toml -o model.safetensors
   ```
 - **Status:** not started
 
@@ -320,15 +320,15 @@ the config. The tokenizer is not involved; it already did its work in step 2.
 ##### Step 5: finetune
 
 - **Inputs:**
-  - `model.ckpt`
+  - `model.safetensors`
   - `chat.ids`
   - config `[finetune]`: learning rate, steps
 - **Output:**
-  - `chat.ckpt`: the same weights, tuned on conversations
+  - `chat.safetensors`: the same weights, tuned on conversations
 - **Command** (proposed):
 
   ```
-  transformer finetune --model model.ckpt --data chat.ids --config config.toml -o chat.ckpt
+  transformer finetune --model model.safetensors --data chat.ids --config config.toml -o chat.safetensors
   ```
 - **Status:** not started
 
@@ -339,7 +339,7 @@ This is post-training (see [Post-training](#post-training)).
 ##### Step 6: generate
 
 - **Inputs:**
-  - `chat.ckpt` (or `model.ckpt`)
+  - `chat.safetensors` (or `model.safetensors`)
   - `tok.bpe`
   - a prompt
   - config `[generate]`: temperature, maximum length
@@ -348,15 +348,15 @@ This is post-training (see [Post-training](#post-training)).
 - **Command** (proposed):
 
   ```
-  transformer generate --model chat.ckpt --tokenizer tok.bpe --config config.toml --prompt "Hello"
+  transformer generate --model chat.safetensors --tokenizer tok.bpe --config config.toml --prompt "Hello"
   ```
 
   The output text is printed rather than written to a file.
 - **Status:** not started
 
 **What it does:** encodes the prompt, predicts a token ID, appends it, and
-repeats; then decodes the IDs back to text. With `model.ckpt` it continues the
-prompt; with `chat.ckpt` it answers as the assistant.
+repeats; then decodes the IDs back to text. With `model.safetensors` it continues the
+prompt; with `chat.safetensors` it answers as the assistant.
 
 #### What crosses each boundary
 
@@ -1368,7 +1368,7 @@ directories would mean copying that code or reaching across directories for it.
 llm/
 ├── PLAN.md        # this file
 ├── Makefile       # one target per step: make tokenize, make encode, ...
-├── out/           # generated files: tok.bpe, *.ids, *.ckpt (git-ignored; make clean removes it)
+├── out/           # generated files: tok.bpe, *.ids, *.safetensors (git-ignored; make clean removes it)
 ├── data/          # corpora and example conversations, e.g. text8, chat.txt (git-ignored)
 ├── tokenizer/     # text <-> token IDs: tokenize, encode, decode
 ├── word2vec/      # word vectors, the historical precursor
@@ -1404,13 +1404,13 @@ python3 tokenizer/mini_bpe.py corpus.txt -n 1000 --save tok.bpe
 python3 tokenizer/mini_bpe.py --load tok.bpe --encode corpus.txt -o corpus.ids
 python3 tokenizer/mini_bpe.py --load tok.bpe --encode chat.txt   -o chat.ids
 # 3 build
-transformer build    --tokenizer tok.bpe --config config.toml -o model-init.ckpt
+transformer build    --tokenizer tok.bpe --config config.toml -o model-init.safetensors
 # 4 train (end of pretraining)
-transformer train    --model model-init.ckpt --data corpus.ids --config config.toml -o model.ckpt
+transformer train    --model model-init.safetensors --data corpus.ids --config config.toml -o model.safetensors
 # 5 finetune (post-training)
-transformer finetune --model model.ckpt --data chat.ids --config config.toml -o chat.ckpt
+transformer finetune --model model.safetensors --data chat.ids --config config.toml -o chat.safetensors
 # 6 generate
-transformer generate --model chat.ckpt --tokenizer tok.bpe --config config.toml --prompt "Hello"
+transformer generate --model chat.safetensors --tokenizer tok.bpe --config config.toml --prompt "Hello"
 ```
 
 As in [What each stage does](#what-each-stage-does), everything after step 2
@@ -1501,16 +1501,39 @@ text8, matching gensim (a widely used Python library with its own word2vec) at
    follows nanoGPT (Andrej Karpathy's minimal GPT training code), which
    stores plain 16-bit IDs, plus the header. Specified in
    `tokenizer/README.md`.
-3. **The checkpoint format.** A custom binary format with a header, or
-   safetensors (Hugging Face's weights format, described below: simple,
-   well-specified, readable from both Rust and Python, which allows inspecting
-   weights in Python).
+3. **The checkpoint format.** *Decided:* **safetensors** (Hugging Face's
+   weights format, described below), as a single file per checkpoint, with
+   our own tensor names. The flow's files are `model-init.safetensors`,
+   `model.safetensors` and `chat.safetensors`.
+
+   The format: an 8-byte little-endian number giving the header's length; a
+   JSON header naming each tensor with its dtype (f32 here), shape and byte
+   offsets; then the raw little-endian numbers, row-major, with no gaps. It
+   contains only data, so loading it can't run code, and it's simple enough
+   to read and write by hand in Rust (about 100 lines, no dependency) and to
+   inspect from Python.
+
+   What we take from Hugging Face's convention, and what we don't:
+   - **Taken:** the file format.
+   - **Not taken: a separate `config.json` beside the weights.** The header
+     allows a `__metadata__` map of strings, and that holds the `[model]`
+     settings (as TOML text), the tokenizer's fingerprint and the provenance
+     record, so the checkpoint stays one self-describing file and the "one
+     source of truth" rule in [Configuration](#configuration) holds.
+   - **Not taken: GPT-2's tensor names and layouts** (Q, K and V fused into
+     one `c_attn` matrix, weights stored transposed for a historical
+     `Conv1D` class, names like `transformer.h.0.attn.c_attn.weight`). Our
+     names follow this plan instead.
+   - **Added: optimizer state** (Adam's m and v, and the step count) in
+     training checkpoints, so training can resume. Hugging Face's trainer
+     keeps those in a separate pickle file.
+   - **Later, optional:** a small export script to Hugging Face's GPT-2
+     layout, so the trained model can be loaded into PyTorch and its outputs
+     compared with ours: an independent check of the whole implementation.
 
    *A "checkpoint" is a saved snapshot of a model's weights, taken during
-   training or at the end. `.ckpt` in the flow above is a placeholder meaning
-   "a checkpoint, format to be decided". Once a format is chosen, the files
-   should use its extension (for safetensors: `model-init.safetensors`,
-   `model.safetensors`).*
+   training or at the end. Before this decision, the flow used `.ckpt` as a
+   placeholder meaning "a checkpoint, format to be decided".*
 
    `.ckpt` is a convention, not a standard. TensorFlow (Google's deep-learning
    framework) historically saved `model.ckpt-…` files; PyTorch Lightning (a
@@ -1533,16 +1556,49 @@ text8, matching gensim (a widely used Python library with its own word2vec) at
    public model hubs. safetensors was created mainly to close that hole: it
    contains only data, so loading it can't run anything. That's a point in
    its favor here.
-4. **The config format.** The design is settled (see
-   [Configuration](#configuration)); the syntax isn't. TOML is easy to read and
-   edit by hand and supports comments; JSON is what Hugging Face uses for the
-   copy stored with a model.
+4. **The config format.** *Decided:* **TOML**, in `config.toml` (the design
+   is in [Configuration](#configuration)). YAML also supports comments, but
+   it guesses types, sometimes wrongly (in YAML 1.1, `no` reads as false and
+   `1e-3` as a string unless written `1.0e-3`), and its structure depends on
+   indentation. TOML is explicit, its tables match the plan's sections
+   (`[model]`, `[training]`, `[finetune]`, `[generate]`), Rust's `toml` crate
+   is mature (Cargo uses TOML), and Python reads it with the standard
+   library's `tomllib` (3.11 and later). The copy stored in a checkpoint is
+   the same TOML text, in the safetensors header's metadata.
 5. **The driver.** *Decided:* a Makefile, with one target per step (see
    [Where the stages live](#where-the-stages-live)). Unlike a shell script, it
    reruns only the steps whose inputs changed.
-6. **The training data.** A pretraining corpus small enough to train on in
-   minutes, but large enough to learn something: text8 (17 million words) is
-   one candidate. For fine-tuning, a few hundred to a few thousand short
+6. **The training data.** *Decided for pretraining:* **TinyStories** (Eldan
+   and Li, 2023): short, simple stories written by GPT-3.5 and GPT-4, made
+   so that very small models can learn coherent English. Its training file
+   is 1.92 GB, roughly 400–500 million tokens with a small vocabulary (an
+   estimate); the validation file is 19 MB.
+
+   The limit is compute, not memory: the token IDs fit easily in the
+   Mac's 32 GB. Training costs about 6 × N × D floating-point operations for
+   N parameters and D tokens, and a compute-efficient run uses D ≈ 20 N (the
+   Chinchilla rule of thumb). At an assumed 30 GFLOP/s for our own Rust on
+   the M4's CPU (to be measured):
+   - 1M parameters, 20M tokens: about an hour
+   - 2.5M parameters, 50M tokens: about 7 hours
+   - 5M parameters, 100M tokens: about a day
+
+   The paper's own evaluations set expectations: their 1M model scored 6/10
+   for grammar and 2/10 for consistency, 8.3M scored 7 and 5, and 28M scored
+   9 and 9, trained on a single GPU in up to 30 hours. So on the CPU, expect
+   grammatical but loosely coherent stories. Apple's Accelerate library,
+   using the M4's matrix hardware, could make matrix products many times
+   faster, at the cost of a platform-specific dependency; that's a later
+   decision, once our own speed is measured. The plan:
+   - develop and debug on the validation file (a few million tokens, minutes
+     to train)
+   - then train on a subset of the training file, 20–100M tokens
+
+   text8 (17 million words of Wikipedia, used for word2vec) was the earlier
+   candidate; it has no punctuation or capitals, so a model trained on it
+   generates word salad, where TinyStories gives stories to read.
+
+   *Still open:* fine-tuning data, a few hundred to a few thousand short
    example conversations: hand-written, generated, or from a small public
    dataset.
 
