@@ -50,15 +50,20 @@ Grouped so that each definition uses only terms defined above it.
   as it learns. **Hyperparameters** are the settings we choose (more in
   [Configuration](#configuration)).
 - **self-attention**: a sublayer in which each token's vector takes in
-  information from the tokens before it, weighting each by a relevance score
-  (a dot product of their vectors). An **attention head** is one independent
-  copy of this computation: it reads each token's whole vector and computes
-  smaller queries, keys and values from it (the **head size**); each
-  attention sublayer, in every block, runs several side by side (more in
-  [How heads fit in](#how-heads-fit-in)). Inside attention, each token's
-  vector is turned into a **query** (what it looks for), a **key** (what it
-  offers to be matched on) and a **value** (what it passes on); see
-  [How attention works](#how-attention-works-queries-keys-and-values).
+  information from the tokens before it, weighting each by a relevance score.
+  Each token's vector is turned into a **query** (what it looks for), a
+  **key** (what it offers to be matched on) and a **value** (what it passes
+  on); a token's score for an earlier token is the dot product of its query
+  with that token's key (see
+  [How attention works](#how-attention-works-queries-keys-and-values)).
+- **attention head**: one independent copy of the self-attention
+  computation, with its own matrices. It reads each token's whole vector (d
+  numbers) and computes from it a smaller query, key and value, each of
+  length h, the **head size**. The usual choice is to split d evenly among
+  the heads: h = d / heads, so with d = 128 and 4 heads, h = 32. Each
+  attention sublayer, in every block, runs several heads side by side (more
+  in [How heads fit in](#how-heads-fit-in), including why a head still reads
+  all d numbers).
 - **induction head**: a head that continues a pattern seen earlier in the
   context: after "… A B … A", it predicts B. It works with a
   **previous-token head** in an earlier block, which records in each
@@ -558,7 +563,8 @@ normalization first trains more stably in deep stacks.)
   vector is turned, by three learned matrices, into a **query** ("what am I
   looking for?"), a **key** ("what do I contain?") and a **value** ("what do
   I pass on?"). Each token scores every earlier token by the dot product of
-  its query with their keys, divided by √(head size). The division matters:
+  its query with their keys, divided by √h, where h is the head size (the
+  length of each query and key; see [Terms](#terms)). The division matters:
   a dot product of two random vectors of length h has a variance that grows
   in proportion to h, so without it, larger heads would produce larger
   scores, and the softmax would saturate, giving one weight near 1 and the
@@ -584,8 +590,9 @@ normalization first trains more stably in deep stacks.)
   ```
 
   Several **heads** do this side by side, each with its own matrices and a
-  share of the width (head size = d / number of heads), so different heads can track different relationships; their
-  outputs are joined and passed through one more learned matrix.
+  share of the width (h = d / number of heads), so different heads can track
+  different relationships; their outputs are joined and passed through one
+  more learned matrix.
 - **Feed-forward network (FFN): each token on its own.** Two learned matrix
   multiplications with a nonlinearity between them: d → d_ff (usually 4 × d) →
   nonlinearity (GELU, a smooth version of "keep positive values, zero the
@@ -610,8 +617,9 @@ like the embedding table: created with random values in step 3 (build),
 fixed during a forward pass, where they're simply multiplied with the input,
 and nudged a little by training after every batch. Nothing about "queries" or
 "keys" is designed in; those are names for the roles the matrices end up
-playing once trained. Each head has three matrices of size d × (head size);
-with d = 128 and 4 heads, 128 × 32 each. In practice the heads' matrices are
+playing once trained. Each head has three matrices of size d × (head size).
+The head size is usually d divided by the number of heads, so with d = 128
+and 4 heads it's 128 / 4 = 32, and each matrix is 128 × 32. In practice the heads' matrices are
 stored side by side as one d × d matrix, hence the "4d²" (W_q, W_k, W_v and
 the output matrix W_o) in [The four parts](#the-four-parts). Every block has
 its own four matrices; they aren't shared between blocks.
