@@ -260,24 +260,40 @@ fn compare(c: &Config, o: &Options) {
         &labels(&demo),
         2,
     );
+    // The head's actual attention (tokens and positions together), averaged
+    // over fresh sequences and over the rows that have a target.
     let lo = *c.lags.iter().max().unwrap();
-    let (pa, _) = position_attention(&w1, &w1.heads[0]);
-    let split: Vec<String> = c
-        .lags
+    let samples = 500;
+    let mut share = vec![0.0; c.lags.len()];
+    let mut sample_rng = Rng::new(c.seed ^ 0xA77);
+    for _ in 0..samples {
+        let f = forward(&w1, &random_tokens(&one, &mut sample_rng), &one.lags);
+        for (s, &lag) in share.iter_mut().zip(&c.lags) {
+            *s += (lo..c.len)
+                .map(|t| f.attn[0].weights.get(t, t - lag))
+                .sum::<f64>();
+        }
+    }
+    let rows = (samples * (c.len - lo)) as f64;
+    share.iter_mut().for_each(|s| *s /= rows);
+    let split: Vec<String> = share
         .iter()
-        .map(|&lag| {
-            let share = (lo..c.len).map(|t| pa.get(t, t - lag)).sum::<f64>() / (c.len - lo) as f64;
-            format!("{share:.2} {}", back(lag))
-        })
+        .zip(&c.lags)
+        .map(|(s, &lag)| format!("{s:.2} {}", back(lag)))
         .collect();
     println!("A single head can still solve this, by splitting each row's attention");
     println!("unevenly between the positions it needs, so that the blend of their");
-    println!("values still says which token came from where. On average (from positions");
-    println!("alone) this head puts {}.", split.join(", "));
+    println!("values still says which token came from where. Averaged over {samples} fresh");
+    println!("sequences, this head puts:\n");
+    println!(
+        "    {}, and {:.2} elsewhere\n",
+        split.join(", "),
+        1.0 - share.iter().sum::<f64>()
+    );
     println!("The pattern is a compromise: slower to find, and harder to read.");
     if out1.accuracy < 0.99 {
         println!("Here it didn't fully get there: look for a row that put all its weight");
-        println!("on one position and so lost the other token. Training doesn't recover");
+        println!("on one position and so lost another token. Training doesn't recover");
         println!("from that: the run is stuck in a local minimum.");
     }
 

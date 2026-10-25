@@ -190,10 +190,11 @@ It runs in three parts:
 
 **The result is not "one head can't do this."** I expected it to fail, and
 it doesn't. It spreads each row's attention over the three positions
-*unevenly*, about 0.46, 0.31 and 0.21 in a typical row, so its output
-0.46·v(a) + 0.31·v(b) + 0.21·v(c) is a blend in which each letter comes in
-at a different strength. That is enough for U to tell which letter came
-from where. What one head lacks is ease. Over seeds 1–20 with the defaults:
+*unevenly*: averaged over 500 fresh sequences, 0.45, 0.33 and 0.20, so its
+output, roughly 0.45·v(a) + 0.33·v(b) + 0.20·v(c), is a blend in which each
+letter comes in at a different strength. That is enough for U to tell which
+letter came from where. What one head lacks is ease. Over seeds 1–20 with
+the defaults:
 
 - one head of size 18: solved (≥ 99% accuracy) 15 of 20 seeds, reaching 99%
   after about 880 steps on average

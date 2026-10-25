@@ -52,7 +52,8 @@ Grouped so that each definition uses only terms defined above it.
 - **self-attention**: a sublayer in which each token's vector takes in
   information from the tokens before it, weighting each by a relevance score
   (a dot product of their vectors). An **attention head** is one independent
-  copy of this computation, working on a slice of each token's vector; each
+  copy of this computation: it reads each token's whole vector and computes
+  smaller queries, keys and values from it (the **head size**); each
   attention sublayer, in every block, runs several side by side (more in
   [How heads fit in](#how-heads-fit-in)). Inside attention, each token's
   vector is turned into a **query** (what it looks for), a **key** (what it
@@ -517,8 +518,8 @@ normalization first trains more stably in deep stacks.)
   each row → softmax → weights summing to 1 → weighted sum of those tokens' values
   ```
 
-  Several **heads** do this side by side, each in a slice of d with its own
-  matrices, so different heads can track different relationships; their
+  Several **heads** do this side by side, each with its own matrices and a
+  share of the width (head size = d / number of heads), so different heads can track different relationships; their
   outputs are joined and passed through one more learned matrix.
 - **Feed-forward network (FFN): each token on its own.** Two learned matrix
   multiplications with a nonlinearity between them: d → d_ff (usually 4 × d) →
@@ -904,10 +905,10 @@ model
 └── 4 transformer blocks (layers), applied one after another
     └── each block
         ├── attention sublayer
-        │   ├── head 1 ─┐  each head: its own query, key and value matrices,
-        │   ├── head 2  │  working on a 32-number slice (128 / 4) of every
-        │   ├── head 3  │  token's vector, attending over ALL the tokens
-        │   └── head 4 ─┘
+        │   ├── head 1 ─┐  each head: its own query, key and value matrices
+        │   ├── head 2  │  (128 × 32), reading every token's full 128-number
+        │   ├── head 3  │  vector and producing 32-number queries, keys and
+        │   └── head 4 ─┘  values, attending over ALL the tokens
         │        → the 4 heads' outputs are joined (4 × 32 = 128 numbers)
         │          and passed through one more learned matrix
         └── FFN sublayer
@@ -916,6 +917,30 @@ model
 That model has 4 × 4 = 16 heads in all, four in each block's attention
 sublayer. Each head is a complete, independent attention computation: its own
 queries, keys and values, scores, causal mask and softmax.
+
+**What "head size" means.** A head's matrices connect two sizes: the token
+vector going in (d numbers) and the query, key or value coming out (head size
+numbers). Each matrix has one row per input number and one column per output
+number:
+
+```
+token vector x          W_q                query q
+ (1 × d)        ·     (d × h)       =      (1 × h)
+
+ [128 numbers]  ·  128 rows × 32 cols  =   [32 numbers]
+                    ↑          ↑
+            must match d    free choice:
+            (one row per    the head size
+             input number)
+```
+
+So every head reads all d numbers of every token; what's divided among the
+heads is the output width. The worked example in
+[How attention works](#how-attention-works-queries-keys-and-values) is the
+same with d = 4 and head size 2: W_q is 4 × 2. Head size = d / heads is the
+usual choice, not a requirement: it makes the joined outputs exactly d
+numbers wide (4 × 32 = 128), ready for the output matrix and the residual
+stream.
 
 **Why several heads:** each can learn to track a different relationship. In
 trained models, researchers have found heads that consistently attend to the
@@ -1028,7 +1053,7 @@ decision for `transformer/`.
   4. **Several heads** (`heads`). Result: on predicting the tokens one, two
      and three back together, three heads each take one position, but one
      head of the same total size can also solve it, by weighting the three
-     positions unevenly (0.46/0.31/0.21 in a typical row) so the blend stays
+     positions unevenly (0.45/0.33/0.20 on average) so the blend stays
      decodable. One head solved 15 of 20 seeds in about 880 steps, three
      heads 20 of 20 in about 230. Several heads make the solution easy to
      find and to read, rather than possible at all.
