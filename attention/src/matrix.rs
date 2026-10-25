@@ -58,14 +58,19 @@ impl Mat {
     pub fn matmul(&self, other: &Mat) -> Mat {
         assert_eq!(self.cols, other.rows, "matmul shape mismatch");
         let mut out = Mat::zeros(self.rows, other.cols);
-        for r in 0..self.rows {
-            for k in 0..self.cols {
-                let a = self.get(r, k);
+        // Row r of the result is the sum over k of self[r][k] × row k of
+        // other: the inner loop runs along contiguous rows.
+        for (out_row, a_row) in out
+            .data
+            .chunks_exact_mut(other.cols.max(1))
+            .zip(self.data.chunks_exact(self.cols.max(1)))
+        {
+            for (&a, b_row) in a_row.iter().zip(other.data.chunks_exact(other.cols.max(1))) {
                 if a == 0.0 {
                     continue;
                 }
-                for c in 0..other.cols {
-                    out.data[r * other.cols + c] += a * other.get(k, c);
+                for (o, &b) in out_row.iter_mut().zip(b_row) {
+                    *o += a * b;
                 }
             }
         }

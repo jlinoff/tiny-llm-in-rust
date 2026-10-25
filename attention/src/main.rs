@@ -4,8 +4,10 @@
 //!   example   the worked example from PLAN.md, with hand-set weights
 //!   random    an untrained head: random weights, near-uniform attention
 //!   train     train one head on a task with a known answer, and watch it learn
+//!   heads     several heads dividing a task between them
 
 mod attention;
+mod heads;
 mod matrix;
 mod rng;
 mod train;
@@ -21,7 +23,7 @@ use rng::Rng;
     name = "mini_attention",
     version,
     about = "Self-attention, small enough to print every number.",
-    after_help = "Start with `mini_attention example`, then `random`, then `train`."
+    after_help = "Start with `mini_attention example`, then `random`, `train` and `heads`."
 )]
 struct Cli {
     #[command(subcommand)]
@@ -93,6 +95,47 @@ enum Command {
         )]
         show: Vec<usize>,
     },
+    /// Several heads: predict the tokens one, two and three back together.
+    /// Trains one head per lag, shows how they divide the work, then compares
+    /// one head of the same total size over many seeds.
+    Heads {
+        /// The distances back whose tokens are predicted together
+        #[arg(long, value_delimiter = ',', default_value = "1,2,3")]
+        lags: Vec<usize>,
+        /// Number of heads [default: one per lag]
+        #[arg(long)]
+        heads: Option<usize>,
+        /// Size of each head
+        #[arg(long, default_value_t = 6)]
+        head_size: usize,
+        /// Number of distinct tokens (2–26, shown as letters)
+        #[arg(long, default_value_t = 4)]
+        vocab: usize,
+        /// Sequence length
+        #[arg(long, default_value_t = 8)]
+        len: usize,
+        /// Vector width d
+        #[arg(short, long, default_value_t = 18)]
+        dim: usize,
+        /// Training steps
+        #[arg(long, default_value_t = 1500)]
+        steps: usize,
+        /// Adam learning rate
+        #[arg(long, default_value_t = 0.003)]
+        lr: f64,
+        /// Sequences per step
+        #[arg(long, default_value_t = 16)]
+        batch: usize,
+        /// Random seed (the comparison uses this and the following seeds)
+        #[arg(long, default_value_t = 1)]
+        seed: u64,
+        /// Seeds in the one-head comparison
+        #[arg(long, default_value_t = 20)]
+        seeds: u64,
+        /// Steps at which to print the attention, comma-separated
+        #[arg(long, value_delimiter = ',', default_value = "0,100,250")]
+        show: Vec<usize>,
+    },
 }
 
 fn main() {
@@ -123,7 +166,8 @@ fn main() {
                 len,
                 dim,
                 head_size: head_size.unwrap_or(dim),
-                lag,
+                heads: 1,
+                lags: vec![lag],
                 steps,
                 lr,
                 batch,
@@ -131,8 +175,8 @@ fn main() {
                 show,
             };
             if !(2..=26).contains(&c.vocab)
-                || c.lag == 0
-                || c.lag >= c.len
+                || lag == 0
+                || lag >= c.len
                 || c.dim == 0
                 || c.head_size == 0
                 || c.batch == 0
@@ -146,6 +190,59 @@ fn main() {
                 std::process::exit(2);
             }
             train::run(&c);
+        }
+        Command::Heads {
+            lags,
+            heads,
+            head_size,
+            vocab,
+            len,
+            dim,
+            steps,
+            lr,
+            batch,
+            seed,
+            seeds,
+            show,
+        } => {
+            let n_lags = lags.len();
+            let c = train::Config {
+                vocab,
+                len,
+                dim,
+                head_size,
+                heads: heads.unwrap_or(n_lags),
+                lags,
+                steps,
+                lr,
+                batch,
+                seed,
+                show,
+            };
+            let bad_lags = c.lags.is_empty()
+                || c.lags.iter().any(|&l| l == 0 || l >= c.len)
+                || (1..n_lags).any(|i| c.lags[i..].contains(&c.lags[i - 1]));
+            if !(2..=26).contains(&c.vocab)
+                || bad_lags
+                || c.heads == 0
+                || c.head_size == 0
+                || c.dim == 0
+                || c.batch == 0
+                || seeds == 0
+                || c.lr.is_nan()
+                || c.lr <= 0.0
+                || c.vocab
+                    .checked_pow(n_lags as u32)
+                    .is_none_or(|n| n > 10_000)
+            {
+                eprintln!(
+                    "mini_attention: error: need --vocab 2–26, distinct --lags each from 1 to \
+                     --len − 1, at most 10,000 answers (vocab^lags), and positive --heads, \
+                     --head-size, --dim, --batch, --seeds and --lr"
+                );
+                std::process::exit(2);
+            }
+            heads::run(&c, &heads::Options { seeds });
         }
     }
 }

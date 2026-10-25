@@ -1,6 +1,6 @@
 # mini_attention
 
-Self-attention, small enough to print every number, and one head trained
+Self-attention, small enough to print every number, with heads trained
 while you watch. This is the learning step
 before `../transformer/`: it computes exactly what PLAN.md describes in "The
 transformer block", section "How attention works: queries, keys and values",
@@ -153,6 +153,88 @@ and OV circuits of PLAN.md, separating without being told to. Try
 `--lag 3`, or `--lag 1` (which is the "previous token" head real models
 learn early in training), or a smaller `--head-size`.
 
+## Several heads (`heads`)
+
+Item 4 of the list in PLAN.md, "Where each part is built".
+
+### `mini_attention heads`
+
+The task: at every position, predict the tokens one, two *and* three back,
+together, as one answer among V³ = 64 (with 4 letters, a–d). The model is
+`train`'s, with several heads side by side: each head has its own W_q, W_k
+and W_v, the heads' outputs are placed side by side, and U maps them to
+the 64 scores.
+
+A real attention sublayer has one more matrix here, W_o, which takes the
+heads' joined outputs back to width d for the residual stream. Here U
+follows directly, and two matrices in a row are equivalent to one
+(W_o·U), so U does both jobs. W_o appears with the residual stream in
+item 5.
+
+It runs in three parts:
+
+1. **Three heads, trained in detail.** A gradient check (now covering every
+   head), then snapshots of all three heads' attention. At step 0 they're
+   uniform. At step 100 they're still mixed, each row leaning on whatever
+   it found first. By step 250 each head has taken one lag at 0.9–1.0, and
+   accuracy is 100%.
+2. **How they divided the work.** For each head: which lag its attention
+   favors, computed from the position embeddings alone (QK), and which part
+   of the answer its values push toward (OV), found by sending each letter's
+   embedding through that head's W_v and its rows of U. With seed 1, head 1
+   takes three back, head 2 one back, head 3 two back. The order is
+   arbitrary and changes with the seed; nothing assigns lags to heads.
+   For every head, where it looks and what it passes on agree.
+3. **One head of the same total size** (18, against 3 × 6), on the same
+   task with the same training, first in detail and then over 20 seeds.
+
+**The result is not "one head can't do this."** I expected it to fail, and
+it doesn't. It spreads each row's attention over the three positions
+*unevenly*, about 0.46, 0.31 and 0.21 in a typical row, so its output
+0.46·v(a) + 0.31·v(b) + 0.21·v(c) is a blend in which each letter comes in
+at a different strength. That is enough for U to tell which letter came
+from where. What one head lacks is ease. Over seeds 1–20 with the defaults:
+
+- one head of size 18: solved (≥ 99% accuracy) 15 of 20 seeds, reaching 99%
+  after about 880 steps on average
+- three heads of size 6: solved 20 of 20, after about 230 steps
+
+So several heads aren't needed for a new capability here. They make the
+solution easy to find and easy to read: each head does one lookup at full
+strength, instead of one head keeping three in balance. The transformer
+paper (Vaswani et al. 2017) gives the same reason: "With a single attention
+head, averaging inhibits this." There's a converse finding too: after
+training, many of a large model's heads can be removed with little loss
+(Michel et al. 2019, in PLAN.md's bibliography). One reading, consistent with
+what `heads` shows, is that several heads matter more for learning than for
+the finished model.
+
+With two lags (`--lags 1,2 --vocab 6 -d 16 --head-size 8 --steps 800`) the
+gap is smaller: one head solves 17 of 20 seeds, two heads 19 of 20.
+
+The failures are worth looking at. When a run gets stuck (seed 1's single
+head with two lags, for example), one row has put all its weight on a single
+position and lost the other token, so that row's predictions are right only
+about 1 time in 6. Training doesn't recover: it's a local minimum. The
+weak point is that each position has its own learned position vector, so
+each row's pattern is learned somewhat on its own.
+
+Options (the comparison trains 2 × `--seeds` models, in parallel):
+
+- `--lags LIST`: the distances back to predict together (default `1,2,3`)
+- `--heads N`: number of heads (default: one per lag)
+- `--head-size N`: size of each head (default 6); the single head in the
+  comparison has size heads × head-size
+- `--vocab N`: number of distinct tokens, 2–26 (default 4). There are
+  vocab^lags possible answers, at most 10,000.
+- `--len N`, `-d N`, `--steps N` (default 1500), `--lr X` (default 0.003),
+  `--batch N`, `--seed N`: as for `train`
+- `--seeds N`: seeds in the comparison, starting from `--seed` (default 20)
+- `--show LIST`: steps at which to print the attention (default `0,100,250`)
+
+The default run takes a few seconds on a multi-core machine (40 training
+runs of 1,500 steps; the matrix products for the 64 output scores dominate).
+
 ## Tests
 
 `cargo test` checks:
@@ -168,14 +250,20 @@ learn early in training), or a smaller `--head-size`.
   error under 10⁻⁵)
 - training on the lag-2 task reaches over 98% accuracy, with every row that
   has a target putting over 0.8 of its weight two positions back
+- targets for several lags combine the tokens correctly (base V)
+- backpropagation with three heads matches finite differences
+- three heads trained on lags 1, 2 and 3 reach over 99% accuracy, each
+  favoring a different lag
 
 ## Source
 
 - `src/attention.rs`: one head (`Head::forward` keeps every step), the
   causal mask, the softmax, layer normalization, and the tests
 - `src/matrix.rs`: a minimal matrix type and table printing
-- `src/train.rs`: the training model, backpropagation, Adam, the gradient
-  check, and the after-training explanation
+- `src/train.rs`: the training model (any number of heads and lags),
+  backpropagation, Adam, the gradient check, and `train`'s explanation
+- `src/heads.rs`: `heads`: the division-of-labor analysis and the
+  one-head comparison
 - `src/rng.rs`: a seedable random number generator, with normal values
 - `src/main.rs`: the command line
 
@@ -187,5 +275,5 @@ As planned in PLAN.md ("Where each part is built"):
 2. ~~Random weights~~ (`random`)
 3. ~~Weights trained on a task whose right attention pattern is known in
    advance, to watch W_q and W_k learn it~~ (`train`)
-4. Several heads
+4. ~~Several heads~~ (`heads`)
 5. One complete block: the FFN, residual connections and layer normalization

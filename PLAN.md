@@ -920,8 +920,15 @@ queries, keys and values, scores, causal mask and softmax.
 **Why several heads:** each can learn to track a different relationship. In
 trained models, researchers have found heads that consistently attend to the
 previous token, heads that link a pronoun to its noun, and "induction heads"
-(Elhage et al., 2021; studied in depth by Olsson et al., 2022) that spot a repeated pattern and predict its continuation. A single head per
-block could learn only one weighting at a time.
+(Elhage et al., 2021; studied in depth by Olsson et al., 2022) that spot a
+repeated pattern and predict its continuation. A single head has one set of
+weights per row, so to track several relationships it must blend them into
+that one weighting. `mini_attention heads` (item 4 in
+[Where each part is built](#where-each-part-is-built)) shows that a blend
+can work, but is much harder to learn than one head per relationship.
+After training, many heads in a large model can be removed with little loss
+(Michel et al., 2019). One reading, consistent with item 4: several heads
+matter more for learning than for the finished model.
 
 **Every block processes all the tokens, in parallel.** The blocks aren't
 applied to one token at a time: each block updates every token's vector.
@@ -1018,7 +1025,13 @@ decision for `transformer/`.
      in advance** (`train`), for example "predict the token two positions
      back", to watch W_q and W_k move from random to the pattern the task
      requires.
-  4. **Several heads.**
+  4. **Several heads** (`heads`). Result: on predicting the tokens one, two
+     and three back together, three heads each take one position, but one
+     head of the same total size can also solve it, by weighting the three
+     positions unevenly (0.46/0.31/0.21 in a typical row) so the blend stays
+     decodable. One head solved 15 of 20 seeds in about 880 steps, three
+     heads 20 of 20 in about 230. Several heads make the solution easy to
+     find and to read, rather than possible at all.
   5. **A look ahead at one complete block,** adding the FFN, residual
      connections and layer normalization, so they appear before
      `transformer/` without being the focus.
@@ -1163,7 +1176,7 @@ llm/
 |---|---|---|
 | `tokenizer/` | LLM 1 tokenize, 2 encode; decode for 6 | steps 1 and 2 done (`mini_bpe.py`), with EOS; turn markers to do |
 | `word2vec/` | word2vec 1 train, 2 explore | done |
-| `attention/` | none: a learning exercise before `transformer/` | items 1–3 of [its list](#where-each-part-is-built) done (`example`, `random`, `train`); 4 (several heads) and 5 (one complete block) to do |
+| `attention/` | none: a learning exercise before `transformer/` | items 1–4 of [its list](#where-each-part-is-built) done (`example`, `random`, `train`, `heads`); 5 (one complete block) to do |
 | `transformer/` | LLM 3 build, 4 train, 5 finetune, 6 generate | not started |
 
 The Makefile in `llm/` drives the flow, with one target per step. Each target
@@ -1336,8 +1349,8 @@ text8, matching gensim (a widely used Python library with its own word2vec) at
    each document~~ done. Turn markers when post-training needs them.
 3. `attention/`: self-attention alone, on toy inputs, ending with one
    complete block (see [The transformer block](#the-transformer-block)).
-   Items 1–3 (hand-set, random and trained weights) done; item 4, several
-   heads, next.
+   Items 1–4 (hand-set, random and trained weights; several heads) done;
+   item 5, one complete block, next.
 4. `transformer/`: build, then train, then generate, then finetune.
 5. Throughout: add each step's Makefile target as the step is built
    (`tokenize` exists). At the end, fold this plan into `llm/README.md`.
@@ -1486,6 +1499,11 @@ for language research.
   Anthropic, transformer-circuits.pub.
   [arXiv:2209.11895](https://arxiv.org/abs/2209.11895). How heads that copy
   repeated patterns form during training.
+- Michel, P., Levy, O., & Neubig, G. (2019). "Are Sixteen Heads Really
+  Better than One?" NeurIPS 2019.
+  [arXiv:1905.10650](https://arxiv.org/abs/1905.10650). Many attention heads
+  can be removed from a trained model with little loss; read alongside
+  `mini_attention heads`.
 
 ### Training data and small models
 

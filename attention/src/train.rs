@@ -1,15 +1,22 @@
-//! Training one attention head on a task whose right attention pattern is
-//! known in advance: at every position, predict the token `lag` positions
-//! back. The right answer is to attend to exactly that position, so we can
-//! watch the attention weights move from uniform to that pattern.
+//! Training attention heads on tasks whose right attention pattern is known
+//! in advance: at every position, predict the token(s) at fixed distances
+//! back (the "lags"). With one lag, the right answer is to attend to exactly
+//! that position, so we can watch the attention weights move from uniform
+//! to that pattern. With two lags, one head isn't enough (see heads.rs).
 //!
 //! The model, kept minimal so the prediction must come through attention:
 //!
-//!   x_t     = E[token_t] + P[t]          token embedding + position embedding
-//!   Q, K, V = X·W_q, X·W_k, X·W_v        one head
-//!   O       = softmax(mask(Q·Kᵀ/√h))·V   the attention output
-//!   logits  = O·U                        one score per possible token
-//!   loss    = −ln p(correct token), averaged over positions t ≥ lag
+//!   x_t     = E[token_t] + P[t]            token embedding + position embedding
+//!   O_k     = softmax(mask(Q_k·K_kᵀ/√h))·V_k   head k (Q_k = X·W_q,k, and so on)
+//!   O       = [O_1 O_2 …]                  the heads' outputs, side by side
+//!   logits  = O·U                          one score per possible answer
+//!   loss    = −ln p(correct answer), averaged over positions with a target
+//!
+//! With one lag, an answer is a token; with lags (1, 2), it is a pair of
+//! tokens, one of V² classes. A real attention sublayer multiplies O by one
+//! more matrix, W_o, to bring it back to width d for the residual stream.
+//! Here U follows directly, and two matrices in a row are equivalent to one
+//! (W_o·U), so U plays both parts. W_o arrives with the residual stream.
 //!
 //! There's no residual connection, FFN or layer normalization: they'd let
 //! the model route around attention, and they'd lengthen the gradient
@@ -24,7 +31,10 @@ pub struct Config {
     pub len: usize,
     pub dim: usize,
     pub head_size: usize,
-    pub lag: usize,
+    /// Number of heads.
+    pub heads: usize,
+    /// The distances back whose tokens are to be predicted, together.
+    pub lags: Vec<usize>,
     pub steps: usize,
     pub lr: f64,
     pub batch: usize,
@@ -38,26 +48,35 @@ pub struct Config {
 pub struct Params {
     /// Token embeddings, vocab × d.
     pub e: Mat,
-    /// Position embeddings, len × d: what lets the head find "two back".
+    /// Position embeddings, len × d: what lets a head find "two back".
     pub p: Mat,
-    pub wq: Mat,
-    pub wk: Mat,
-    pub wv: Mat,
-    /// Output layer, head_size × vocab.
+    pub heads: Vec<HeadWeights>,
+    /// Output layer, (heads × head_size) × classes.
     pub u: Mat,
 }
 
+/// One head's query, key and value matrices, each d × head_size.
+#[derive(Clone)]
+pub struct HeadWeights {
+    pub wq: Mat,
+    pub wk: Mat,
+    pub wv: Mat,
+}
+
 impl Params {
-    fn new(c: &Config, rng: &mut Rng) -> Params {
-        Params {
-            e: Mat::random_normal(c.vocab, c.dim, 1.0, rng),
-            p: Mat::random_normal(c.len, c.dim, 1.0, rng),
-            // Small query and key weights: attention starts near uniform.
-            wq: Mat::random_normal(c.dim, c.head_size, 0.02, rng),
-            wk: Mat::random_normal(c.dim, c.head_size, 0.02, rng),
-            wv: Mat::random_normal(c.dim, c.head_size, 0.2, rng),
-            u: Mat::random_normal(c.head_size, c.vocab, 0.2, rng),
-        }
+    pub fn new(c: &Config, rng: &mut Rng) -> Params {
+        let e = Mat::random_normal(c.vocab, c.dim, 1.0, rng);
+        let p = Mat::random_normal(c.len, c.dim, 1.0, rng);
+        let heads = (0..c.heads)
+            .map(|_| HeadWeights {
+                // Small query and key weights: attention starts near uniform.
+                wq: Mat::random_normal(c.dim, c.head_size, 0.02, rng),
+                wk: Mat::random_normal(c.dim, c.head_size, 0.02, rng),
+                wv: Mat::random_normal(c.dim, c.head_size, 0.2, rng),
+            })
+            .collect();
+        let u = Mat::random_normal(c.heads * c.head_size, classes(c), 0.2, rng);
+        Params { e, p, heads, u }
     }
 
     fn zeros_like(&self) -> Params {
@@ -65,42 +84,94 @@ impl Params {
         Params {
             e: z(&self.e),
             p: z(&self.p),
-            wq: z(&self.wq),
-            wk: z(&self.wk),
-            wv: z(&self.wv),
+            heads: self
+                .heads
+                .iter()
+                .map(|h| HeadWeights {
+                    wq: z(&h.wq),
+                    wk: z(&h.wk),
+                    wv: z(&h.wv),
+                })
+                .collect(),
             u: z(&self.u),
         }
     }
 
-    fn all(&self) -> [&Mat; 6] {
-        [&self.e, &self.p, &self.wq, &self.wk, &self.wv, &self.u]
+    /// Every weight matrix, in a fixed order: E, P, each head's W_q, W_k,
+    /// W_v, then U.
+    fn all(&self) -> Vec<&Mat> {
+        let mut v = vec![&self.e, &self.p];
+        for h in &self.heads {
+            v.extend([&h.wq, &h.wk, &h.wv]);
+        }
+        v.push(&self.u);
+        v
     }
 
-    fn all_mut(&mut self) -> [&mut Mat; 6] {
-        [
-            &mut self.e,
-            &mut self.p,
-            &mut self.wq,
-            &mut self.wk,
-            &mut self.wv,
-            &mut self.u,
-        ]
+    fn all_mut(&mut self) -> Vec<&mut Mat> {
+        let mut v = vec![&mut self.e, &mut self.p];
+        for h in &mut self.heads {
+            v.extend([&mut h.wq, &mut h.wk, &mut h.wv]);
+        }
+        v.push(&mut self.u);
+        v
     }
 }
 
 /// Everything the forward pass computes for one sequence.
 pub struct Forward {
     pub x: Mat,
-    pub attn: Trace,
+    /// One trace per head.
+    pub attn: Vec<Trace>,
+    /// The heads' outputs side by side.
+    pub out: Mat,
     pub probs: Mat,
     pub loss: f64,
     /// Correct predictions at the positions that have a target.
     pub correct: usize,
 }
 
-/// The target at position t: the token `lag` back, if there is one.
-fn target(tokens: &[usize], t: usize, lag: usize) -> Option<usize> {
-    t.checked_sub(lag).map(|s| tokens[s])
+/// Number of possible answers: V for one lag, V² for two, and so on.
+pub fn classes(c: &Config) -> usize {
+    c.vocab.pow(c.lags.len() as u32)
+}
+
+/// The target at position t, if every lag reaches back that far: the
+/// tokens at t − lag for each lag, combined into one class number, with
+/// the first lag's token as the most significant digit (base V).
+fn target(tokens: &[usize], t: usize, lags: &[usize], vocab: usize) -> Option<usize> {
+    lags.iter().try_fold(0, |acc, &lag| {
+        t.checked_sub(lag).map(|s| acc * vocab + tokens[s])
+    })
+}
+
+/// The first position with a target.
+fn first(lags: &[usize]) -> usize {
+    lags.iter().copied().max().unwrap_or(0)
+}
+
+/// Copy columns [from, from + width) of m.
+fn columns(m: &Mat, from: usize, width: usize) -> Mat {
+    let mut out = Mat::zeros(m.rows, width);
+    for i in 0..m.rows {
+        out.row_mut(i)
+            .copy_from_slice(&m.row(i)[from..from + width]);
+    }
+    out
+}
+
+/// Place matrices side by side.
+fn side_by_side(ms: &[&Mat]) -> Mat {
+    let rows = ms[0].rows;
+    let mut out = Mat::zeros(rows, ms.iter().map(|m| m.cols).sum());
+    for i in 0..rows {
+        let mut at = 0;
+        for m in ms {
+            out.row_mut(i)[at..at + m.cols].copy_from_slice(m.row(i));
+            at += m.cols;
+        }
+    }
+    out
 }
 
 fn embed(w: &Params, tokens: &[usize]) -> Mat {
@@ -114,13 +185,20 @@ fn embed(w: &Params, tokens: &[usize]) -> Mat {
     x
 }
 
-pub fn forward(w: &Params, tokens: &[usize], lag: usize) -> Forward {
+pub fn forward(w: &Params, tokens: &[usize], lags: &[usize]) -> Forward {
     let x = embed(w, tokens);
-    let attn = attend(&x, &w.wq, &w.wk, &w.wv);
-    let probs = softmax_rows(&attn.out.matmul(&w.u));
+    let attn: Vec<Trace> = w
+        .heads
+        .iter()
+        .map(|h| attend(&x, &h.wq, &h.wk, &h.wv))
+        .collect();
+    let out = side_by_side(&attn.iter().map(|a| &a.out).collect::<Vec<_>>());
+    let probs = softmax_rows(&out.matmul(&w.u));
+    let vocab = w.e.rows;
+    let lag = first(lags);
     let (mut loss, mut correct) = (0.0, 0);
     for t in lag..tokens.len() {
-        let tgt = target(tokens, t, lag).unwrap();
+        let tgt = target(tokens, t, lags, vocab).unwrap();
         loss -= probs.get(t, tgt).ln();
         let row = probs.row(t);
         let best = (0..row.len()).fold(0, |b, i| if row[i] > row[b] { i } else { b });
@@ -130,6 +208,7 @@ pub fn forward(w: &Params, tokens: &[usize], lag: usize) -> Forward {
     Forward {
         x,
         attn,
+        out,
         probs,
         loss,
         correct,
@@ -138,17 +217,16 @@ pub fn forward(w: &Params, tokens: &[usize], lag: usize) -> Forward {
 
 /// Backpropagation: the gradient of the loss with respect to every weight,
 /// working backward through the forward pass one step at a time.
-pub fn backward(w: &Params, tokens: &[usize], lag: usize, f: &Forward) -> Params {
-    let n = (tokens.len() - lag) as f64;
-    let h = w.wq.cols as f64;
-    let a = &f.attn;
+pub fn backward(w: &Params, tokens: &[usize], lags: &[usize], f: &Forward) -> Params {
+    let n = (tokens.len() - first(lags)) as f64;
+    let vocab = w.e.rows;
     let mut g = w.zeros_like();
 
     // Loss → logits. For softmax followed by −ln p(target), the gradient
     // with respect to the logits is (probabilities − one-hot target).
     let mut d_logits = f.probs.clone();
     for t in 0..tokens.len() {
-        match target(tokens, t, lag) {
+        match target(tokens, t, lags, vocab) {
             None => d_logits.row_mut(t).fill(0.0), // no target: no loss
             Some(tgt) => {
                 let v = d_logits.get(t, tgt);
@@ -159,12 +237,44 @@ pub fn backward(w: &Params, tokens: &[usize], lag: usize, f: &Forward) -> Params
     let d_logits = d_logits.scale(1.0 / n);
 
     // logits = O·U
-    g.u = a.out.transpose().matmul(&d_logits);
-    let d_out = d_logits.matmul(&w.u.transpose());
+    g.u = f.out.transpose().matmul(&d_logits);
+    let d_out_all = d_logits.matmul(&w.u.transpose());
 
+    // O = [O_1 O_2 …]: each head gets its own columns of the gradient, and
+    // the heads' contributions to the gradient for X add up.
+    let mut d_x = Mat::zeros(f.x.rows, f.x.cols);
+    let xt = f.x.transpose();
+    for (k, (hw, a)) in w.heads.iter().zip(&f.attn).enumerate() {
+        let hs = hw.wq.cols;
+        let d_out = columns(&d_out_all, k * hs, hs);
+        let (dq, dk, dv) = head_backward(a, &d_out, hs as f64);
+        let gh = &mut g.heads[k];
+        // Q, K, V = X·W_q, X·W_k, X·W_v
+        gh.wq = xt.matmul(&dq);
+        gh.wk = xt.matmul(&dk);
+        gh.wv = xt.matmul(&dv);
+        d_x.add_scaled(&dq.matmul(&hw.wq.transpose()), 1.0);
+        d_x.add_scaled(&dk.matmul(&hw.wk.transpose()), 1.0);
+        d_x.add_scaled(&dv.matmul(&hw.wv.transpose()), 1.0);
+    }
+
+    // X = E[token] + P: each row's gradient goes to its token's embedding
+    // and to its position's embedding.
+    for (t, &tok) in tokens.iter().enumerate() {
+        for (ge, dx) in g.e.row_mut(tok).iter_mut().zip(d_x.row(t)) {
+            *ge += dx;
+        }
+        g.p.row_mut(t).copy_from_slice(d_x.row(t));
+    }
+    g
+}
+
+/// One head, backward: from the gradient for its output O to the gradients
+/// for its Q, K and V.
+fn head_backward(a: &Trace, d_out: &Mat, h: f64) -> (Mat, Mat, Mat) {
     // O = A·V, where A holds the attention weights
     let d_weights = d_out.matmul(&a.v.transpose());
-    let d_v = a.weights.transpose().matmul(&d_out);
+    let d_v = a.weights.transpose().matmul(d_out);
 
     // A = softmax(S) row by row: dS_ij = A_ij (dA_ij − Σ_k A_ik dA_ik).
     // Masked positions have A_ij = 0, so they get no gradient.
@@ -180,45 +290,27 @@ pub fn backward(w: &Params, tokens: &[usize], lag: usize, f: &Forward) -> Params
     // S = Q·Kᵀ / √h
     let d_q = d_scores.matmul(&a.k).scale(1.0 / h.sqrt());
     let d_k = d_scores.transpose().matmul(&a.q).scale(1.0 / h.sqrt());
-
-    // Q, K, V = X·W_q, X·W_k, X·W_v
-    let xt = f.x.transpose();
-    g.wq = xt.matmul(&d_q);
-    g.wk = xt.matmul(&d_k);
-    g.wv = xt.matmul(&d_v);
-    let mut d_x = d_q.matmul(&w.wq.transpose());
-    d_x.add_scaled(&d_k.matmul(&w.wk.transpose()), 1.0);
-    d_x.add_scaled(&d_v.matmul(&w.wv.transpose()), 1.0);
-
-    // X = E[token] + P: each row's gradient goes to its token's embedding
-    // and to its position's embedding.
-    for (t, &tok) in tokens.iter().enumerate() {
-        for (ge, dx) in g.e.row_mut(tok).iter_mut().zip(d_x.row(t)) {
-            *ge += dx;
-        }
-        g.p.row_mut(t).copy_from_slice(d_x.row(t));
-    }
-    g
+    (d_q, d_k, d_v)
 }
 
 /// Check backpropagation against finite differences: nudge single weights
 /// by ±ε, measure the change in the loss directly, and compare with the
 /// computed gradient. Returns the worst relative error.
-pub fn gradient_check(w: &Params, tokens: &[usize], lag: usize, rng: &mut Rng) -> f64 {
-    let f = forward(w, tokens, lag);
-    let g = backward(w, tokens, lag, &f);
+pub fn gradient_check(w: &Params, tokens: &[usize], lags: &[usize], rng: &mut Rng) -> f64 {
+    let f = forward(w, tokens, lags);
+    let g = backward(w, tokens, lags, &f);
     let eps = 1e-6;
     let mut probe = w.clone();
     let mut worst: f64 = 0.0;
-    for k in 0..6 {
+    for k in 0..w.all().len() {
         for _ in 0..5 {
             let len = probe.all()[k].data.len();
             let i = rng.below(len);
             let orig = probe.all()[k].data[i];
             probe.all_mut()[k].data[i] = orig + eps;
-            let up = forward(&probe, tokens, lag).loss;
+            let up = forward(&probe, tokens, lags).loss;
             probe.all_mut()[k].data[i] = orig - eps;
-            let down = forward(&probe, tokens, lag).loss;
+            let down = forward(&probe, tokens, lags).loss;
             probe.all_mut()[k].data[i] = orig;
             let numeric = (up - down) / (2.0 * eps);
             let analytic = g.all()[k].data[i];
@@ -234,7 +326,7 @@ pub fn gradient_check(w: &Params, tokens: &[usize], lag: usize, rng: &mut Rng) -
 /// Adam: gradient descent that keeps running averages of each weight's
 /// gradient (m) and squared gradient (v), and scales each step by them,
 /// so every weight moves at a sensible rate.
-struct Adam {
+pub struct Adam {
     m: Params,
     v: Params,
     t: i32,
@@ -243,6 +335,14 @@ struct Adam {
 impl Adam {
     const B1: f64 = 0.9;
     const B2: f64 = 0.999;
+
+    pub fn new(w: &Params) -> Adam {
+        Adam {
+            m: w.zeros_like(),
+            v: w.zeros_like(),
+            t: 0,
+        }
+    }
 
     fn step(&mut self, w: &mut Params, g: &Params, lr: f64) {
         self.t += 1;
@@ -259,16 +359,41 @@ impl Adam {
     }
 }
 
-fn random_tokens(c: &Config, rng: &mut Rng) -> Vec<usize> {
+/// One training step: average the gradient over a batch of fresh random
+/// sequences and let Adam update the weights. Returns the batch's mean
+/// loss and its accuracy.
+pub fn train_step(w: &mut Params, adam: &mut Adam, c: &Config, rng: &mut Rng) -> (f64, f64) {
+    let mut grad = w.zeros_like();
+    let (mut loss, mut correct) = (0.0, 0);
+    for _ in 0..c.batch {
+        let tokens = random_tokens(c, rng);
+        let f = forward(w, &tokens, &c.lags);
+        let g = backward(w, &tokens, &c.lags, &f);
+        loss += f.loss;
+        correct += f.correct;
+        for (acc, gi) in grad.all_mut().into_iter().zip(g.all()) {
+            acc.add_scaled(gi, 1.0 / c.batch as f64);
+        }
+    }
+    adam.step(w, &grad, c.lr);
+    let acc = correct as f64 / (c.batch * (c.len - first(&c.lags))) as f64;
+    (loss / c.batch as f64, acc)
+}
+
+pub fn random_tokens(c: &Config, rng: &mut Rng) -> Vec<usize> {
     (0..c.len).map(|_| rng.below(c.vocab)).collect()
 }
 
-fn letter(tok: usize) -> char {
+pub fn letter(tok: usize) -> char {
     (b'a' + tok as u8) as char
 }
 
+pub fn word(tokens: &[usize]) -> String {
+    tokens.iter().map(|&t| letter(t)).collect()
+}
+
 /// Row and column labels such as "3:e" (position 3, token e).
-fn labels(tokens: &[usize]) -> Vec<String> {
+pub fn labels(tokens: &[usize]) -> Vec<String> {
     tokens
         .iter()
         .enumerate()
@@ -277,24 +402,50 @@ fn labels(tokens: &[usize]) -> Vec<String> {
 }
 
 /// Accuracy over fresh random sequences.
-fn evaluate(w: &Params, c: &Config, rng: &mut Rng, n: usize) -> f64 {
+pub fn evaluate(w: &Params, c: &Config, rng: &mut Rng, n: usize) -> f64 {
     let mut correct = 0;
     for _ in 0..n {
-        correct += forward(w, &random_tokens(c, rng), c.lag).correct;
+        correct += forward(w, &random_tokens(c, rng), &c.lags).correct;
     }
-    correct as f64 / (n * (c.len - c.lag)) as f64
+    correct as f64 / (n * (c.len - first(&c.lags))) as f64
 }
 
+/// The index of the largest entry.
+pub fn argmax(row: &[f64]) -> usize {
+    (0..row.len()).fold(0, |b, i| if row[i] > row[b] { i } else { b })
+}
+
+/// Score spread (largest minus smallest) of a matrix.
+pub fn spread(m: &Mat) -> f64 {
+    let lo = m.data.iter().copied().fold(f64::INFINITY, f64::min);
+    let hi = m.data.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+    hi - lo
+}
+
+/// Scores between two sets of vectors as seen by one head: (A·W_q)(B·W_k)ᵀ/√h.
+pub fn head_scores(hw: &HeadWeights, a: &Mat, b: &Mat) -> Mat {
+    let h = (hw.wq.cols as f64).sqrt();
+    a.matmul(&hw.wq)
+        .matmul(&b.matmul(&hw.wk).transpose())
+        .scale(1.0 / h)
+}
+
+/// A head's attention computed from the position embeddings alone (leaving
+/// out the token part of each x_t): where it looks, regardless of content.
+pub fn position_attention(w: &Params, hw: &HeadWeights) -> (Mat, Mat) {
+    let pos = head_scores(hw, &w.p, &w.p);
+    (softmax_rows(&causal_mask(&pos)), pos)
+}
+
+/// `train`: one head, one lag.
 pub fn run(c: &Config) {
+    let lag = c.lags[0];
     let mut rng = Rng::new(c.seed);
     let mut w = Params::new(c, &mut rng);
     let demo = random_tokens(c, &mut rng);
     let demo_labels = labels(&demo);
 
-    println!(
-        "=== Training one head: predict the token {} back ===",
-        c.lag
-    );
+    println!("=== Training one head: predict the token {lag} back ===");
     println!(
         "Random sequences of {} tokens over {} symbols (a–{}); d = {}, head size {}.",
         c.len,
@@ -309,20 +460,18 @@ pub fn run(c: &Config) {
         c.lr, c.batch, c.steps, c.seed
     );
     println!("The right attention pattern is known in advance: row t should put its");
-    println!(
-        "weight on position t − {}. Rows 1–{} have nothing that far back to predict.",
-        c.lag, c.lag
-    );
+    println!("weight on position t − {lag}. Rows 1–{lag} have nothing that far back to predict.");
     println!(
         "Chance-level loss is ln {} = {:.3}.\n",
         c.vocab,
         (c.vocab as f64).ln()
     );
 
-    let worst = gradient_check(&w, &demo, c.lag, &mut rng);
+    let worst = gradient_check(&w, &demo, &c.lags, &mut rng);
     println!(
-        "Gradient check (backpropagation vs finite differences, 30 weights): \
+        "Gradient check (backpropagation vs finite differences, {} weights): \
          worst relative error {worst:.1e} {}\n",
+        5 * w.all().len(),
         if worst < 1e-5 {
             "— OK"
         } else {
@@ -330,20 +479,15 @@ pub fn run(c: &Config) {
         }
     );
 
-    let mut adam = Adam {
-        m: w.zeros_like(),
-        v: w.zeros_like(),
-        t: 0,
-    };
     let snapshot = |w: &Params, step: usize, loss: f64, acc: f64| {
-        let f = forward(w, &demo, c.lag);
+        let f = forward(w, &demo, &c.lags);
         print_weights(
             &format!(
                 "step {step}: loss {loss:.3}, accuracy {:.0}%  — attention on the sequence {}",
                 100.0 * acc,
-                demo.iter().map(|&t| letter(t)).collect::<String>()
+                word(&demo)
             ),
-            &f.attn.weights,
+            &f.attn[0].weights,
             &demo_labels,
             2,
         );
@@ -351,28 +495,15 @@ pub fn run(c: &Config) {
 
     // Step 0: before any training.
     let mut eval_rng = Rng::new(c.seed ^ 0xE7A1);
-    let f0 = forward(&w, &demo, c.lag);
     if c.show.contains(&0) {
+        let f0 = forward(&w, &demo, &c.lags);
         snapshot(&w, 0, f0.loss, evaluate(&w, c, &mut eval_rng, 50));
     }
+    let mut adam = Adam::new(&w);
     for step in 1..=c.steps {
-        let mut grad = w.zeros_like();
-        let mut loss = 0.0;
-        let mut correct = 0;
-        for _ in 0..c.batch {
-            let tokens = random_tokens(c, &mut rng);
-            let f = forward(&w, &tokens, c.lag);
-            let g = backward(&w, &tokens, c.lag, &f);
-            loss += f.loss;
-            correct += f.correct;
-            for (acc, gi) in grad.all_mut().into_iter().zip(g.all()) {
-                acc.add_scaled(gi, 1.0 / c.batch as f64);
-            }
-        }
-        adam.step(&mut w, &grad, c.lr);
+        let (loss, acc) = train_step(&mut w, &mut adam, c, &mut rng);
         if c.show.contains(&step) {
-            let acc = correct as f64 / (c.batch * (c.len - c.lag)) as f64;
-            snapshot(&w, step, loss / c.batch as f64, acc);
+            snapshot(&w, step, loss, acc);
         }
     }
 
@@ -387,25 +518,13 @@ pub fn run(c: &Config) {
 /// Show how the head solved the task: where to look came from positions
 /// (the QK circuit), what to copy from token identity (the OV circuit).
 fn explain(w: &Params, c: &Config) {
-    let h = (c.head_size as f64).sqrt();
-    let scores = |a: &Mat, b: &Mat| {
-        a.matmul(&w.wq)
-            .matmul(&b.matmul(&w.wk).transpose())
-            .scale(1.0 / h)
-    };
-    let spread = |m: &Mat| {
-        let lo = m.data.iter().copied().fold(f64::INFINITY, f64::min);
-        let hi = m.data.iter().copied().fold(f64::NEG_INFINITY, f64::max);
-        hi - lo
-    };
-    // Scores between position embeddings alone (leaving out the token parts
-    // of each x_t), and between token embeddings alone.
-    let pos = scores(&w.p, &w.p);
-    let tok = scores(&w.e, &w.e);
+    let hw = &w.heads[0];
+    let (pos_attn, pos) = position_attention(w, hw);
+    let tok = head_scores(hw, &w.e, &w.e);
     let pos_labels: Vec<String> = (1..=c.len).map(|t| t.to_string()).collect();
     print_weights(
         "Where to look (QK): attention computed from the position embeddings alone",
-        &softmax_rows(&causal_mask(&pos)),
+        &pos_attn,
         &pos_labels,
         2,
     );
@@ -417,13 +536,8 @@ fn explain(w: &Params, c: &Config) {
     println!("The head learned to look by position and to ignore which token is where.\n");
 
     // What to copy: a token's value, sent through the output layer.
-    let ov = w.e.matmul(&w.wv).matmul(&w.u);
-    let copies = (0..c.vocab)
-        .filter(|&t| {
-            let row = ov.row(t);
-            (0..row.len()).fold(0, |b, i| if row[i] > row[b] { i } else { b }) == t
-        })
-        .count();
+    let ov = w.e.matmul(&hw.wv).matmul(&w.u);
+    let copies = (0..c.vocab).filter(|&t| argmax(ov.row(t)) == t).count();
     println!("What to copy (OV): sending each token's embedding through W_v and U, the");
     println!(
         "highest-scoring output is the token itself for {copies} of {} tokens.",
@@ -443,7 +557,8 @@ mod tests {
             len: 8,
             dim: 16,
             head_size: 16,
-            lag: 2,
+            heads: 1,
+            lags: vec![2],
             steps,
             lr: 0.001,
             batch: 16,
@@ -458,7 +573,7 @@ mod tests {
         let mut rng = Rng::new(7);
         let w = Params::new(&c, &mut rng);
         let tokens = random_tokens(&c, &mut rng);
-        assert!(gradient_check(&w, &tokens, c.lag, &mut rng) < 1e-5);
+        assert!(gradient_check(&w, &tokens, &c.lags, &mut rng) < 1e-5);
     }
 
     #[test]
@@ -466,27 +581,33 @@ mod tests {
         let c = config(400);
         let mut rng = Rng::new(c.seed);
         let mut w = Params::new(&c, &mut rng);
-        let mut adam = Adam {
-            m: w.zeros_like(),
-            v: w.zeros_like(),
-            t: 0,
-        };
+        let mut adam = Adam::new(&w);
         for _ in 0..c.steps {
-            let mut grad = w.zeros_like();
-            for _ in 0..c.batch {
-                let tokens = random_tokens(&c, &mut rng);
-                let g = backward(&w, &tokens, c.lag, &forward(&w, &tokens, c.lag));
-                for (acc, gi) in grad.all_mut().into_iter().zip(g.all()) {
-                    acc.add_scaled(gi, 1.0 / c.batch as f64);
-                }
-            }
-            adam.step(&mut w, &grad, c.lr);
+            train_step(&mut w, &mut adam, &c, &mut rng);
         }
         assert!(evaluate(&w, &c, &mut Rng::new(99), 200) > 0.98);
         // Every row with a target puts most of its weight lag positions back.
-        let f = forward(&w, &random_tokens(&c, &mut rng), c.lag);
-        for t in c.lag..c.len {
-            assert!(f.attn.weights.get(t, t - c.lag) > 0.8, "row {t}");
+        let f = forward(&w, &random_tokens(&c, &mut rng), &c.lags);
+        for t in 2..c.len {
+            assert!(f.attn[0].weights.get(t, t - 2) > 0.8, "row {t}");
         }
+    }
+}
+
+#[cfg(test)]
+mod target_tests {
+    use super::*;
+
+    #[test]
+    fn targets_combine_the_lagged_tokens_in_base_v() {
+        let tokens = [3, 1, 2, 0, 1];
+        // One lag: the token itself.
+        assert_eq!(target(&tokens, 4, &[2], 4), Some(2));
+        // Lags (1, 2) at t = 4: tokens 0 (one back) and 2 (two back) → 0·4 + 2.
+        assert_eq!(target(&tokens, 4, &[1, 2], 4), Some(2));
+        // At t = 2: tokens 1 and 3 → 1·4 + 3 = 7.
+        assert_eq!(target(&tokens, 2, &[1, 2], 4), Some(7));
+        // Not far enough in for the larger lag: no target.
+        assert_eq!(target(&tokens, 1, &[1, 2], 4), None);
     }
 }
