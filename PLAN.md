@@ -1136,9 +1136,12 @@ decision for `transformer/`.
      (one back + two back) mod 10, the block reaches 100%. Knocking out
      attention at test time drops it to chance (9%), and knocking out the
      FFN nearly so (13%): attention brings the digits, the FFN does the
-     arithmetic. Trained without an FFN, a block still reaches 72–100%
-     (mean 86% over 6 seeds), because attention is itself nonlinear, but
-     not reliably; with the FFN, 100% every time. First model written on
+     arithmetic. Trained without an FFN, a block still reaches roughly
+     70–100% (mean in the low-to-mid 80s over 6 seeds), because attention
+     is itself nonlinear, but not reliably, and those runs are so fragile
+     that a last-bit difference changes their outcome (the exact figures
+     differ between a Mac and Linux); with the FFN, 100% every time,
+     unaffected. First model written on
      the automatic differentiation tape (decision 7).
   6. **Two blocks forming an induction head** (`induction`): the smallest
      case where layers cooperate, and the mechanism behind in-context
@@ -1312,7 +1315,14 @@ Rules every program in the project follows:
   digits. A consequence for reproducibility: if the order of additions varies
   between runs (as with some parallel or GPU operations), two runs with the
   same seed can drift apart, and over thousands of training steps the
-  differences can grow; keeping the order fixed avoids that. None of this is
+  differences can grow; keeping the order fixed avoids that. The same
+  happens across machines even with a fixed order: functions such as exp
+  and tanh come from each platform's maths library, which may round the last
+  bit differently (+, −, ×, ÷ and √ are exact by the IEEE standard). A
+  training run that converges firmly absorbs that; one that ends in a
+  fragile partial solution can amplify it into a visibly different result
+  (`mini_attention block`'s runs without an FFN are an example). So report
+  the spread over several seeds, not one run's exact figures. None of this is
   a flaw in the results: models train in 16-bit floats (about 3 significant
   digits) and run in 8- or 4-bit formats, because the learned function is
   robust to small perturbations and training is already noisy.

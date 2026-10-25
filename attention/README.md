@@ -20,6 +20,16 @@ Rust 1.85 or later; the only dependency is `clap`, for the command line.
 All arithmetic uses 64-bit floats: at these sizes speed doesn't matter, and
 the extra precision keeps the checks clean.
 
+**Reproducibility.** On one machine, every run is deterministic: the same
+seed gives the same numbers, whatever order the parallel comparisons run in.
+Across machines, results can differ slightly: `exp` and `tanh` come from
+each platform's maths library, and Apple's and Linux's may round the last
+bit differently. Runs that converge firmly absorb that, and every figure
+quoted below for `train`, `heads` and `block`'s main run matches between a
+Mac and Linux. Fragile runs can amplify it: `block`'s runs without an FFN
+give different per-seed figures on the two (see that section). Read the
+seed comparisons for their spread, not their exact numbers.
+
 ## What one head computes (`example`, `random`)
 
 These are items 1 and 2 of the list in PLAN.md, "Where each part is
@@ -285,8 +295,15 @@ What it shows, with the defaults:
   retrained): full block 100%; without attention 9.4%; without the FFN
   12.7%; chance 10%. Both are needed: attention moves information between
   tokens, and the FFN computes with it.
-- **Trained without an FFN**, from scratch, over seeds 1–6: 72–100%, mean
-  85.8%, against 100% on every seed with the FFN.
+- **Trained without an FFN**, from scratch, over seeds 1–6: roughly
+  70–100%, with a mean in the low-to-mid 80s, against 100% on every seed
+  with the FFN. The per-seed figures differ between machines (on Linux,
+  72.4/99.7/81.5/85.2/100.0/76.2%; on a Mac, 71.8/97.3/79.4/85.5/100.0/
+  77.0%), and changing the learning rate by 3 × 10⁻¹⁶ moves them by up to 12
+  points (seed 5: 100% to 88%), while the full block's run doesn't change
+  in any printed digit. The block without an FFN lands in a different
+  partial solution depending on last-bit rounding; with the FFN, the
+  solution is robust.
 
 That last result is again not the clean "can't" I expected. Attention is
 itself nonlinear: its weights depend on which tokens are where, so a head
