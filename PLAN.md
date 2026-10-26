@@ -100,8 +100,10 @@ Grouped so that each definition uses only terms defined above it.
   information from the other tokens of the same sequence ("self", as opposed
   to **cross-attention**, which looks at a different sequence, such as the
   source sentence in translation), weighting each by a relevance score. In a
-  GPT-style model, the causal mask (below) limits each token to the tokens
-  before it; models such as BERT use self-attention without the mask, so
+  GPT-style model (GPT: see below), the causal mask (below) limits each
+  token to the tokens before it; models such as BERT (Google's 2018 model
+  for understanding text rather than generating it) use self-attention
+  without the mask, so
   every token sees the whole sequence.
   Each token's vector is turned into a **query** (what it looks for), a
   **key** (what it offers to be matched on) and a **value** (what it passes
@@ -437,7 +439,8 @@ the step-0, untrained checkpoints of its Pythia models.)
   ```
   transformer train --model model-init.safetensors --data corpus.ids --config config.toml -o model.safetensors
   ```
-- **Status:** done (`transformer train`): AdamW with warm-up and cosine
+- **Status:** done (`transformer train`): AdamW (Adam with weight decay; see
+  [Configuration](#configuration)) with warm-up and cosine
   decay, gradient clipping, a held-out validation split, and checkpoints
   that hold Adam's state, so a stopped run resumes exactly (a test checks
   that 10 + 10 steps equal 20, bit for bit). The forward and backward
@@ -743,7 +746,8 @@ training:
   memory is used thousands of times. Decoding multiplies a single row, so
   each weight is used once per token. Speed is then limited by reading the
   weights and by per-operation overhead more than by arithmetic, and
-  threads help less. Assume 5–20 GFLOP/s of useful work.
+  threads help less. Assume 5–20 GFLOP/s (billions of floating-point
+  operations per second) of useful work.
 - **Without a KV cache, every token recomputes the whole context.** The
   [KV cache](#what-runs-in-parallel) keeps each earlier token's keys and
   values, so a new token computes only its own. Without it, generating the
@@ -751,7 +755,8 @@ training:
 
 With a KV cache, at 5–20 GFLOP/s:
 
-- the 0.85M starting model (1.7 MFLOP per token): thousands of tokens per
+- the 0.85M starting model (1.7 MFLOP, million floating-point operations,
+  per token): thousands of tokens per
   second, so overhead decides
 - an 8M model (16 MFLOP per token): about 300–1,200 tokens per second
 - a 20M model (40 MFLOP per token): about 125–500 tokens per second. Its
@@ -1084,8 +1089,10 @@ normalization first trains more stably in deep stacks.)
   more learned matrix.
 - **Feed-forward network (FFN): each token on its own.** Two learned matrix
   multiplications with a nonlinearity between them: d → d_ff (usually 4 × d) →
-  nonlinearity (GELU, a smooth version of "keep positive values, zero the
-  rest") → d. It never looks at other tokens. It holds two-thirds of a block's
+  nonlinearity (GELU, the Gaussian error linear unit of Hendrycks and Gimpel
+  2016: x·Φ(x), with Φ the standard normal cumulative distribution function,
+  a smooth version of "keep positive values, zero the rest"; GPT-2 and
+  `transformer/` use its tanh approximation) → d. It never looks at other tokens. It holds two-thirds of a block's
   parameters (8d² against attention's 4d²), and studies such as Geva et al.
   (2021) find that much of a model's stored knowledge appears to live there.
 - **Residual connections.** Each stage *adds* its result to the vectors it
@@ -1980,7 +1987,8 @@ changing r doesn't change how big the update starts out.
 to fine-tune: Hugging Face's PEFT library ("parameter-efficient
 fine-tuning") is built around it, and QLoRA (Dettmers et al. 2023) stores
 the frozen model at 4-bit precision, putting fine-tuning of large models on
-a single consumer GPU. The savings:
+a single consumer GPU (graphics processing unit, the chips most training
+runs on). The savings:
 
 - **Trained numbers:** 2·d·r per matrix instead of d². For the full run's
   model (d = 256, r = 8), 4,096 instead of 65,536; for a large model
@@ -2033,7 +2041,8 @@ make lora lora-evaluate        # the same two steps, then the evaluation
   on attention's four matrices in every block (or `lora_targets`), with the
   rest of `[finetune]` as usual. The adapter file holds A and B (and
   Adam's state, so it resumes with `--adapter`), plus the base model's
-  SHA-256, so it can't be applied to the wrong model.
+  SHA-256 (a cryptographic checksum: any change to the file changes it), so
+  it can't be applied to the wrong model.
 - `merge` folds it in: W + (α/r)·A·B, with the same operations in the same
   order as the forward pass, so the merged model's predictions equal the
   base-plus-adapter's bit for bit (a test checks this, in f32).
@@ -2078,10 +2087,12 @@ buys, and why it isn't here.
   one-pass formula E[x²] − (E[x])² can cancel catastrophically when the
   mean is large. Ours computes the mean first and then the squared
   deviations, in f32, so neither concern applies.
-- **SwiGLU feed-forward.** The FFN's GELU replaced by a gated unit: two
-  input matrices, one output passed through a nonlinearity (Swish,
-  x·sigmoid(x), a smooth relative of GELU) and used
-  to multiply the other, element by element (Shazeer 2020). Somewhat better
+- **SwiGLU feed-forward** (Swish-gated linear unit). The FFN's GELU
+  replaced by a **GLU**, a gated linear unit (Dauphin et al. 2017): two
+  input matrices, one output passed through a nonlinearity and used to
+  multiply the other, element by element, so one half of the layer decides
+  how much of the other half passes. SwiGLU is the GLU whose nonlinearity
+  is Swish, x·sigmoid(x), a smooth relative of GELU (Shazeer 2020). Somewhat better
   quality for the same number of parameters. Not here: a modest gain, at
   the cost of a third matrix and one more idea.
 - **No bias vectors** (as in Llama). Slightly simpler and no worse at scale.
@@ -2102,7 +2113,8 @@ buys, and why it isn't here.
 
 - **Mixed precision** (16-bit or 8-bit floats for most arithmetic, 32-bit
   where accuracy matters). It roughly doubles or quadruples speed on GPUs
-  built for it. Not here: on the CPU, f32 is the natural type, and the
+  built for it. Not here: on the CPU (central processing unit, the
+  computer's general-purpose processor), f32 is the natural type, and the
   exactness tests (the KV cache, LoRA's merge) rely on f32 and f64.
 - **Fused attention kernels** (such as FlashAttention). The same arithmetic,
   reordered so the T × T matrix never goes to the GPU's main memory: a
@@ -2162,7 +2174,9 @@ Rules every program in the project follows:
   differences can grow; keeping the order fixed avoids that. The same
   happens across machines even with a fixed order: functions such as exp
   and tanh come from each platform's maths library, which may round the last
-  bit differently (+, −, ×, ÷ and √ are exact by the IEEE standard). A
+  bit differently (+, −, ×, ÷ and √ are exact by the IEEE 754 standard, the
+  floating-point standard of the Institute of Electrical and Electronics
+  Engineers). A
   training run that converges firmly absorbs that; one that ends in a
   fragile partial solution can amplify it into a visibly different result
   (`mini_attention block`'s runs without an FFN are an example). So report
@@ -2350,8 +2364,9 @@ text8, matching gensim (a widely used Python library with its own word2vec) at
      joined into one `c_attn` matrix, names like
      `transformer.h.0.attn.c_attn.weight`). Our names follow this plan
      instead (below). Orientation is no obstacle: GPT-2 stores each matrix
-     as input × output, as this plan does (x·W); most other PyTorch models
-     store output × input.
+     as input × output, as this plan does (x·W); most other models written
+     with PyTorch (the most widely used deep-learning library) store
+     output × input.
    - **Added: optimizer state** (Adam's m and v, and the step count) in
      training checkpoints, so training can resume. Hugging Face's trainer
      keeps those in a separate pickle file.
@@ -2412,7 +2427,8 @@ text8, matching gensim (a widely used Python library with its own word2vec) at
    contains only data, so loading it can't run anything. That's a point in
    its favor here.
 4. **The config format.** *Decided:* **TOML**, in `config.toml` (the design
-   is in [Configuration](#configuration)). YAML also supports comments, but
+   is in [Configuration](#configuration)). YAML ("YAML Ain't Markup
+   Language", another settings format) also supports comments, but
    it guesses types, sometimes wrongly (in YAML 1.1, `no` reads as false and
    `1e-3` as a string unless written `1.0e-3`), and its structure depends on
    indentation. TOML is explicit, its tables match the plan's sections
@@ -2513,7 +2529,8 @@ text8, matching gensim (a widely used Python library with its own word2vec) at
      Rust: each operation records itself as it runs, and the backward pass
      replays the record in reverse, so models need only forward code;
      roughly 400–600 lines
-   - (c) use an existing Rust ML crate (candle or burn): fastest, but the
+   - (c) use an existing Rust ML (machine learning) crate, a Rust library
+     (candle or burn): fastest, but the
      gradient machinery is hidden
 
    (a) was first suggested for item 5, to see layer norm's and the FFN's
@@ -2618,7 +2635,7 @@ on arXiv, the open preprint server used throughout machine learning.
 Venue abbreviations: NeurIPS (Conference on Neural Information Processing
 Systems), ICLR (International Conference on Learning Representations), ICML
 (International Conference on Machine Learning), JMLR (Journal of Machine
-Learning Research). ACL is the Association for Computational Linguistics; its
+Learning Research), TMLR (Transactions on Machine Learning Research). ACL is the Association for Computational Linguistics; its
 conferences ACL, NAACL (North American chapter), EACL (European chapter) and
 EMNLP (Empirical Methods in Natural Language Processing), and its journals TACL
 (Transactions of the ACL) and Computational Linguistics, are the main venues
@@ -2801,6 +2818,13 @@ for language research.
   Model is Secretly a Reward Model." NeurIPS.
   [arXiv:2305.18290](https://arxiv.org/abs/2305.18290). DPO: preference tuning
   without a separate reward model.
+- Hendrycks, D., & Gimpel, K. (2016). "Gaussian Error Linear Units (GELUs)."
+  [arXiv:1606.08415](https://arxiv.org/abs/1606.08415). GELU, the FFN's
+  nonlinearity in GPT-2 and here.
+- Dauphin, Y. N., Fan, A., Auli, M., & Grangier, D. (2017). "Language
+  Modeling with Gated Convolutional Networks." ICML.
+  [arXiv:1612.08083](https://arxiv.org/abs/1612.08083). The gated linear unit
+  (GLU) that SwiGLU builds on.
 - Zhang, B., & Sennrich, R. (2019). "Root Mean Square Layer Normalization."
   NeurIPS. [arXiv:1910.07467](https://arxiv.org/abs/1910.07467). RMSNorm:
   re-scaling without re-centering.
