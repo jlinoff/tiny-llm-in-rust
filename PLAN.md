@@ -56,6 +56,14 @@ Grouped so that each definition uses only terms defined above it.
   on); a token's score for an earlier token is the dot product of its query
   with that token's key (see
   [How attention works](#how-attention-works-queries-keys-and-values)).
+- **causal mask**, **masked attention**: in self-attention, the rule that
+  a token may use only itself and the tokens before it. Its scores for
+  later tokens are set to −∞ before the softmax, so they get weight 0. This
+  lets training predict every next token of a sequence at once without any
+  position seeing the token it must predict, and it matches generation,
+  where later tokens don't exist yet. ("Causal": nothing depends on what
+  comes after it. Attention with this mask is called masked, or causal,
+  attention.)
 - **attention head**: one independent copy of the self-attention
   computation, with its own matrices. It reads each token's whole vector (d
   numbers) and computes from it a smaller query, key and value, each of
