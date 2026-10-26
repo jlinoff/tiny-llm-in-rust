@@ -2065,10 +2065,19 @@ buys, and why it isn't here.
   parameters and handles long contexts, even somewhat beyond those trained
   on. Not here: at context 256 a learned table works as well, and it's the
   simpler idea to see first. (It would save the T·d position table.)
-- **RMSNorm.** Layer norm without the mean subtraction and the shift β: it
-  only divides by the root mean square. A little cheaper, the same quality
-  in practice. Not here: the saving is negligible at our size, and layer
-  norm is the classic form.
+- **RMSNorm** (root mean square normalization; Zhang and Sennrich 2019).
+  Layer norm without the mean subtraction and the shift β: it only divides
+  by the root mean square, √(mean(x²) + ε). One pass over the numbers
+  instead of two (layer norm needs the mean before it can sum the squared
+  deviations), with the same quality in practice: the re-scaling is what
+  stabilizes training, not the re-centering. Not here: normalization is a
+  tiny share of our computation, and layer norm is the classic form.
+  Numerically the two differ only in low precision: in 16-bit floats,
+  squares overflow above 256 and sums lose precision, so any norm must be
+  computed carefully (in practice in f32), and a layer norm using the
+  one-pass formula E[x²] − (E[x])² can cancel catastrophically when the
+  mean is large. Ours computes the mean first and then the squared
+  deviations, in f32, so neither concern applies.
 - **SwiGLU feed-forward.** The FFN's GELU replaced by a gated unit: two
   input matrices, one output passed through a nonlinearity (Swish,
   x·sigmoid(x), a smooth relative of GELU) and used
@@ -2792,6 +2801,9 @@ for language research.
   Model is Secretly a Reward Model." NeurIPS.
   [arXiv:2305.18290](https://arxiv.org/abs/2305.18290). DPO: preference tuning
   without a separate reward model.
+- Zhang, B., & Sennrich, R. (2019). "Root Mean Square Layer Normalization."
+  NeurIPS. [arXiv:1910.07467](https://arxiv.org/abs/1910.07467). RMSNorm:
+  re-scaling without re-centering.
 - Su, J., et al. (2021). "RoFormer: Enhanced Transformer with Rotary
   Position Embedding." [arXiv:2104.09864](https://arxiv.org/abs/2104.09864).
   RoPE. And Shazeer, N. (2020). "GLU Variants Improve Transformer."
