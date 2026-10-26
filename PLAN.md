@@ -423,6 +423,9 @@ next step: B new random windows
   because it waits for them (see [What runs in parallel](#what-runs-in-parallel)).
 - **Heads split each token's vector, not the tokens.** Every head sees every
   token of the window, at the same time ([How heads fit in](#how-heads-fit-in)).
+  Each head's T × T matrix of attention scores is built from the whole
+  window at once and discarded after the step; only the weights persist
+  ([The attention matrix](#the-attention-matrix-built-used-thrown-away)).
 - **The first step starts from chance.** With random weights, all V scores
   in a row are nearly equal, so each true next token gets probability about
   1/V and the loss starts near ln V (8.32 for V = 4,096). The errors
@@ -1447,8 +1450,73 @@ turns vectors into token scores. It has nothing to do with attention heads.
 All of these are optimizations: in exact arithmetic, computing the heads
 together or one at a time, or the tokens at once or one by one, gives the same
 result. In floating-point arithmetic the results are equal only to rounding
-(see [Conventions for all code](#conventions-for-all-code)). Our code may
-simply loop over the heads, which is clearer and fast enough at toy sizes.
+(see [Conventions for all code](#conventions-for-all-code)), unless the two
+ways do the same operations in the same order: `transformer generate`'s
+one-token-at-a-time path does, and a test requires its predictions to equal
+the all-at-once training pass bit for bit.
+
+#### The attention matrix: built, used, thrown away
+
+Every attention head works with a T × T matrix of scores, entry (i, j) for
+how well token j matches what token i is looking for. It is not part of the
+model and not stored in the checkpoint: it's computed fresh in every forward
+pass, from the current tokens and the current weights.
+
+**How one head fills it**, in one block, for one window of T tokens (with
+d = 128 and 4 heads, head size h = 32):
+
+```
+X             T × d    the block's input (after layer norm): one row per token
+Q = X·W_q     T × h    this head's queries: what each token looks for
+K = X·W_k     T × h    this head's keys: what each token offers
+S = Q·Kᵀ/√h   T × T    entry (i, j) = q_i · k_j / √h
+mask          T × T    entries with j > i set to −∞
+A = softmax   T × T    row by row: weights summing to 1, zero above the diagonal
+O = A·V       T × h    each token's weighted sum of earlier tokens' values
+```
+
+Each token contributes one row (its query) and one column (its key), so all
+T tokens of the window fill the matrix together, in one matrix product. The
+mask leaves the lower triangle, and each row sees a different, nested part
+of the window:
+
+```
+         j=1  j=2  j=3  …  j=T
+i=1       ●    ·    ·   …   ·       row 1 averages 1 value
+i=2       ●    ●    ·   …   ·       row 2 averages 2
+i=3       ●    ●    ●   …   ·       row 3 averages 3
+ ⋮                                   ⋮
+i=T       ●    ●    ●   …   ●       row T averages all T
+```
+
+**In training:**
+
+- **Many at once.** There's one matrix per head, per block, per window: with
+  `config.toml` (4 heads, 4 blocks, 8 windows), 128 matrices of 256 × 256
+  per step.
+- **Built, then replaced.** The next step uses new windows and builds new
+  matrices; the old ones are discarded after the backward pass, which needs
+  each A (so the tape keeps them until then, and attention's memory grows
+  with T²).
+- **The weights are what persist.** Only W_q and W_k (and the earlier layers
+  that produce X) are learned. They change once per step, after the whole
+  batch: the loss averages all B·T predictions, so each weight's gradient
+  sums the influence of every token in the batch, and AdamW makes one
+  update.
+- **From uniform to patterns.** At the first step the weights are small and
+  random, every score is near 0, and each row is close to uniform: every
+  token averages its past equally. Training sharpens the rows into
+  patterns, such as a head that attends to the previous token, or one that
+  finds an earlier match (attention items 5 and 6).
+- **Only the lower triangle is computed.** `transformer/` never computes
+  the entries above the diagonal (for row i it loops over j = 1 … i), which
+  equals writing −∞ there, at about half the work.
+
+**In generation**, the matrix grows one row per token: with the KV cache, a
+new token's query is scored against the cached keys of every earlier token
+and its own. Earlier rows never change, since no earlier token can see a
+later one. Built one row at a time or all at once, the rows are the same,
+which is the bit-for-bit test above.
 
 #### Why repeated normalization doesn't lose information
 
