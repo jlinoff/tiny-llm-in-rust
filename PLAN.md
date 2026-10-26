@@ -40,6 +40,7 @@ names are explained where they first appear.
 - [Configuration](#configuration)
 - [Post-training](#post-training)
 - [LoRA: fine-tuning a low-rank adapter](#lora-fine-tuning-a-low-rank-adapter)
+- [The limits of this model](#the-limits-of-this-model)
 - [What production models add, and why it's left out](#what-production-models-add-and-why-its-left-out)
   - [Tokenization and encoding](#tokenization-and-encoding)
   - [Architecture](#architecture)
@@ -2062,6 +2063,55 @@ make lora lora-evaluate        # the same two steps, then the evaluation
   full fine-tuning step here, without the paper's 25% speedup. Skipping
   them would save roughly a third of each backward pass. The savings here
   are in the trained numbers, the optimizer's state and the file.
+
+## The limits of this model
+
+Some of what looks like a limit is only a setting; the real limits are set
+at build time, by the corpus, or by the model's size. From softest to
+hardest, with this project's numbers (the TinyStories models: V = 4,096,
+context T = 256; 1.35M parameters with `config.toml`, 7.4M with
+`config-full.toml`):
+
+- **Output length (`max_tokens`): not a limit of the model.** It's a
+  stopping rule for generation, 200 by default, a safety cap. The model
+  would write forever: each new token needs only the last T tokens, and
+  the sliding window (rebuilding the cache from the last ¾ of T, 192
+  tokens, whenever it fills) keeps that true indefinitely. Normally the
+  model ends a text itself, by choosing `<|endoftext|>`, or `<|end|>` in a
+  conversation.
+- **Coherence over length: limited by the context.** The model sees at most
+  the last 256 tokens, and right after a rebuild only the last 192.
+  Anything earlier is gone, so in a 400-token story the ending is written
+  without the opening in view (who the characters are, what was set up),
+  and long outputs drift, repeat, or start a new story. Stories in the
+  corpus are about 220 tokens on average, so most fit.
+- **The context itself: fixed at build.** The position table has exactly
+  T = 256 rows, one learned vector per position; there is no row 257, and
+  learned positions don't extend beyond the trained range. A longer
+  context means building and pretraining a new model (production models
+  use RoPE and long-context training; see
+  [What production models add](#what-production-models-add-and-why-its-left-out)).
+  A prompt longer than 256 tokens is cut to its last 256.
+- **Vocabulary: soft.** Any text can be encoded (the 256 byte values are
+  always in the vocabulary), but words the merges don't cover break into
+  pieces, down to single bytes: "chromodynamics" takes 12 tokens. That
+  costs context and makes the word harder for the model to use.
+- **Capacity: soft, set by the parameter count.** It sets the loss the
+  model can approach however long it trains, and with it how well grammar,
+  tracking characters and following requests can be learned. Measured: the
+  first small model (1.33M parameters, context 128) reached a validation
+  loss of 3.09 on V1's validation file after 4M tokens; the 7.4M model
+  passed 2.0 on V2 after 20M (different text and tokenizers, so not
+  strictly comparable).
+- **Knowledge: hard, set by the corpus.** Only what TinyStories contains:
+  simple English stories. No facts about the world, no adult vocabulary,
+  no mathematics, no other languages, however large the model.
+- **Conversation: one turn.** The turn markers could express longer
+  conversations, but fine-tuning used one request and one reply, so a
+  second user turn is something the model has never seen.
+- **Speed: not a limit in practice.** The small model generates about 2,300
+  tokens per second on the M4, much faster than anyone reads; the 7.4M
+  model needs about 5 times the arithmetic per token.
 
 ## What production models add, and why it's left out
 
