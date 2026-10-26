@@ -303,7 +303,14 @@ frozen and used unchanged by every later step that needs it.
   the turn markers written in `chat.txt` into their special tokens.
 - **Status:** done (`tokenizer/mini_bpe.py --encode`)
 
-**What it does:** turns text into the integers the model consumes. Real
+**What it does:** turns the corpus (any text, in fact) into token IDs, the
+only thing the model ever reads. The vocabulary isn't an input to the model:
+it's the tokenizer's list of the V tokens, and each ID is a position in that
+list (a row of the embedding table). Any text can be encoded, not just words
+seen in training: the vocabulary starts with all 256 byte values, so text the
+merges don't cover falls back to smaller pieces, down to single bytes
+("chromodynamics" becomes 12 tokens with the TinyStories tokenizer, "The dog
+played in the park." 7). Real
 pipelines pre-tokenize the whole corpus into a binary ID file once, so training
 never touches text. The `.ids` file has a 64-byte header recording V and a
 fingerprint of the tokenizer (a hash of its pattern and merges), so later steps
