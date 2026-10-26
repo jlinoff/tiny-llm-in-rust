@@ -1829,7 +1829,13 @@ text8, matching gensim (a widely used Python library with its own word2vec) at
    automatic differentiation tape (decision 7), checked against the
    hand-written gradients of items 3 and 4 and used by items 5 and 6.
 4. `transformer/`: ~~build~~, ~~train~~ (done), then generate, then the
-   TinyStories run, then finetune.
+   TinyStories run, then finetune. This builds step 6 before step 5, on
+   purpose: the step numbers follow the data through the flow, not the
+   order of building. Generate works on any checkpoint, and it's the only
+   way to judge either model: fine-tuning's effect (answering in turns)
+   shows up only in generated text, so generate comes first, used on the
+   pretrained model now and to compare it with the fine-tuned one later.
+   Fine-tuning also waits on an open decision, its data (decision 6).
 5. Throughout: add each step's Makefile target as the step is built
    (`tokenize` exists). At the end, fold this plan into `llm/README.md`.
 
