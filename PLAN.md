@@ -41,6 +41,12 @@ names are explained where they first appear.
 - [Post-training](#post-training)
 - [LoRA: fine-tuning a low-rank adapter](#lora-fine-tuning-a-low-rank-adapter)
 - [What production models add, and why it's left out](#what-production-models-add-and-why-its-left-out)
+  - [Tokenization and encoding](#tokenization-and-encoding)
+  - [Architecture](#architecture)
+  - [Engineering](#engineering)
+  - [Pretraining](#pretraining)
+  - [Post-training](#post-training-1)
+  - [Inference](#inference)
 - [Conventions for all code](#conventions-for-all-code)
 - [Where the stages live](#where-the-stages-live)
 - [word2vec: the historical side branch](#word2vec-the-historical-side-branch)
@@ -2065,7 +2071,7 @@ set of refinements. None changes the concepts in this plan; most pay off
 only at a scale or on hardware we don't have. For each: what it is, what it
 buys, and why it isn't here.
 
-**Tokenization and encoding**
+#### Tokenization and encoding
 
 - **A tuned split pattern.** Our pre-tokenizer regex approximates GPT-2's.
   Later tokenizers refine it; GPT-4's, for example, splits runs of digits
@@ -2090,7 +2096,7 @@ buys, and why it isn't here.
   across many machines, sometimes with attention masked at document
   boundaries. Not here: one file, in memory.
 
-**Architecture**
+#### Architecture
 
 - **RoPE (rotary position embedding).** Instead of adding a learned position
   vector to each token, it rotates each query and key, pair of components by
@@ -2134,7 +2140,7 @@ buys, and why it isn't here.
   computed in ways that avoid materializing the T × T matrix. Not here:
   TinyStories' stories fit in 256.
 
-**Engineering**
+#### Engineering
 
 - **Mixed precision** (16-bit or 8-bit floats for most arithmetic, 32-bit
   where accuracy matters). It roughly doubles or quadruples speed on GPUs
@@ -2153,14 +2159,14 @@ buys, and why it isn't here.
   code and symbols. Not here: TinyStories needs few; at d = 128, a large V
   would make the embedding table most of the model.
 
-**Pretraining**
+#### Pretraining
 
 - **Data at scale**: trillions of tokens from the web, books and code,
   deduplicated (beyond our exact-match `--dedup`) and filtered for quality.
   Not here: the point is a corpus a laptop can train on, and TinyStories
   was designed for exactly that.
 
-**Post-training**
+#### Post-training
 
 This is where the largest gap is. Step 5 does only the first kind below,
 on one synthetic kind of request; much of what makes an assistant feel like
@@ -2213,7 +2219,7 @@ card (2025) describes several of these elements for that model, marked
   conversation to a fast model or a reasoning one, system prompts, and
   tools at inference. Not here: one model, called directly.
 
-**Inference**
+#### Inference
 
 - **More sampling methods.** We have temperature and top-k. Production
   interfaces usually default to **top-p**, or nucleus sampling (Holtzman et
