@@ -248,7 +248,7 @@ toc: ## Update PLAN.md's table of contents and check its internal links.
 	python3 tools/toc.py PLAN.md
 
 .PHONY: clean
-clean: ## Remove generated files (keeps data/, out-full/ and uncommitted work).
+clean: ## Remove generated files (keeps data/ and out-full/; see FORCE).
 	@if [ "$(OUT)" = out-full ] && [ -z "$(FORCE)" ]; then \
 		echo "refusing to delete out-full/ (the full run: a day of training);"; \
 		echo "to really delete it: make full-clean FORCE=1"; exit 1; fi
@@ -280,6 +280,7 @@ help:  ## This help message.
 	@printf "   %-18s  %s\n" "CONFIG" "$(CONFIG)"
 	@printf "   %-18s  %s\n" "CORPUS" "$(CORPUS)"
 	@printf "   %-18s  %s\n" "EVAL_ARGS" "$(EVAL_ARGS)"
+	@printf "   %-18s  %s\n" "FORCE" "$(FORCE)   (1 lets make full-clean delete out-full/)"
 	@printf "   %-18s  %s\n" "GEN_ARGS" "$(GEN_ARGS)"
 	@printf "   %-18s  %s\n" "LORA_ARGS" "$(LORA_ARGS)"
 	@printf "   %-18s  %s\n" "MERGES" "$(MERGES)"

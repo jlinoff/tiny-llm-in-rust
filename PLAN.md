@@ -2456,7 +2456,10 @@ What had to change for a 2.2 GB file:
 - **`bench` times the model's full context**, since attention's share of
   the work grows with it.
 
-How to run it (all files in `out-full/`, which `make clean` leaves alone):
+How to run it (all files in `out-full/`, which `make clean` leaves alone;
+`make full-clean` refuses to delete it unless given `FORCE=1`, since
+`full-` would otherwise turn any target, `clean` included, onto
+`out-full/`):
 
 ```
 make full-bench                  # downloads V2, learns the tokenizer, builds, times a step
