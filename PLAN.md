@@ -74,7 +74,8 @@ Grouped so that each definition uses only terms defined above it.
   to its weights.
 - **tensor**: in machine learning, simply an n-dimensional array of
   numbers: a single number, a vector (1-D), a matrix (2-D), or more (a
-  "tensor of shape (B, T, d)" is a B × T × d block of numbers). Every weight
+  "tensor of shape (B, T, d)", for B sequences of T tokens of d numbers
+  each, is a B × T × d block of numbers; B and T are defined below). Every weight
   matrix is one, as is each bias vector. *Not the physics sense:* there is
   no transformation law, no metric and no covariant/contravariant
   distinction; the components are stored in one fixed basis that never
@@ -114,7 +115,9 @@ Grouped so that each definition uses only terms defined above it.
   changes nothing (like choosing the zero of energy), so implementations
   subtract the largest score before exponentiating, which keeps e^z from
   overflowing.
-- **context length**: the most tokens the model can take in at once.
+- **context length**, **T**: the most tokens the model can take in at
+  once (256 in `config.toml`). Training cuts the text into windows of T
+  tokens, and the position table has T rows.
 - **GPT (generative pre-trained transformer)**: a transformer trained to
   predict the next token. "GPT-style" means this design, which most LLMs use.
 
@@ -143,8 +146,8 @@ Grouped so that each definition uses only terms defined above it.
   differences**: nudge one weight by ±ε, measure how much the loss changes,
   and compare with the computed gradient.
 - **learning rate**: how large each adjustment is.
-- **step**, **batch size**: one adjustment; the number of examples used to
-  compute it.
+- **step**, **batch size**, **B**: one adjustment; the number of examples
+  (for pretraining, windows of T tokens) used to compute it.
 - **epoch**: one full pass over the training data.
 - **seed**: the starting value of a pseudo-random number generator; the same
   seed reproduces the same "random" numbers.
@@ -155,8 +158,9 @@ Grouped so that each definition uses only terms defined above it.
   of a sequence's predictions, such as only the assistant's reply in a
   conversation; the other positions are still read as context but aren't
   trained to be predicted.
-- **temperature**: a text-generation setting T: the output scores are divided
-  by T before the softmax, exactly as temperature enters the Boltzmann
+- **temperature**: a text-generation setting τ (often written T, but here T
+  is the context length): the output scores are divided by τ before the
+  softmax, exactly as temperature enters the Boltzmann
   distribution. Low values make the most likely next token dominate; higher
   values flatten the probabilities, so sampling picks more varied tokens.
   Temperature 0 means **greedy** decoding: always the single likeliest token.
