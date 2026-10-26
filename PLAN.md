@@ -50,7 +50,12 @@ Grouped so that each definition uses only terms defined above it.
   as it learns. **Hyperparameters** are the settings we choose (more in
   [Configuration](#configuration)).
 - **self-attention**: a sublayer in which each token's vector takes in
-  information from the tokens before it, weighting each by a relevance score.
+  information from the other tokens of the same sequence ("self", as opposed
+  to **cross-attention**, which looks at a different sequence, such as the
+  source sentence in translation), weighting each by a relevance score. In a
+  GPT-style model, the causal mask (below) limits each token to the tokens
+  before it; models such as BERT use self-attention without the mask, so
+  every token sees the whole sequence.
   Each token's vector is turned into a **query** (what it looks for), a
   **key** (what it offers to be matched on) and a **value** (what it passes
   on); a token's score for an earlier token is the dot product of its query
