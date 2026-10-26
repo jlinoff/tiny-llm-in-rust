@@ -209,10 +209,31 @@ document is `<|user|> request <|assistant|> story <|end|>`.
 ## `transformer evaluate`
 
 ```
-transformer evaluate --model chat.safetensors --tokenizer tok.bpe --config config.toml --requests chat-eval.tsv --chat
-transformer evaluate --model model.safetensors --tokenizer tok.bpe --config config.toml --requests chat-eval.tsv
+transformer evaluate --model chat.safetensors --tokenizer tok.bpe --config config.toml --requests chat-eval.tsv --paired chat-eval.txt --chat
+transformer evaluate --model model.safetensors --tokenizer tok.bpe --config config.toml --requests chat-eval.tsv --paired chat-eval.txt
 make evaluate
 ```
+
+**The paired-loss check** (`--paired chat-eval.txt`: the same requests,
+each with the held-out story it was made from) comes first. No sampling:
+for each story, the model's loss on the story's tokens given its own
+request, and given the next request instead. If the model uses the request
+at all, its own request makes the story more predictable, above all at the
+requested words. It reports:
+
+- the mean loss over all story tokens, own request against other, and how
+  many stories had the lower loss with their own request
+- the same for only the tokens of the requested words (found as whole
+  words in the story, mapped to the tokens whose bytes overlap them), with
+  the average probability ratio, e^(other − own)
+- a sign test for each count: if requests made no difference, each story
+  would be a coin flip, and p is the chance of a split at least as uneven
+
+It uses every story token instead of a few sampled words, so it detects a
+much smaller effect than sampling can. The losses come from the inference
+path, and a test checks they equal the training loss.
+
+**The sampling check** comes next.
 
 Measures fine-tuning. For each request in `chat-eval.tsv` (from stories
 neither training step saw), it generates a story with `[generate]`'s
@@ -418,8 +439,10 @@ starting shape with a small vocabulary, a 2-core Linux machine takes about
 - fine-tuning data: conversations parse into rows with only the reply and
   `<|end|>` scored, too-long ones are left out and counted, and malformed
   ones (no request, no reply, no end, two turns) are refused
-- evaluation: whole-word matching, parsing `chat-eval.tsv`, and the tally of
-  requested and control words
+- evaluation: whole-word matching and the tokens it covers, parsing
+  `chat-eval.tsv` and `chat-eval.txt`, the tally of requested and control
+  words, the sign test's values, and per-token story losses equal to the
+  training loss
 - generation: the KV cache gives exactly the training forward pass's
   predictions (above); greedy and top-1 pick the likeliest token; sampling
   frequencies match the softmax (200,000 draws, within 5 standard

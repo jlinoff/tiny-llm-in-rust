@@ -26,9 +26,15 @@ Outputs:
                             -o chat.ids --split-on '<|endoftext|>' --allow-special
   chat-eval.tsv  evaluation requests, one per line: the three words
                  (space-separated), a tab, then the request
+  chat-eval.txt  (with --eval-chat) the same requests as whole conversations,
+                 each with the held-out story it was made from, in the same
+                 order: for transformer evaluate --paired, which compares the
+                 model's loss on each story given its own request and given
+                 another's
 
 Usage:
-  python3 make_chat.py data/TinyStories-valid.txt -o out/chat.txt --eval out/chat-eval.tsv
+  python3 make_chat.py data/TinyStories-valid.txt -o out/chat.txt --eval out/chat-eval.tsv \\
+      --eval-chat out/chat-eval.txt
 """
 import argparse
 import os
@@ -98,14 +104,15 @@ def check_outputs(ap, args):
     be written, or an output would overwrite the input."""
     if not os.path.isfile(args.stories) or not os.access(args.stories, os.R_OK):
         ap.error(f"can't read {args.stories!r}")
-    for path in (args.output, args.eval):
+    outputs = [p for p in (args.output, args.eval, args.eval_chat) if p]
+    for path in outputs:
         if os.path.exists(path) and os.path.samefile(path, args.stories):
             ap.error(f"output {path!r} would overwrite the input")
         parent = os.path.dirname(os.path.abspath(path))
         if not os.access(parent, os.W_OK) or os.path.isdir(path):
             ap.error(f"can't write {path!r}")
-    if args.output == args.eval:
-        ap.error("--output and --eval must be different files")
+    if len(set(outputs)) != len(outputs):
+        ap.error("--output, --eval and --eval-chat must be different files")
     if not 0 < args.eval_fraction < 1:
         ap.error("--eval-fraction must be between 0 and 1")
 
@@ -120,6 +127,10 @@ def build_parser():
                     help="the training conversations (chat.txt)")
     ap.add_argument("--eval", required=True,
                     help="the evaluation requests (chat-eval.tsv)")
+    ap.add_argument("--eval-chat", metavar="FILE",
+                    help="also write the evaluation requests as conversations "
+                         "with their stories (chat-eval.txt), for "
+                         "transformer evaluate --paired")
     ap.add_argument("--split-on", default=SEP, metavar="SEP",
                     help=f"line separating the stories (default {SEP})")
     ap.add_argument("--eval-fraction", type=float, default=0.05,
@@ -137,6 +148,11 @@ def build_parser():
     return ap
 
 
+def conversation(request, story):
+    """One conversation, with the turn markers written as text."""
+    return f"{MARKERS[0]}{request}{MARKERS[1]}{story}{MARKERS[2]}"
+
+
 def conversations(stories, words, rng):
     """The training conversations, and how many stories had too few
     candidate words to make one."""
@@ -146,20 +162,30 @@ def conversations(stories, words, rng):
         if got is None:
             skipped += 1
             continue
-        convs.append(f"{MARKERS[0]}{got[1]}{MARKERS[1]}{story}{MARKERS[2]}")
+        convs.append(conversation(got[1], story))
     return convs, skipped
 
 
+def write_conversations(path, convs, sep):
+    """Write conversations separated by `sep` lines, and read them back."""
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write(f"\n{sep}\n".join(convs) + "\n")
+    with open(path, encoding="utf-8") as fh:
+        if split_stories(fh.read(), sep) != convs:
+            sys.exit(f"make_chat.py: {path}: read-back doesn't match")
+
+
 def write_outputs(args, convs, evals):
-    """Write both files, then read the conversations back to verify them."""
-    with open(args.output, "w", encoding="utf-8") as fh:
-        fh.write(f"\n{args.split_on}\n".join(convs) + "\n")
+    """Write the files, reading the conversations back to verify them.
+    `evals` holds (story, words, request) for each evaluation request."""
+    write_conversations(args.output, convs, args.split_on)
     with open(args.eval, "w", encoding="utf-8") as fh:
-        for picked, request in evals:
+        for _, picked, request in evals:
             fh.write(f"{' '.join(picked)}\t{request}\n")
-    with open(args.output, encoding="utf-8") as fh:
-        if split_stories(fh.read(), args.split_on) != convs:
-            sys.exit(f"make_chat.py: {args.output}: read-back doesn't match")
+    if args.eval_chat:
+        write_conversations(args.eval_chat,
+                            [conversation(r, s) for s, _, r in evals],
+                            args.split_on)
 
 
 def main():
@@ -176,8 +202,9 @@ def main():
                                         args.skip_common)
     rng = random.Random(args.seed)
     convs, skipped = conversations(stories[:-n_eval], words, rng)
-    evals = [g for g in (request_for(s, words, rng) for s in stories[-n_eval:])
-             if g][:args.eval_count]
+    evals = [(s, *g) for s, g in ((s, request_for(s, words, rng))
+                                  for s in stories[-n_eval:]) if g]
+    evals = evals[:args.eval_count]
     if not convs or len(evals) < 2:
         ap.error(f"only {len(words)} candidate words, too few to make "
                  f"requests: lower --skip-common or --min-stories")
@@ -191,8 +218,10 @@ def main():
     print(f"Wrote {args.output}: {len(convs):,} conversations ({skipped:,} "
           f"stories skipped, fewer than three candidate words); read back and "
           f"verified")
-    print(f"Wrote {args.eval}: {len(evals):,} evaluation requests, e.g.")
-    for _, request in evals[:3]:
+    print(f"Wrote {args.eval}: {len(evals):,} evaluation requests"
+          f"{f', and {args.eval_chat} with their stories' if args.eval_chat else ''}"
+          f", e.g.")
+    for _, _, request in evals[:3]:
         print(f"  {request}")
 
 

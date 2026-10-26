@@ -21,7 +21,7 @@ in the stories the model writes? (`transformer evaluate`, in
 ## Usage
 
 ```
-python3 make_chat.py data/TinyStories-valid.txt -o out/chat.txt --eval out/chat-eval.tsv
+python3 make_chat.py data/TinyStories-valid.txt -o out/chat.txt --eval out/chat-eval.tsv --eval-chat out/chat-eval.txt
 ```
 
 Python 3.8 or later, standard library only. `make finetune` runs it (with
@@ -34,6 +34,9 @@ Options:
   `<|endoftext|>` lines, with the turn markers written as text
 - `--eval FILE`: the evaluation requests (`chat-eval.tsv`), one per line:
   the three words (space-separated), a tab, the request
+- `--eval-chat FILE`: also write the evaluation requests as whole
+  conversations, each with the held-out story it was made from, in the
+  same order (`chat-eval.txt`), for `transformer evaluate --paired`
 - `--split-on SEP`: the line between stories (default `<|endoftext|>`)
 - `--eval-fraction F`: the last fraction of the stories, kept for evaluation
   (default 0.05). That's the same tail pretraining held out as validation

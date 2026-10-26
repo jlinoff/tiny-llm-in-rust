@@ -167,6 +167,11 @@ impl<'a, T: Float> Generator<'a, T> {
         }
     }
 
+    /// The model's context length: the most positions the cache holds.
+    pub fn context(&self) -> usize {
+        self.c.context
+    }
+
     /// Positions in the cache so far.
     pub fn len(&self) -> usize {
         self.len

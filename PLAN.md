@@ -199,7 +199,7 @@ disagreeing. It can still move to Rust if there's a compelling reason.
 
 ## The flows
 
-There are three separate flows:
+There are four separate flows:
 
 1. **The LLM flow**: the main goal. It builds a small GPT-style language
    model, from text to a trained model that generates text, and then
@@ -377,10 +377,10 @@ the config. The tokenizer is not involved; it already did its work in step 2.
 - **Command:**
 
   ```
-  python3 chat/make_chat.py corpus.txt -o chat.txt --eval chat-eval.tsv
+  python3 chat/make_chat.py corpus.txt -o chat.txt --eval chat-eval.tsv --eval-chat chat-eval.txt
   python3 tokenizer/mini_bpe.py --load tok.bpe --encode chat.txt -o chat.ids --split-on '<|endoftext|>' --allow-special
   transformer finetune --model model.safetensors --data chat.ids --tokenizer tok.bpe --config config.toml -o chat.safetensors
-  transformer evaluate --model chat.safetensors --tokenizer tok.bpe --config config.toml --requests chat-eval.tsv --chat
+  transformer evaluate --model chat.safetensors --tokenizer tok.bpe --config config.toml --requests chat-eval.tsv --paired chat-eval.txt --chat
   ```
 - **Status:** done (`chat/make_chat.py`, `transformer finetune`,
   `transformer evaluate`, `generate --chat`; `make finetune`, `make evaluate`,
@@ -436,6 +436,15 @@ the same stories, checked for the words of a *different* request. A model
 that ignores requests scores about the same on both, so the difference is
 what following the request adds. The pretrained model is the baseline,
 given each request as plain text to continue.
+
+**A more sensitive measure: paired losses.** Sampling 200 stories only
+detects a large effect. `--paired chat-eval.txt` (the same requests, each
+with the story it was made from) needs no sampling: for each held-out
+story, the model's loss on the story given its own request, and given
+another request. If the model uses the request at all, its own request
+makes the story more predictable, above all at the requested words. Every
+story token counts, and a sign test says whether "own request lower" wins
+more often than a coin flip would.
 
 **First result (1.35M parameters, 1,500 fine-tuning steps, about 0.8
 passes): the format was learned, the requests mostly weren't.** On 200
@@ -1741,7 +1750,7 @@ the targets run, one per step:
 python3 tokenizer/mini_bpe.py corpus.txt -n 3836 --split-on '<|endoftext|>' --save tok.bpe
 # 2 encode (the corpus for step 4, the conversations for step 5)
 python3 tokenizer/mini_bpe.py --load tok.bpe --encode corpus.txt -o corpus.ids --split-on '<|endoftext|>'
-python3 chat/make_chat.py corpus.txt -o chat.txt --eval chat-eval.tsv
+python3 chat/make_chat.py corpus.txt -o chat.txt --eval chat-eval.tsv --eval-chat chat-eval.txt
 python3 tokenizer/mini_bpe.py --load tok.bpe --encode chat.txt -o chat.ids --split-on '<|endoftext|>' --allow-special
 # 3 build
 transformer build    --tokenizer tok.bpe --config config.toml -o model-init.safetensors
@@ -1749,7 +1758,7 @@ transformer build    --tokenizer tok.bpe --config config.toml -o model-init.safe
 transformer train    --model model-init.safetensors --data corpus.ids --config config.toml -o model.safetensors
 # 5 finetune (post-training), and its measurement
 transformer finetune --model model.safetensors --data chat.ids --tokenizer tok.bpe --config config.toml -o chat.safetensors
-transformer evaluate --model chat.safetensors --tokenizer tok.bpe --config config.toml --requests chat-eval.tsv --chat
+transformer evaluate --model chat.safetensors --tokenizer tok.bpe --config config.toml --requests chat-eval.tsv --paired chat-eval.txt --chat
 # 6 generate
 transformer generate --model model.safetensors --tokenizer tok.bpe --config config.toml --prompt "Once upon a time"
 transformer generate --model chat.safetensors --tokenizer tok.bpe --config config.toml --chat --prompt "Write a story with the words frog, bell and egg."

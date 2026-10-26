@@ -147,6 +147,10 @@ enum Command {
         /// The evaluation requests (chat-eval.tsv)
         #[arg(long)]
         requests: PathBuf,
+        /// Also run the paired-loss check on these conversations
+        /// (chat-eval.txt: the same requests, with their stories)
+        #[arg(long)]
+        paired: Option<PathBuf>,
         /// Send each request as a conversation (turn markers); without it,
         /// as plain text for the model to continue
         #[arg(long)]
@@ -213,6 +217,7 @@ fn main() -> ExitCode {
             tokenizer,
             config,
             requests,
+            paired,
             chat,
             count,
             show,
@@ -225,6 +230,7 @@ fn main() -> ExitCode {
             &tokenizer,
             &config,
             &requests,
+            paired.as_deref(),
             chat,
             count,
             show,
@@ -1041,6 +1047,7 @@ fn evaluate_command(
     tok_path: &Path,
     config_path: &Path,
     requests_path: &Path,
+    paired_path: Option<&Path>,
     chat: bool,
     count: Option<usize>,
     show: usize,
@@ -1050,6 +1057,9 @@ fn evaluate_command(
     check_readable(tok_path, "tokenizer")?;
     check_readable(config_path, "config")?;
     check_readable(requests_path, "requests")?;
+    if let Some(p) = paired_path {
+        check_readable(p, "conversations")?;
+    }
     let cfg = sampling_config(config_path, &over)?;
     let model = load_checkpoint(model_path)?;
     let tok = load_tokenizer(tok_path, &model)?;
@@ -1085,6 +1095,90 @@ fn evaluate_command(
             "as plain text for the model to continue (no turn markers)"
         }
     );
+    if let Some(p) = paired_path {
+        let text = fs::read_to_string(p).map_err(|e| format!("can't read {}: {e}", p.display()))?;
+        let mut convs =
+            evaluate::parse_conversations(&text).map_err(|e| format!("{}: {e}", p.display()))?;
+        convs.truncate(requests.len());
+        if convs.len() != requests.len()
+            || convs
+                .iter()
+                .zip(&requests)
+                .any(|(c, r)| c.request != r.text)
+        {
+            return Err(format!(
+                "{} doesn't hold the same requests, in the same order, as {}",
+                p.display(),
+                requests_path.display()
+            ));
+        }
+        let mut g = generate::Generator::new(&params, &model.config);
+        let mut pt = evaluate::Paired::default();
+        for (i, c) in convs.iter().enumerate() {
+            let other = &requests[(i + 1) % requests.len()];
+            let prompt = |req: &str| -> Result<Vec<usize>, String> {
+                let text = if chat {
+                    req.to_string()
+                } else {
+                    format!("{req}\n")
+                };
+                Ok(prompt_ids(&tok, &encoder, &text, chat)?.0)
+            };
+            let story = encoder.encode(&c.story)?;
+            let lens: Vec<usize> = story
+                .iter()
+                .map(|&t| encoder.token_bytes(t).len())
+                .collect();
+            let spans: Vec<(usize, usize)> = requests[i]
+                .words
+                .iter()
+                .flat_map(|w| evaluate::word_spans(&c.story, w))
+                .collect();
+            let words = evaluate::tokens_in_spans(&lens, &spans);
+            match (
+                evaluate::story_losses(&mut g, &prompt(&c.request)?, &story),
+                evaluate::story_losses(&mut g, &prompt(&other.text)?, &story),
+            ) {
+                (Some(own), Some(oth)) => pt.add(&own, &oth, &words),
+                _ => pt.skipped += 1,
+            }
+        }
+        let n = pt.stories.max(1) as f64;
+        let nw = pt.word_tokens.max(1) as f64;
+        println!(
+            "Paired loss: each held-out story's loss given its own request, and given the next request instead ({} stories{}):",
+            pt.stories,
+            if pt.skipped > 0 {
+                format!(", {} longer than the context left out", pt.skipped)
+            } else {
+                String::new()
+            }
+        );
+        println!(
+            "  all story tokens:      own {:.4}, other {:.4}, difference {:+.4}; own lower for {} of {} stories (sign test p = {:.2e})",
+            pt.own / n,
+            pt.other / n,
+            (pt.own - pt.other) / n,
+            pt.own_lower,
+            pt.stories,
+            evaluate::sign_test(pt.own_lower, pt.stories)
+        );
+        let dw = (pt.own_word - pt.other_word) / nw;
+        println!(
+            "  requested-word tokens: own {:.3}, other {:.3}, difference {:+.3}; own lower for {} of {} stories (p = {:.2e})",
+            pt.own_word / nw,
+            pt.other_word / nw,
+            dw,
+            pt.own_word_lower,
+            pt.word_stories,
+            evaluate::sign_test(pt.own_word_lower, pt.word_stories)
+        );
+        println!(
+            "  so the own request makes the requested words' tokens {:.2} times as likely, on average ({} tokens)\n",
+            (-dw).exp(),
+            pt.word_tokens
+        );
+    }
     println!(
         "Sampling: {} (request i uses seed + i)\n",
         describe_sampling(&cfg)

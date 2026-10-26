@@ -73,10 +73,10 @@ CHAT_ARGS ?=
 
 $(OUT)/chat.txt: $(CORPUS) chat/make_chat.py | $(OUT)
 	$(call hdr,chat data)
-	python3 chat/make_chat.py $(CORPUS) $(SPLIT) $(CHAT_ARGS) -o $(OUT)/chat.txt --eval $(OUT)/chat-eval.tsv
+	python3 chat/make_chat.py $(CORPUS) $(SPLIT) $(CHAT_ARGS) -o $(OUT)/chat.txt --eval $(OUT)/chat-eval.tsv --eval-chat $(OUT)/chat-eval.txt
 
 # Written by the same command as chat.txt.
-$(OUT)/chat-eval.tsv: $(OUT)/chat.txt ;
+$(OUT)/chat-eval.tsv $(OUT)/chat-eval.txt: $(OUT)/chat.txt ;
 
 $(OUT)/chat.ids: $(OUT)/chat.txt $(OUT)/tok.bpe tokenizer/mini_bpe.py | $(OUT)
 	$(call hdr,encode chat)
@@ -89,18 +89,20 @@ $(OUT)/chat.safetensors: $(OUT)/model.safetensors $(OUT)/chat.ids config.toml $(
 	$(call hdr,finetune)
 	time $(TRANSFORMER) finetune --model $(OUT)/model.safetensors --data $(OUT)/chat.ids --tokenizer $(OUT)/tok.bpe --config config.toml -o $@
 
-# How often stories use the requested words: the pretrained model (requests
-# as plain text) against the fine-tuned one (as conversations). Like
+# How much the models use the requests: the pretrained model (requests as
+# plain text) against the fine-tuned one (as conversations). Each run does
+# the paired-loss check (each held-out story's loss given its own request
+# vs another's), then samples stories and counts the requested words. Like
 # generate, the models are required but not prerequisites.
 EVAL_ARGS ?=
 
 .PHONY: evaluate
-evaluate: $(TRANSFORMER) $(OUT)/chat-eval.tsv ## Measure fine-tuning: requested words in stories, before and after.
+evaluate: $(TRANSFORMER) $(OUT)/chat-eval.tsv $(OUT)/chat-eval.txt ## Measure fine-tuning: requested words in stories, before and after.
 	@test -f $(OUT)/chat.safetensors || { echo "no $(OUT)/chat.safetensors: run make finetune first"; exit 1; }
 	$(call hdr,evaluate pretrained)
-	$(TRANSFORMER) evaluate --model $(OUT)/model.safetensors --tokenizer $(OUT)/tok.bpe --config config.toml --requests $(OUT)/chat-eval.tsv $(EVAL_ARGS)
+	$(TRANSFORMER) evaluate --model $(OUT)/model.safetensors --tokenizer $(OUT)/tok.bpe --config config.toml --requests $(OUT)/chat-eval.tsv --paired $(OUT)/chat-eval.txt $(EVAL_ARGS)
 	$(call hdr,evaluate fine-tuned)
-	$(TRANSFORMER) evaluate --model $(OUT)/chat.safetensors --tokenizer $(OUT)/tok.bpe --config config.toml --requests $(OUT)/chat-eval.tsv --chat $(EVAL_ARGS)
+	$(TRANSFORMER) evaluate --model $(OUT)/chat.safetensors --tokenizer $(OUT)/tok.bpe --config config.toml --requests $(OUT)/chat-eval.tsv --paired $(OUT)/chat-eval.txt --chat $(EVAL_ARGS)
 
 # Talk to the fine-tuned model: make chat PROMPT='Write a story with the words frog, bell and egg.'
 .PHONY: chat
