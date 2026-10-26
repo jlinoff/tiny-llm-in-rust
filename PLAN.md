@@ -437,6 +437,31 @@ that ignores requests scores about the same on both, so the difference is
 what following the request adds. The pretrained model is the baseline,
 given each request as plain text to continue.
 
+**First result (1.35M parameters, 1,500 fine-tuning steps, about 0.8
+passes): the format was learned, the requests mostly weren't.** On 200
+held-out requests:
+
+- **Format, yes.** Every fine-tuned reply is a story that starts properly
+  ("Once upon a time, there was a little girl named Lily…"), and 72% end on
+  their own with `<|end|>`; the rest reach the 200-token limit.
+- **Requested words, barely.** The fine-tuned model used 2.2% of the
+  requested words (13 of 600) against 0.5% for the control (3 of 600), and
+  never all three. That's more than chance (13 of the 16 hits landing on
+  the requested side has a two-sided probability of about 2% if requests
+  made no difference), but it's a tiny effect. The pretrained model, given
+  the requests as plain text: 1.2% against 0.8%, no effect.
+- **Less variety.** The fine-tuned stories converge on the most common
+  opening (Lily, Tim, the park): every reply began the same way in
+  training, and the model leans on that.
+
+Why it's hard: using a word from the request means attending back across
+the whole reply to the request and copying from it. That's the induction
+mechanism of attention item 6, but triggered by meaning ("the words …"),
+learned from 12,000 examples by a model of 1.35M parameters. Next
+experiments: a more sensitive measure (whether the model's loss on a story
+is lower given its own request than given another's), longer fine-tuning,
+and the bigger model of the full TinyStories run.
+
 ##### Step 6: generate
 
 - **Inputs:**
