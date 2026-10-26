@@ -2128,15 +2128,65 @@ buys, and why it isn't here.
   code and symbols. Not here: TinyStories needs few; at d = 128, a large V
   would make the embedding table most of the model.
 
-**Training and post-training**
+**Pretraining**
 
 - **Data at scale**: trillions of tokens from the web, books and code,
   deduplicated (beyond our exact-match `--dedup`) and filtered for quality.
   Not here: the point is a corpus a laptop can train on, and TinyStories
   was designed for exactly that.
-- **Preference tuning** (RLHF or DPO; see [Post-training](#post-training)).
-  Not here: it needs preference data and a base model capable enough to
-  produce answers worth comparing.
+
+**Post-training**
+
+This is where the largest gap is. Step 5 does only the first kind below,
+on one synthetic kind of request; much of what makes an assistant feel like
+one comes from the rest. The InstructGPT paper (Ouyang et al. 2022) showed
+the scale of the effect: people preferred a 1.3B-parameter model with full
+post-training over the 175B-parameter GPT-3 base model, more than 100
+times larger. Labs don't publish their full recipes; OpenAI's GPT-5 system
+card (2025) describes several of these elements for that model, marked
+(GPT-5) below.
+
+- **Supervised fine-tuning on high-quality conversations**: written or
+  curated by people, many turns, with system prompts and the whole variety
+  of requests. Ours: one turn, one kind of request, made from the stories.
+  Not here: no such conversations exist for a model that knows only
+  children's stories.
+- **Preference tuning** (RLHF or DPO; see [Post-training](#post-training)):
+  people compare pairs of answers, and the model is trained toward the
+  preferred ones. Not here: it needs preference data and a base model
+  capable enough to produce answers worth comparing.
+- **AI feedback against written principles**: a model judges answers
+  against a written set of principles, scaling feedback beyond what people
+  can label (Anthropic's Constitutional AI; OpenAI's Model Spec, a written
+  specification of intended behavior). Not here: the judge must itself be
+  a capable model.
+- **Reinforcement learning with verifiable rewards**: problems whose answers
+  code can check (mathematics, programs with tests), so the reward is
+  computed rather than judged. Not here, but within reach: our evaluation
+  is exactly such a reward (how many requested words a story uses), so
+  generating several stories per request, fine-tuning on the best, and
+  repeating (rejection-sampling fine-tuning), or building preference pairs
+  from it for DPO, would be a working miniature. A possible future step.
+- **Reinforcement learning for reasoning** (GPT-5): the model learns, by
+  reinforcement learning, to work through a long chain of thought before
+  answering, refining strategies and catching its own mistakes. Not here:
+  reasoning needs problems worth reasoning about and a model able to start.
+- **Targeted behavior training** (GPT-5): less sycophancy (a measure of
+  telling people what they want to hear, used directly as a reward), fewer
+  hallucinations (training on browsing and on errors from the model's own
+  knowledge), rewarding honest admission that a task can't be done, and
+  "safe completions" (judging the safety of the answer rather than refusing
+  by the request's category). Not here: each needs a capable model and
+  purpose-built evaluations.
+- **Tool use**: calling functions, running code, searching. Not here: no
+  tools, and nothing for a story model to look up.
+- **Safety work**: red-teaming (deliberately attacking the model to find
+  failures), refusal calibration, evaluations. Not here: a model that can
+  only write children's stories has little to misuse.
+- **Other modalities**: images and audio in and out. Not here: text only.
+- **The system around the model** (GPT-5): a router that sends each
+  conversation to a fast model or a reasoning one, system prompts, and
+  tools at inference. Not here: one model, called directly.
 
 **Inference**
 
@@ -2814,6 +2864,14 @@ for language research.
   Reinforcement Learning from Human Feedback."
   [arXiv:2204.05862](https://arxiv.org/abs/2204.05862). Anthropic's account of
   RLHF for an assistant.
+- Bai, Y., et al. (2022). "Constitutional AI: Harmlessness from AI
+  Feedback." [arXiv:2212.08073](https://arxiv.org/abs/2212.08073). Feedback
+  from a model applying written principles instead of from people.
+- OpenAI (2025). "GPT-5 System Card."
+  [deploymentsafety.openai.com/gpt-5](https://deploymentsafety.openai.com/gpt-5).
+  The post-training elements it describes for GPT-5: reinforcement
+  learning for reasoning, safe completions, sycophancy and hallucination
+  reduction, the router.
 - Rafailov, R., et al. (2023). "Direct Preference Optimization: Your Language
   Model is Secretly a Reward Model." NeurIPS.
   [arXiv:2305.18290](https://arxiv.org/abs/2305.18290). DPO: preference tuning
