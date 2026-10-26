@@ -2630,10 +2630,8 @@ text8, matching gensim (a widely used Python library with its own word2vec) at
    for grammar and 2/10 for consistency, 8.3M scored 7 and 5, and 28M scored
    9 and 9, trained on a single GPU in up to 30 hours. With the measured
    speed, an 8M-class model (grammatical, partly coherent stories) is within
-   reach of our own Rust on the CPU. Apple's Accelerate library, using the
-   M4's matrix hardware, could make matrix products faster still, at the
-   cost of a platform-specific dependency; that's a later decision, once
-   `train` reports its real tokens per second. The plan:
+   reach of our own Rust on the CPU. (Faster matrix products on Apple's
+   matrix hardware or GPU are open decision 8.) The plan:
    - develop and debug on the validation file (a few million tokens, minutes
      to train)
    - then train on a subset of the training file, 20–100M tokens (decided
@@ -2688,6 +2686,38 @@ text8, matching gensim (a widely used Python library with its own word2vec) at
    operation's backward rule written out, and building layer norm on the
    tape from its parts lets a test compare the derived gradient with the
    closed-form formula.
+
+8. **Faster matrix products on Apple hardware.** *Open, deferred.* Nearly
+   all training time is matrix products, which `transformer/` computes with
+   plain Rust loops on the CPU cores (`src/tensor.rs`), spread over all
+   cores with rayon (a Rust library for spreading work over threads).
+   Measured on the M4: 31–37 GFLOP/s on one core, about 180 on all 10, and
+   97 GFLOP/s of useful work in a real training step of the 7.4M model (see [The bench flow](#4-the-bench-flow)). Apple's chips
+   have faster hardware for this that our code doesn't use. The options:
+   - (a) keep the plain Rust loops (current): portable, every line
+     readable, and the results are identical for any number of threads,
+     which several tests rely on
+   - (b) call Apple's **Accelerate** library (its BLAS, Basic Linear
+     Algebra Subprograms, the standard interface for matrix products;
+     `sgemm` for f32) for the big products:
+     it uses the chip's matrix hardware, and could plausibly be several
+     times faster (an estimate, to be measured with `bench`). The cost: a
+     macOS-only dependency (with the Rust loops kept for other systems),
+     the arithmetic no longer visible, and possibly a different summation
+     order, so results might no longer match across thread counts bit for
+     bit (the tests would need tolerances there)
+   - (c) run on the GPU with Metal, Apple's GPU interface: potentially much
+     faster for training, but a large rewrite of the tensor code into GPU
+     kernels, and a different programming model to learn
+   - (d) an existing Rust ML crate with Apple backends (candle): fast, but
+     it would replace this project's own tensor and tape code, which is
+     the point of the project
+
+   Leaning: (a) for now, since the goal is understanding and the speed
+   has been enough. (b) is the natural next step if training time becomes
+   the bottleneck, such as for a week-long run of a model of about 30M
+   parameters: a contained change behind `Mat::matmul`, measurable with
+   `make bench` before and after.
 
 ## The full TinyStories run
 
