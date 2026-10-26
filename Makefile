@@ -248,7 +248,10 @@ toc: ## Update PLAN.md's table of contents and check its internal links.
 	python3 tools/toc.py PLAN.md
 
 .PHONY: clean
-clean: ## Remove generated files (keeps data/ and uncommitted work).
+clean: ## Remove generated files (keeps data/, out-full/ and uncommitted work).
+	@if [ "$(OUT)" = out-full ] && [ -z "$(FORCE)" ]; then \
+		echo "refusing to delete out-full/ (the full run: a day of training);"; \
+		echo "to really delete it: make full-clean FORCE=1"; exit 1; fi
 	cd word2vec && cargo clean
 	cd attention && cargo clean
 	rm -rf $(OUT) project.zip
