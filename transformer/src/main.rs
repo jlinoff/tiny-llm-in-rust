@@ -1,12 +1,14 @@
 //! transformer: the LLM flow's steps 3–6 (PLAN.md, "The flows"). So far:
 //!   build     step 3: create the model with random weights
 //!   train     step 4: train it on token IDs (resumable)
+//!   generate  step 6: write text from a prompt (inference)
 //!   inspect   show what a checkpoint holds, and check it against its config
 //!   bench     measure this machine's matrix-multiply speed
 
 mod bench;
 mod config;
 mod data;
+mod generate;
 mod gpt;
 mod model;
 mod rng;
@@ -73,6 +75,34 @@ enum Command {
         #[arg(short, long)]
         output: PathBuf,
     },
+    /// Step 6: write text that continues a prompt, one token at a time
+    /// (inference). Works with any checkpoint.
+    Generate {
+        /// The checkpoint (model.safetensors, or chat.safetensors later)
+        #[arg(long)]
+        model: PathBuf,
+        /// The tokenizer the model was trained with (tok.bpe)
+        #[arg(long)]
+        tokenizer: PathBuf,
+        /// The config file; only [generate] is read (all optional)
+        #[arg(long)]
+        config: PathBuf,
+        /// The text to continue; empty starts a new document
+        #[arg(long, default_value = "")]
+        prompt: String,
+        /// Override [generate] max_tokens
+        #[arg(long)]
+        max_tokens: Option<usize>,
+        /// Override [generate] temperature (0: always the likeliest token)
+        #[arg(long)]
+        temperature: Option<f64>,
+        /// Override [generate] top_k (0: no cutoff)
+        #[arg(long)]
+        top_k: Option<usize>,
+        /// Override [generate] seed
+        #[arg(long)]
+        seed: Option<u64>,
+    },
     /// Show a checkpoint's metadata and tensors, and check them against its
     /// stored config.
     Inspect {
@@ -104,6 +134,27 @@ fn main() -> ExitCode {
             config,
             output,
         } => train_command(&model, &data, &config, &output),
+        Command::Generate {
+            model,
+            tokenizer,
+            config,
+            prompt,
+            max_tokens,
+            temperature,
+            top_k,
+            seed,
+        } => generate_command(
+            &model,
+            &tokenizer,
+            &config,
+            &prompt,
+            Overrides {
+                max_tokens,
+                temperature,
+                top_k,
+                seed,
+            },
+        ),
         Command::Inspect {
             checkpoint,
             verbose,
@@ -427,6 +478,157 @@ fn train_command(
     );
     let weights = &tensors[..state.params.mats.len()];
     println!("  weights fingerprint {}", weights_fingerprint(weights));
+    Ok(())
+}
+
+/// Command-line values that replace the config's [generate] ones.
+struct Overrides {
+    max_tokens: Option<usize>,
+    temperature: Option<f64>,
+    top_k: Option<usize>,
+    seed: Option<u64>,
+}
+
+fn generate_command(
+    model_path: &Path,
+    tok_path: &Path,
+    config_path: &Path,
+    prompt: &str,
+    over: Overrides,
+) -> Result<(), String> {
+    use std::io::Write;
+    // Check every input first, before doing any work.
+    check_readable(model_path, "checkpoint")?;
+    check_readable(tok_path, "tokenizer")?;
+    check_readable(config_path, "config")?;
+    let mut cfg = generate::GenerateConfig::load(config_path)?;
+    cfg.max_tokens = over.max_tokens.unwrap_or(cfg.max_tokens);
+    cfg.temperature = over.temperature.unwrap_or(cfg.temperature);
+    cfg.top_k = over.top_k.unwrap_or(cfg.top_k);
+    cfg.seed = over.seed.unwrap_or(cfg.seed);
+    cfg.check()?;
+
+    let ckpt = safetensors::read(model_path)?;
+    let meta = |k: &str| {
+        ckpt.metadata
+            .get(k)
+            .cloned()
+            .ok_or(format!("{}: no {k} in the metadata", model_path.display()))
+    };
+    if meta("format")? != FORMAT {
+        return Err(format!(
+            "{}: not a mini_transformer checkpoint",
+            model_path.display()
+        ));
+    }
+    let config = ModelConfig::from_toml(&meta("model")?)?;
+    let vocab: usize = meta("vocab_size")?
+        .parse()
+        .map_err(|_| "vocab_size isn't a number")?;
+    let problems = model::check_layout(&ckpt.tensors, &config, vocab);
+    if !problems.is_empty() {
+        return Err(format!("{}: {}", model_path.display(), problems.join("; ")));
+    }
+    let tok = TokenizerInfo::load(tok_path)?;
+    if hex(&tok.fingerprint) != meta("tokenizer_fingerprint")? {
+        return Err(format!(
+            "{} isn't the tokenizer {} was built with (fingerprints differ)",
+            tok_path.display(),
+            model_path.display()
+        ));
+    }
+    let encoder = tok.encoder()?;
+    let eos = tok.special_id("<|endoftext|>");
+    // Each training document ended with EOS, so EOS is also what comes
+    // just before a document's start: putting it first tells the model a
+    // new document begins here.
+    let mut ids: Vec<usize> = eos.into_iter().collect();
+    ids.extend(encoder.encode(prompt)?);
+    if ids.is_empty() {
+        return Err("an empty prompt needs a tokenizer with <|endoftext|>".into());
+    }
+
+    let weights: Vec<safetensors::Tensor> = ckpt
+        .tensors
+        .into_iter()
+        .filter(|t| !t.name.starts_with("adam."))
+        .collect();
+    let params = gpt::Params::<f32>::from_tensors(&weights);
+    let n: usize = params.mats.iter().map(|m| m.data.len()).sum();
+    println!("=== transformer generate ===");
+    println!(
+        "Model {}: {n} parameters, context {}, V = {vocab}{}",
+        model_path.display(),
+        config.context,
+        match ckpt.metadata.get("step") {
+            Some(s) => format!(", trained to step {s}"),
+            None => " (untrained)".into(),
+        }
+    );
+    println!(
+        "Sampling: temperature {}, top-k {}, seed {}, at most {} tokens",
+        cfg.temperature,
+        if cfg.top_k == 0 {
+            "off".to_string()
+        } else {
+            cfg.top_k.to_string()
+        },
+        cfg.seed,
+        cfg.max_tokens
+    );
+    println!(
+        "Prompt: {} token(s){}\n",
+        ids.len(),
+        if eos.is_some() {
+            ", starting with <|endoftext|>"
+        } else {
+            ""
+        }
+    );
+
+    let mut out = std::io::stdout().lock();
+    let _ = write!(out, "{prompt}");
+    let _ = out.flush();
+    let mut text = generate::Utf8Stream::default();
+    let mut g = generate::Generator::new(&params, &config);
+    let report = generate::generate(&mut g, &cfg, &ids, eos, |t| {
+        let s = text.push(encoder.token_bytes(t));
+        let _ = write!(out, "{s}");
+        let _ = out.flush();
+    });
+    let _ = writeln!(out, "{}", text.finish());
+    drop(out);
+
+    let made = report.generated.len();
+    println!(
+        "\n{}",
+        if report.stopped_at_eos {
+            format!("Stopped at <|endoftext|> after {made} tokens.")
+        } else {
+            format!("Stopped at the limit of {made} tokens.")
+        }
+    );
+    let prompt_in = report.prompt_tokens.min(config.context);
+    println!(
+        "  prefill: {prompt_in} tokens in {:.1} ms ({:.0} tokens/s)",
+        report.prefill_secs * 1e3,
+        prompt_in as f64 / report.prefill_secs.max(1e-9)
+    );
+    if made > 0 {
+        println!(
+            "  decode:  {made} tokens in {:.2} s ({:.0} tokens/s){}",
+            report.decode_secs,
+            made as f64 / report.decode_secs.max(1e-9),
+            if report.rebuilds > 0 {
+                format!(
+                    ", including {} rebuild(s) of the cache past the context",
+                    report.rebuilds
+                )
+            } else {
+                String::new()
+            }
+        );
+    }
     Ok(())
 }
 

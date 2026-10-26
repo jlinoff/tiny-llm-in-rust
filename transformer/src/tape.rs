@@ -85,7 +85,36 @@ const LN_EPS: f64 = 1e-5;
 const GELU_C: f64 = 0.797_884_560_802_865_4; // √(2/π)
 const GELU_A: f64 = 0.044_715;
 
-fn gelu<T: Float>(x: T) -> T {
+/// Layer norm of one row: x̂ = (x − mean)/√(variance + ε) into `xhat`,
+/// γ·x̂ + β into `out`; returns 1/√(variance + ε). Shared with generate's
+/// inference path, so both do exactly the same arithmetic.
+pub(crate) fn layer_norm_row<T: Float>(
+    row: &[T],
+    g: &[T],
+    b: &[T],
+    xhat: &mut [T],
+    out: &mut [T],
+) -> T {
+    let n = T::from_f64(row.len() as f64);
+    let mut mean = T::zero();
+    for &v in row {
+        mean += v;
+    }
+    mean = mean / n;
+    let mut var = T::zero();
+    for &v in row {
+        var += (v - mean) * (v - mean);
+    }
+    let inv = T::one() / (var / n + T::from_f64(LN_EPS)).sqrt();
+    for j in 0..row.len() {
+        let h = (row[j] - mean) * inv;
+        xhat[j] = h;
+        out[j] = g[j] * h + b[j];
+    }
+    inv
+}
+
+pub(crate) fn gelu<T: Float>(x: T) -> T {
     let (c, a, half) = (T::from_f64(GELU_C), T::from_f64(GELU_A), T::from_f64(0.5));
     half * x * (T::one() + (c * (x + a * x * x * x)).tanh())
 }
@@ -203,7 +232,6 @@ impl<T: Float> Tape<T> {
         let xm = self.value(x);
         let (g, b) = (&self.value(gamma).data, &self.value(beta).data);
         let cols = xm.cols;
-        let n = T::from_f64(cols as f64);
         let mut xhat = Mat::zeros(xm.rows, cols);
         let mut out = Mat::zeros(xm.rows, cols);
         // Each row is independent: in parallel, one row per task.
@@ -212,24 +240,7 @@ impl<T: Float> Tape<T> {
             .par_chunks_mut(cols)
             .zip(out.data.par_chunks_mut(cols))
             .zip(xm.data.par_chunks(cols))
-            .map(|((hrow, orow), row)| {
-                let mut mean = T::zero();
-                for &v in row {
-                    mean += v;
-                }
-                mean = mean / n;
-                let mut var = T::zero();
-                for &v in row {
-                    var += (v - mean) * (v - mean);
-                }
-                let inv = T::one() / (var / n + T::from_f64(LN_EPS)).sqrt();
-                for j in 0..cols {
-                    let h = (row[j] - mean) * inv;
-                    hrow[j] = h;
-                    orow[j] = g[j] * h + b[j];
-                }
-                inv
-            })
+            .map(|((hrow, orow), row)| layer_norm_row(row, g, b, hrow, orow))
             .collect();
         self.push(
             out,

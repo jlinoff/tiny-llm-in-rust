@@ -1,8 +1,9 @@
 # transformer
 
 The real model: a small GPT-style language model, and the LLM flow's steps 3
-to 6 in PLAN.md (build, train, finetune, generate). Steps 3 (build) and 4
-(train) are done.
+to 6 in PLAN.md (build, train, finetune, generate). Steps 3 (build), 4
+(train) and 6 (generate) are done; 6 was built before 5 on purpose (PLAN.md,
+"Order of work").
 
 Terms (tensor, checkpoint, safetensors, layer norm, …) are defined in
 [`../PLAN.md`](../PLAN.md#terms).
@@ -16,7 +17,8 @@ cargo test --release
 
 Rust 1.85 or later. Dependencies: `clap` (command line), `serde` with `toml`
 (the config) and `serde_json` (the safetensors header), `sha2` (the
-tokenizer fingerprint), and `rayon` (threads). The binary is
+tokenizer fingerprint), `fancy-regex` (the tokenizer's pre-tokenizer
+pattern, which needs a lookahead), and `rayon` (threads). The binary is
 `target/release/transformer`.
 
 Unlike attention/, which uses 64-bit floats so every number prints cleanly,
@@ -175,6 +177,55 @@ rising later. Each step now gets its own generator through SplitMix64's
 scrambling function (`Rng::stream`), and a test requires the windows of
 many steps to be as varied as random picks.
 
+## `transformer generate` (step 6)
+
+```
+transformer generate --model model.safetensors --tokenizer tok.bpe --config config.toml --prompt "Once upon a time"
+make generate PROMPT='The dog' GEN_ARGS='--temperature 0.5 --seed 7'
+```
+
+Inference: the model continues the prompt one token at a time, printing
+each as it's chosen, then reports the speed of the two phases, prefill (the
+prompt, all at once) and decode (one token at a time). Any checkpoint works:
+`model-init.safetensors` gives random tokens, a trained one gives text.
+
+- **Settings**: `[generate]` in config.toml, all optional: `max_tokens`
+  (200), `temperature` (0.8; 0 is greedy, always the likeliest token),
+  `top_k` (40; 0 for no cutoff), `seed` (1). Each can be overridden on the
+  command line (`--max-tokens`, `--temperature`, `--top-k`, `--seed`).
+  The same seed and prompt give the same text.
+- **The prompt** is encoded exactly as mini_bpe.py encodes (see Tests),
+  with `<|endoftext|>` put first: every training document ended with it,
+  so it marks the start of a new one. An empty prompt starts a story from
+  nothing. Generation stops when the model picks `<|endoftext|>`.
+- **The tokenizer** must be the one the model was built with: its
+  fingerprint is checked against the checkpoint's.
+- **The KV cache** (`src/generate.rs`): each block keeps the keys and values
+  of every position so far, so a new token computes only its own row. This
+  path doesn't use the tape, but it does the same arithmetic in the same
+  order, and a test requires its predictions to equal the training forward
+  pass's exactly, bit for bit, in f32 and f64. (Changing `x / total` to
+  `x · (1/total)` in the attention weights is enough to fail it.)
+- **Past the context length** there are no more positions, so when the
+  cache is full it's rebuilt from the last ¾ of the context and generation
+  continues: a sliding window. The cached keys and values can't simply be
+  shifted, because each includes its old position's embedding. The report
+  counts the rebuilds.
+- **Output bytes**: a token can end partway through a UTF-8 character, so
+  output waits until each character is complete.
+
+Greedy decoding (`--temperature 0`) tends to fall into a loop, repeating a
+phrase forever: once a phrase is the likeliest continuation of itself,
+nothing breaks the cycle. Sampling with a temperature avoids it.
+
+Speed, on the 2-core Linux machine with a 0.9M-parameter model: about 2,200
+tokens per second within the context, about half that past it (the
+rebuilds). Producing one token is a matrix-vector product per weight
+matrix, where each weight is read once and used once, so it runs at about
+a quarter of the matrix-matrix speed. Small products run on one thread:
+handing about 30 tiny jobs per token to the thread pool cost more than the
+work and halved the speed (`PARALLEL_MIN_WORK` in `src/tensor.rs`).
+
 ## `transformer inspect`
 
 ```
@@ -186,7 +237,7 @@ against the layout that config implies: every expected name present, with
 the right shape, and nothing unexpected. It ends with the weights
 fingerprint. `-v` lists every tensor.
 
-## The forward and backward passes (step 4, in progress)
+## The forward and backward passes (step 4)
 
 `src/gpt.rs` writes the model's forward pass for a batch of B sequences of T
 tokens, one row per token, on an automatic differentiation tape
@@ -271,7 +322,11 @@ starting shape with a small vocabulary, a 2-core Linux machine takes about
 - the tokenizer: for `tests/data/tiny.bpe` (written by mini_bpe.py), V and
   the fingerprint equal what Python computes
   (`tests/data/tiny.bpe.expected`); comments don't change the fingerprint,
-  merges do; bad merge lines are rejected
+  merges do; bad merge lines are rejected; encoding 19 texts gives exactly
+  Python's chunks and IDs (`tests/data/encode_cases.json`), including
+  accents, combining marks, other scripts, emoji, and the characters where
+  Python's `\w`, `\d` and `\s` differ from Rust's (see below); literal
+  `<|endoftext|>` text is not the special token
 - safetensors: an exact round trip, the header padding, rejection of
   truncated or padded files, and reading a file written by Hugging Face's
   library
@@ -294,12 +349,32 @@ starting shape with a small vocabulary, a 2-core Linux machine takes about
   text (loss from ln V to under 0.2); data from another tokenizer is
   refused; and 10 steps + checkpoint + resume + 10 steps gives exactly the
   weights and Adam state of 20 steps
+- generation: the KV cache gives exactly the training forward pass's
+  predictions (above); greedy and top-1 pick the likeliest token; sampling
+  frequencies match the softmax (200,000 draws, within 5 standard
+  deviations) and top-k never picks outside the k; generation is
+  reproducible for a seed and runs past the context; it stops at end of
+  text; output waits for whole UTF-8 characters; `[generate]` is optional
+  and checked
+
+**Python's regular expressions vs Rust's.** The pre-tokenizer pattern was
+written for Python's `re`, and the same pattern means something slightly
+different in Rust, found by the encoding test. `\w` in Python is letters,
+any kind of number (so "²", "½", "Ⅻ") and `_`; Rust's adds combining marks
+(so "e" plus a combining accent stays one chunk instead of two) and
+connector punctuation such as "‿". Python's `\s` also includes four old
+control characters, U+001C–U+001F. `python_classes` in `src/tokenizer.rs`
+rewrites each shorthand into an explicit Unicode class with Python's
+meaning before compiling. A remaining caveat: Python and the Rust crate
+each carry their own copy of the Unicode tables, so a character added in a
+newer Unicode version could still be classed differently.
 
 ## Source
 
-- `src/main.rs`: the command line, `build` and `inspect`
+- `src/main.rs`: the command line: `build`, `train`, `generate`, `inspect`, `bench`
 - `src/config.rs`: `config.toml`'s `[model]` section
-- `src/tokenizer.rs`: V and the fingerprint from `tok.bpe`
+- `src/tokenizer.rs`: V and the fingerprint from `tok.bpe`; encoding and
+  decoding, matching mini_bpe.py
 - `src/safetensors.rs`: the checkpoint format
 - `src/model.rs`: weight names, shapes, the parameter formula,
   initialization and the layout check
@@ -308,11 +383,12 @@ starting shape with a small vocabulary, a 2-core Linux machine takes about
 - `src/gpt.rs`: the model's forward pass, from a checkpoint's tensors
 - `src/data.rs`: reading `corpus.ids`, the validation split, and batches
 - `src/train.rs`: `[training]`, AdamW, the schedule, checkpoints, resuming
+- `src/generate.rs`: `[generate]`, the KV-cache inference path, sampling,
+  and the generation loop
 - `src/bench.rs`: the matrix-multiply benchmark and the training-step timing
 - `src/rng.rs`: the seeded random number generator (from attention/)
 
 ## Next
 
-Step 6, `transformer generate`: sample text from a trained checkpoint, one
-token at a time, with a temperature. Then the TinyStories run, and step 5,
-fine-tuning.
+The full TinyStories run (a bigger model, about a day or more of
+training), then step 5, fine-tuning.

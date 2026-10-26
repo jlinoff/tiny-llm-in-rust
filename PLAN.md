@@ -153,6 +153,9 @@ Grouped so that each definition uses only terms defined above it.
   by T before the softmax, exactly as temperature enters the Boltzmann
   distribution. Low values make the most likely next token dominate; higher
   values flatten the probabilities, so sampling picks more varied tokens.
+  Temperature 0 means **greedy** decoding: always the single likeliest token.
+  **Top-k**: sample only from the k likeliest tokens, so a long tail of
+  unlikely tokens can't be picked by chance.
 - **checkpoint**: a saved file of a model's weights (more in open decision 3).
 
 **word2vec**
@@ -379,17 +382,20 @@ This is post-training (see [Post-training](#post-training)).
   - `chat.safetensors` (or `model.safetensors`)
   - `tok.bpe`
   - a prompt
-  - config `[generate]`: temperature, maximum length
+  - config `[generate]`: maximum length, temperature, top-k, seed (all
+    optional; each can be overridden on the command line)
 - **Output:**
   - text
-- **Command** (proposed):
+- **Command:**
 
   ```
-  transformer generate --model chat.safetensors --tokenizer tok.bpe --config config.toml --prompt "Hello"
+  transformer generate --model model.safetensors --tokenizer tok.bpe --config config.toml --prompt "Once upon a time"
   ```
 
-  The output text is printed rather than written to a file.
-- **Status:** not started
+  The output text is printed rather than written to a file, as it's
+  generated.
+- **Status:** done (`transformer generate`, `make generate`). Built before
+  step 5, on purpose (see [Order of work](#order-of-work)).
 
 **What it does:** encodes the prompt, predicts a token ID, appends it, and
 repeats; then decodes the IDs back to text. With `model.safetensors` it continues the
@@ -439,6 +445,33 @@ times its training speed (the forward pass alone), would still manage
 about 75 tokens per second with a 128-token context, but only about 20
 with a 512-token context. Generation will build the KV cache: it's the
 standard technique, and worth seeing work.
+
+**How it's built.** The prompt is encoded in Rust (matching mini_bpe.py
+exactly, checked against Python's output for 19 cases), with
+`<|endoftext|>` put first: every training document ended with it, so it's
+also what comes just before a document's start. Generation stops when the
+model chooses `<|endoftext|>` or at the token limit. Inference doesn't use
+the training tape: it's a separate, leaner path with a KV cache. It does
+the same arithmetic in the same order, though, so a test can demand that
+its predictions equal the training forward pass's bit for bit, in f32 and
+f64. Past the context length the model has no more positions, so when the
+cache fills it's rebuilt from the most recent ¾ of the context (a sliding
+window); cached keys and values can't simply be shifted, because each was
+computed with its old position's embedding.
+
+**Measured** (the 0.9M-parameter test model, on the 2-core Linux machine
+where this was built; the M4 numbers belong in
+[The bench flow](#4-the-bench-flow) once run): about 2,200 tokens per
+second within the context, about 4 GFLOP/s of useful work, a quarter of
+the same machine's matrix-matrix speed. That's the matrix-vector limit
+above. Two findings:
+
+- Handing each small operation to the thread pool cost more than doing
+  it: per token there are about 30 small matrix products, and waking
+  another thread takes microseconds. Running products under 2¹⁸
+  multiply-adds on one thread doubled the speed.
+- Past the context, each rebuild re-reads 96 tokens every 32 generated,
+  which roughly halves the speed (about 1,000–1,300 tokens per second).
 
 So inference is cheap next to training. Spending days or a week of
 training to get a better model is a good trade: the result still
@@ -577,9 +610,10 @@ starting model:
   15,000 tokens per second, 40% of the ceiling
 
 Run it before planning a long training run; it's how open decision 6's
-time estimates were checked. When step 6 (generate) exists, its speed in
-generated tokens per second belongs here too (see
-[Step 6](#step-6-generate)).
+time estimates were checked.
+
+Generation speed (step 6) is printed by `make generate` itself, prefill and
+decode separately; on the M4: (to be measured).
 
 ## Special tokens
 
@@ -1509,7 +1543,7 @@ llm/
 | `tokenizer/` | LLM 1 tokenize, 2 encode; decode for 6 | steps 1 and 2 done (`mini_bpe.py`), with EOS; turn markers to do |
 | `word2vec/` | word2vec 1 train, 2 explore | done |
 | `attention/` | none: a learning exercise before `transformer/` | all 6 items of [its list](#where-each-part-is-built) done (`example`, `random`, `train`, `heads`, `block`, `induction`) |
-| `transformer/` | LLM 3 build, 4 train, 5 finetune, 6 generate | steps 3 and 4 done (`transformer build`, `train`, plus `inspect` and `bench`); generate next |
+| `transformer/` | LLM 3 build, 4 train, 5 finetune, 6 generate | steps 3, 4 and 6 done (`transformer build`, `train`, `generate`, plus `inspect` and `bench`); the TinyStories run next, then finetune |
 
 The Makefile in `llm/` drives the flow, with one target per step. Each target
 knows which files it needs, so `make train`, for example, first reruns any
@@ -1828,7 +1862,7 @@ text8, matching gensim (a widely used Python library with its own word2vec) at
    from hand-set weights to two blocks forming an induction head, and the
    automatic differentiation tape (decision 7), checked against the
    hand-written gradients of items 3 and 4 and used by items 5 and 6.
-4. `transformer/`: ~~build~~, ~~train~~ (done), then generate, then the
+4. `transformer/`: ~~build~~, ~~train~~, ~~generate~~ (done), then the
    TinyStories run, then finetune. This builds step 6 before step 5, on
    purpose: the step numbers follow the data through the flow, not the
    order of building. Generate works on any checkpoint, and it's the only

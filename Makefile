@@ -64,6 +64,23 @@ $(OUT)/model.safetensors: $(OUT)/model-init.safetensors $(OUT)/corpus.ids config
 	$(call hdr,train)
 	time $(TRANSFORMER) train --model $(OUT)/model-init.safetensors --data $(OUT)/corpus.ids --config config.toml -o $@
 
+
+# Step 6. generate (inference)
+# Always runs (nothing is written). Override the prompt or the sampling:
+#   make generate PROMPT='Once upon a time' GEN_ARGS='--temperature 0.5 --seed 7'
+# The model is required but deliberately not a prerequisite: it depends on
+# config.toml and the binary, so editing [generate] or rebuilding would
+# otherwise retrain it first.
+PROMPT ?= Once upon a time
+GEN_ARGS ?=
+
+.PHONY: generate
+generate: $(TRANSFORMER) ## Step 6: write text from PROMPT with the trained model (inference).
+	$(call hdr,$@)
+	@test -f $(OUT)/model.safetensors || { echo "no $(OUT)/model.safetensors: run make train first"; exit 1; }
+	$(TRANSFORMER) generate --model $(OUT)/model.safetensors --tokenizer $(OUT)/tok.bpe --config config.toml --prompt '$(PROMPT)' $(GEN_ARGS)
+
+
 # attention (the learning step before transformer/)
 ATTN       := attention/target/release/mini_attention
 ATTN_SRC   := attention/Cargo.toml $(wildcard attention/src/*.rs)
@@ -148,8 +165,10 @@ help:  ## This help message.
 		sed -e 's@^@   @'
 	@printf "\n\033[35;1m%s\033[0m\n" "Variables"
 	@printf "   %-18s  %s\n" "CORPUS" "$(CORPUS)"
+	@printf "   %-18s  %s\n" "GEN_ARGS" "$(GEN_ARGS)"
 	@printf "   %-18s  %s\n" "MERGES" "$(MERGES)"
 	@printf "   %-18s  %s\n" "OUT" "$(OUT)"
+	@printf "   %-18s  %s\n" "PROMPT" "$(PROMPT)"
 	@printf "   %-18s  %s\n" "W2V" "$(W2V)"
 	@printf "   %-18s  %s\n" "W2V_CORPUS" "$(W2V_CORPUS)"
 	@printf "   %-18s  %s\n" "W2V_ARGS" "$(W2V_ARGS)"

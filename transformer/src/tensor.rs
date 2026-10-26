@@ -84,6 +84,13 @@ pub struct Mat<T> {
 /// enough that handing out a block costs little.
 const BLOCK_ROWS: usize = 8;
 
+/// Below this many multiply-adds, a matrix product runs on the calling
+/// thread alone (generating one token makes many small products).
+pub const PARALLEL_MIN_WORK: usize = 1 << 18;
+
+/// Columns per task when C has too few rows to split by rows.
+const COLS_PER_TASK: usize = 64;
+
 impl<T: Float> Mat<T> {
     pub fn zeros(rows: usize, cols: usize) -> Mat<T> {
         Mat {
@@ -124,6 +131,38 @@ impl<T: Float> Mat<T> {
         let (k, m) = (self.cols, other.cols);
         let mut out = Mat::zeros(self.rows, m);
         if m == 0 || k == 0 {
+            return out;
+        }
+        if self.rows * k * m < PARALLEL_MIN_WORK {
+            // Too little work to be worth sharing out: handing a job to
+            // another thread costs microseconds, about as long as doing
+            // the job. Same loops, same order, so the same result.
+            for (c_row, a_row) in out.data.chunks_exact_mut(m).zip(self.data.chunks_exact(k)) {
+                for (&a, b_row) in a_row.iter().zip(other.data.chunks_exact(m)) {
+                    for (c, &b) in c_row.iter_mut().zip(b_row) {
+                        *c += a * b;
+                    }
+                }
+            }
+            return out;
+        }
+        if self.rows < BLOCK_ROWS {
+            // Too few rows to share out (generating one token at a time is
+            // a single row): split the columns of C instead. Each element
+            // is still summed over k in order, so the result is the same.
+            for (c_row, a_row) in out.data.chunks_exact_mut(m).zip(self.data.chunks_exact(k)) {
+                c_row
+                    .par_chunks_mut(COLS_PER_TASK)
+                    .enumerate()
+                    .for_each(|(blk, c_part)| {
+                        let j0 = blk * COLS_PER_TASK;
+                        for (&a, b_row) in a_row.iter().zip(other.data.chunks_exact(m)) {
+                            for (c, &b) in c_part.iter_mut().zip(&b_row[j0..]) {
+                                *c += a * b;
+                            }
+                        }
+                    });
+            }
             return out;
         }
         out.data
