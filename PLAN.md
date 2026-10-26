@@ -204,6 +204,13 @@ Grouped so that each definition uses only terms defined above it.
   differences**: nudge one weight by ±ε, measure how much the loss changes,
   and compare with the computed gradient.
 - **learning rate**: how large each adjustment is.
+- **N, D**: in training-cost and scaling formulas, N is the number of
+  parameters and D the number of tokens trained on (D = steps × B × T),
+  as in "training costs about 6·N·D operations". D counts tokens
+  processed, not the corpus's length: the corpus is a sequence of tokens
+  with no symbol of its own here, and D ÷ (its length) is the number of
+  passes over it, which can be less than or more than 1. (Its distinct
+  tokens are at most V.)
 - **step**, **batch size**, **B**: one adjustment; the number of examples
   (for pretraining, windows of T tokens) used to compute it.
 - **epoch**: one full pass over the training data.
