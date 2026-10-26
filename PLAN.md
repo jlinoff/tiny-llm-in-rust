@@ -334,10 +334,11 @@ the step-0, untrained checkpoints of its Pythia models.)
 - **Inputs:**
   - `model-init.safetensors`
   - `corpus.ids`
-  - config `[training]`: learning rate, steps, batch size
+  - config `[training]`: learning rate, steps, batch size, and the schedule
+    (see [Configuration](#configuration))
 - **Output:**
   - `model.safetensors`: the same weights, pretrained
-- **Command** (proposed):
+- **Command:**
 
   ```
   transformer train --model model-init.safetensors --data corpus.ids --config config.toml -o model.safetensors
@@ -1359,10 +1360,13 @@ format for settings files.) Each stage reads only its own section:
 
 ```
 [model]        # read by build:    d, layers, heads, context length, d_ff, seed
-[training]     # read by train:    learning rate, steps, batch size
-[finetune]     # read by finetune: learning rate, steps
-[generate]     # read by generate: temperature, maximum length
+[training]     # read by train:    learning rate, steps, batch size, schedule, …
+[finetune]     # read by finetune: learning rate, steps (not yet built)
+[generate]     # read by generate: maximum length, temperature, top-k, seed
 ```
+
+Every key is described below, and again in a comment beside it in
+`config.toml`.
 
 **Terminology.** In machine learning, **parameters** means the learned
 weights (a "7-billion-parameter model" has 7 billion of them). The settings we
@@ -1381,9 +1385,9 @@ holds parameters.
 | d_ff | the inner width of each FFN sublayer, conventionally 4 × d |
 | seed | the random seed for the initial weights |
 
-Starting values will be chosen for a model that trains in minutes on a laptop
-(roughly d = 128, 4 layers, 4 heads, context 128) and then varied as
-experiments.
+The starting values in `config.toml` (d = 128, 4 layers, 4 heads, context
+128, d_ff = 512) give a model that trains in minutes on a laptop; they're
+meant to be varied as experiments.
 
 **Counting the parameters.** Write L for layers, T for the context length,
 and V for the vocabulary size (from `tok.bpe`). For the GPT-2 design (learned
@@ -1425,7 +1429,10 @@ Makefile's default tokenizer (1,000 merges, so V = 256 + 1000 + 1 = 1,257):
 - N = 970,624, just under a million
 
 The embeddings are 18% of that model, against 32% of GPT-2 small: the
-smaller d is, the larger the share the embedding table takes.
+smaller d is, the larger the share the embedding table takes. With the
+TinyStories tokenizer (3,839 merges, so V = 4,096), the embeddings grow to
+540,672 and N = 1,334,016, 41% of it embeddings: the count `make build`
+printed for the first TinyStories run.
 
 If `transformer/` makes different choices, adjust N:
 
@@ -1435,6 +1442,64 @@ If `transformer/` makes different choices, adjust N:
 - RMSNorm instead of layer norm (a scale but no shift): subtract
   L·2d + d
 - separate output layer instead of weight tying: add V·d
+
+**The `[training]` hyperparameters** (read by step 4, train). Only the
+first three are required; the defaults are those in `config.toml`.
+
+- `learning_rate` (0.002): the peak learning rate, reached after the
+  warm-up.
+- `steps` (2000): train until this step. It counts from the start of
+  training, across resumes, so resuming a run that stopped at step 2000
+  with `steps = 3000` trains 1,000 more. The schedule below is stretched
+  over `steps`, so changing it changes the learning rate at every step.
+- `batch_size` (16): sequences per step, each a full context long, so a
+  step sees `batch_size` × context tokens (2,048 here).
+- `warmup_steps` (100): the **warm-up**, over which the learning rate rises
+  linearly from 0 to its peak. At the start Adam's running averages hold
+  almost no history, so its first steps are unreliable; small steps keep
+  them from doing damage.
+- `min_lr_fraction` (0.1): after the warm-up the learning rate follows a
+  **cosine schedule**, half a cosine wave from the peak down to this
+  fraction of it at the last step: large steps early to make progress,
+  small ones late to settle into a minimum.
+- `weight_decay` (0.1): AdamW's **weight decay**, which shrinks every
+  weight slightly toward 0 each step (by learning rate × decay × the
+  weight), so weights grow large only where the gradient keeps pushing
+  them. **AdamW** is Adam with this decay applied directly to the weights
+  rather than added to the gradient (Loshchilov and Hutter 2019). Applied
+  to matrices and embeddings, not to biases or layer norm's scale and
+  shift.
+- `grad_clip` (1.0): **gradient clipping**. If the length of the whole
+  gradient (all weights together, as one vector) exceeds this, it's scaled
+  down to it, so one unusual batch can't throw the weights far. 0 turns it
+  off.
+- `beta1` (0.9), `beta2` (0.95): Adam's averaging rates for the gradient
+  and for its square. 0.9 averages over roughly the last 10 steps, 0.95
+  over the last 20. (Adam's original paper used 0.999 for the second;
+  GPT-style training uses 0.95, which adapts faster.)
+- `seed` (1): for choosing the training windows. Each step's windows
+  depend only on the seed and the step number, so a resumed run trains on
+  exactly the same batches.
+- `validation_fraction` (0.05): the last 5% of `corpus.ids`, held out and
+  never trained on. Its loss, the **validation loss**, measures how well
+  the model predicts text it hasn't seen; a training loss falling while the
+  validation loss rises means memorizing rather than learning.
+- `log_every` (50): print a progress line every this many steps.
+- `eval_every` (250): measure the validation loss every this many steps.
+- `eval_batches` (10): validation batches per measurement, the same fixed
+  windows every time, so measurements are comparable across steps.
+- `checkpoint_every` (500): write a checkpoint every this many steps, so a
+  stopped run loses at most this much work.
+
+**The `[generate]` hyperparameters** (read by step 6, generate). All are
+optional, and each can be overridden on the command line (`--max-tokens`,
+`--temperature`, `--top-k`, `--seed`).
+
+- `max_tokens` (200): stop after this many new tokens, if the model hasn't
+  ended the text with `<|endoftext|>` first.
+- `temperature` (0.8): see [temperature](#terms). 0 is greedy decoding.
+- `top_k` (40): see [top-k](#terms). 0 turns the cutoff off.
+- `seed` (1): for the sampling. The same seed and prompt give the same text.
 
 **Guaranteeing consistency.** d and the other `[model]` values must be the
 same in every stage. Rather than every stage rereading the config (someone
@@ -2001,6 +2066,10 @@ for language research.
 - Kingma, D. P., & Ba, J. (2015). "Adam: A Method for Stochastic
   Optimization." ICLR. [arXiv:1412.6980](https://arxiv.org/abs/1412.6980). The
   optimizer that nearly every transformer is trained with.
+- Loshchilov, I., & Hutter, F. (2019). "Decoupled Weight Decay
+  Regularization." ICLR. [arXiv:1711.05101](https://arxiv.org/abs/1711.05101).
+  AdamW: weight decay applied to the weights directly, not through Adam's
+  gradient averages; the version `transformer train` uses.
 - Holtzman, A., Buys, J., Du, L., Forbes, M., & Choi, Y. (2020). "The Curious
   Case of Neural Text Degeneration." ICLR.
   [arXiv:1904.09751](https://arxiv.org/abs/1904.09751). How to choose the next
@@ -2039,6 +2108,10 @@ for language research.
   al. (2022). "Training Compute-Optimal Large Language Models."
   [arXiv:2203.15556](https://arxiv.org/abs/2203.15556). How model size, data
   and compute trade off; useful for choosing toy-model sizes.
+- Muennighoff, N., et al. (2023). "Scaling Data-Constrained Language
+  Models." NeurIPS. [arXiv:2305.16264](https://arxiv.org/abs/2305.16264).
+  Repeating the training data for up to about 4 passes is nearly as good
+  as fresh data; beyond that the gains fade quickly.
 
 ### Post-training (`transformer finetune`)
 
