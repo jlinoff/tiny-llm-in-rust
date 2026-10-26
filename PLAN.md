@@ -40,6 +40,7 @@ names are explained where they first appear.
 - [Configuration](#configuration)
 - [Post-training](#post-training)
 - [LoRA: fine-tuning a low-rank adapter](#lora-fine-tuning-a-low-rank-adapter)
+- [What production models add, and why it's left out](#what-production-models-add-and-why-its-left-out)
 - [Conventions for all code](#conventions-for-all-code)
 - [Where the stages live](#where-the-stages-live)
 - [word2vec: the historical side branch](#word2vec-the-historical-side-branch)
@@ -1654,9 +1655,10 @@ always sees the same scale, which keeps training stable.
 The **post-norm** design of the original 2017 transformer *did* normalize the
 stream itself after every sublayer, repeatedly discarding its scale. It
 worked, but deep stacks were harder to train, which is one reason pre-norm
-took over. Many recent models (Llama, for example) use **RMSNorm** (root mean
-square normalization), which only divides by the vector's scale without
-subtracting the mean, discarding even less.
+took over. Many recent models (Llama, Meta's family of open-weight models,
+for example) use **RMSNorm** (root mean square normalization), which only
+divides by the vector's scale without subtracting the mean, discarding even
+less.
 
 #### Position information
 
@@ -2045,6 +2047,83 @@ make lora lora-evaluate        # the same two steps, then the evaluation
   full fine-tuning step here, without the paper's 25% speedup. Skipping
   them would save roughly a third of each backward pass. The savings here
   are in the trained numbers, the optimizer's state and the file.
+
+## What production models add, and why it's left out
+
+`transformer/` is a real LLM (the GPT-2 design, trained and fine-tuned the
+way real ones are), at a small scale. Production models since GPT-2 add a
+set of refinements. None changes the concepts in this plan; most pay off
+only at a scale or on hardware we don't have. For each: what it is, what it
+buys, and why it isn't here.
+
+**Architecture**
+
+- **RoPE (rotary position embedding).** Instead of adding a learned position
+  vector to each token, it rotates each query and key, pair of components by
+  pair, by an angle proportional to the token's position, so the score
+  q·k depends on the two tokens' *relative* positions. It has no
+  parameters and handles long contexts, even somewhat beyond those trained
+  on. Not here: at context 256 a learned table works as well, and it's the
+  simpler idea to see first. (It would save the T·d position table.)
+- **RMSNorm.** Layer norm without the mean subtraction and the shift β: it
+  only divides by the root mean square. A little cheaper, the same quality
+  in practice. Not here: the saving is negligible at our size, and layer
+  norm is the classic form.
+- **SwiGLU feed-forward.** The FFN's GELU replaced by a gated unit: two
+  input matrices, one output passed through a nonlinearity (Swish,
+  x·sigmoid(x), a smooth relative of GELU) and used
+  to multiply the other, element by element (Shazeer 2020). Somewhat better
+  quality for the same number of parameters. Not here: a modest gain, at
+  the cost of a third matrix and one more idea.
+- **No bias vectors** (as in Llama). Slightly simpler and no worse at scale.
+  Not here: GPT-2 has them, and they cost almost nothing.
+- **Grouped-query attention.** Several query heads share one key and value
+  head, which shrinks the KV cache that generation keeps for every earlier
+  token. That matters for big models with long contexts serving many users
+  at once. Not here: our KV cache is a few megabytes.
+- **Mixture of experts.** Many FFNs per block, with a small learned router
+  sending each token to only one or two of them: far more parameters for
+  the same computation per token. Not here: it pays off only at very large
+  scale, and balancing the router is its own research problem.
+- **Long contexts** (thousands to millions of tokens), with attention
+  computed in ways that avoid materializing the T × T matrix. Not here:
+  TinyStories' stories fit in 256.
+
+**Engineering**
+
+- **Mixed precision** (16-bit or 8-bit floats for most arithmetic, 32-bit
+  where accuracy matters). It roughly doubles or quadruples speed on GPUs
+  built for it. Not here: on the CPU, f32 is the natural type, and the
+  exactness tests (the KV cache, LoRA's merge) rely on f32 and f64.
+- **Fused attention kernels** (such as FlashAttention). The same arithmetic,
+  reordered so the T × T matrix never goes to the GPU's main memory: a
+  large saving in memory traffic. Not here: an optimization for GPU memory
+  hierarchies, not a different algorithm.
+- **Distributed training**: the batch split across thousands of GPUs (data
+  parallelism), each matrix split across several (tensor parallelism), the
+  layers split into stages (pipeline parallelism), optimizer state sharded
+  (ZeRO, the Zero Redundancy Optimizer). Not here: one machine.
+- **Larger vocabularies** (100,000 to 200,000 tokens) for many languages,
+  code and symbols. Not here: TinyStories needs few; at d = 128, a large V
+  would make the embedding table most of the model.
+
+**Training and post-training**
+
+- **Data at scale**: trillions of tokens from the web, books and code,
+  deduplicated (beyond our exact-match `--dedup`) and filtered for quality.
+  Not here: the point is a corpus a laptop can train on, and TinyStories
+  was designed for exactly that.
+- **Preference tuning** (RLHF or DPO; see [Post-training](#post-training)).
+  Not here: it needs preference data and a base model capable enough to
+  produce answers worth comparing.
+
+**Inference**
+
+- **Quantization** (weights stored as 8-bit or 4-bit integers), **batching
+  many users' requests together**, and **speculative decoding** (a small
+  model drafts several tokens and the large one checks them in one pass).
+  Not here: they make serving large models cheaper, and our model already
+  generates faster than anyone reads.
 
 ## Conventions for all code
 
@@ -2713,6 +2792,12 @@ for language research.
   Model is Secretly a Reward Model." NeurIPS.
   [arXiv:2305.18290](https://arxiv.org/abs/2305.18290). DPO: preference tuning
   without a separate reward model.
+- Su, J., et al. (2021). "RoFormer: Enhanced Transformer with Rotary
+  Position Embedding." [arXiv:2104.09864](https://arxiv.org/abs/2104.09864).
+  RoPE. And Shazeer, N. (2020). "GLU Variants Improve Transformer."
+  [arXiv:2002.05202](https://arxiv.org/abs/2002.05202). SwiGLU. Both are in
+  most current open models (see
+  [What production models add](#what-production-models-add-and-why-its-left-out)).
 - Hu, E. J., et al. (2021). "LoRA: Low-Rank Adaptation of Large Language
   Models." [arXiv:2106.09685](https://arxiv.org/abs/2106.09685). Fine-tuning
   as a low-rank update to frozen weights; `finetune --lora-rank`.
