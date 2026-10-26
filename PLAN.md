@@ -131,6 +131,9 @@ Grouped so that each definition uses only terms defined above it.
   writing each formula by hand. In the reverse-mode form used for training,
   every operation records itself on a **tape** as the forward pass runs, and
   backpropagation replays the tape in reverse (open decision 7).
+- **self-supervised learning**: training where the correct answers come from
+  the data itself, such as the next token of a text, so nothing has to be
+  labelled by hand. Pretraining a language model is self-supervised.
 - **inference**: running a trained model to get its output, with the
   weights fixed: no backward pass, no optimizer. For a language model,
   inference is generation, one token at a time (step 6). The term contrasts
@@ -329,10 +332,13 @@ with `--allow-special` (done; see [Special tokens](#special-tokens)).
   the file is read back and verified, and is read correctly by Hugging
   Face's own safetensors library.
 
-**What it does:** creates the **whole** model: the V × d embedding table,
+**What it does:** creates the **whole** model: the V × d token embedding
+table, the T × d position table (one learned row per position, as in GPT-2),
 every block's attention and FFN sublayers, and the output layer, all randomly
-initialized. One seed gives one starting model, so experiments are
-reproducible. (Precedent: EleutherAI, a nonprofit AI research group, publishes
+initialized. **No text is involved**: the only thing build takes from the
+tokenizer is V, the number of rows the embedding table needs. The first time
+any token passes through the model is step 4's first training step. One seed
+gives one starting model, so experiments are reproducible. (Precedent: EleutherAI, a nonprofit AI research group, publishes
 the step-0, untrained checkpoints of its Pythia models.)
 
 ##### Step 4: train
@@ -363,6 +369,47 @@ the step-0, untrained checkpoints of its Pythia models.)
 prediction with the real one, and adjusts every weight slightly, including
 the embedding rows. It reads the model's shape from the checkpoint, never from
 the config. The tokenizer is not involved; it already did its work in step 2.
+
+**One training step, concretely.** The whole of `corpus.ids` is in memory
+from the start; nothing streams in token by token. With the config's
+`batch_size` B = 8 and context T = 256:
+
+```
+corpus.ids (all in memory)
+   │  pick B random windows of T + 1 tokens
+   ▼
+inputs  = tokens 0 … T−1 of each window     targets = tokens 1 … T (each input's next token)
+   │
+   ▼
+x = E[inputs] + P[0 … T−1]      B·T = 2,048 rows of d numbers, one per token
+   │  every block (masked attention, FFN), on all 2,048 rows at once
+   ▼
+V scores per row → softmax → a probability for every possible next token
+   │
+   ▼
+loss = mean of −ln p(the true next token), over all 2,048 positions
+   │  backward: every weight's gradient; then AdamW moves every weight a little
+   ▼
+next step: B new random windows
+```
+
+- **All positions at once.** Each token is one row of a matrix, and every
+  layer processes all rows in one operation. Position t can't use later
+  tokens because the **causal mask** zeroes its attention to them, not
+  because it waits for them (see [What runs in parallel](#what-runs-in-parallel)).
+- **Heads split each token's vector, not the tokens.** Every head sees every
+  token of the window, at the same time ([How heads fit in](#how-heads-fit-in)).
+- **The first step starts from chance.** With random weights, all V scores
+  in a row are nearly equal, so each true next token gets probability about
+  1/V and the loss starts near ln V (8.32 for V = 4,096). The errors
+  themselves say which way to move each weight; there's nothing to
+  bootstrap, because the targets come free with the text. That's
+  **self-supervised** learning.
+- **Only the rows used get a gradient.** A token absent from this batch
+  leaves its row of E unchanged this step (apart from weight decay).
+
+Tokens arrive one at a time only in generation (step 6), where each token
+must be chosen before the next can be computed.
 
 ##### Step 5: finetune
 
@@ -1425,8 +1472,9 @@ earlier tokens wouldn't change a token's weighted sum. So the model is told
 each token's position. GPT-2 adds a learned **position embedding** (one
 vector per position, up to the context length) to each token's embedding;
 many newer models instead rotate the queries and keys by an angle that
-depends on position (RoPE, rotary position embedding). Which we use is a
-decision for `transformer/`.
+depends on position (RoPE, rotary position embedding). `transformer/` uses
+GPT-2's learned table, P (T × d), random at build and trained like any other
+weight; each token's input is x = E[token] + P[position].
 
 #### Where each part is built
 
