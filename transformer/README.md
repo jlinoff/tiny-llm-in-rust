@@ -2,8 +2,9 @@
 
 The real model: a small GPT-style language model, and the LLM flow's steps 3
 to 6 in PLAN.md (build, train, finetune, generate). All four are done, plus
-`evaluate` (measuring fine-tuning), `inspect` and `bench`. Step 6 was built
-before step 5 on purpose (PLAN.md, "Order of work").
+`evaluate` (measuring fine-tuning), `merge` (LoRA adapters), `inspect` and
+`bench`. Step 6 was built before step 5 on purpose (PLAN.md, "Order of
+work").
 
 Terms (tensor, checkpoint, safetensors, layer norm, …) are defined in
 [`../PLAN.md`](../PLAN.md#terms).
@@ -207,6 +208,41 @@ document is `<|user|> request <|assistant|> story <|end|>`.
 - **Checks**: the tokenizer must be the model's and have the turn markers;
   the data must come from the same tokenizer; every conversation must have
   the shape above (one request, one reply).
+
+### Fine-tuning with LoRA
+
+```
+transformer finetune --model model.safetensors --data chat.ids --tokenizer tok.bpe --config config.toml --lora-rank 8 --learning-rate 0.003 -o chat-lora.safetensors
+transformer merge --model model.safetensors --adapter chat-lora.safetensors -o chat-lora-merged.safetensors
+make lora lora-evaluate
+```
+
+With `--lora-rank R` (or `lora_rank` in `[finetune]`), the model's weights
+are frozen, and only a low-rank adapter is trained: for each adapted matrix
+W, W' = W + (α/R)·A·B, with A (d_in × R) random at first and B (R × d_out)
+zero, so training starts exactly at the pretrained model (`src/lora.rs`;
+PLAN.md, "LoRA").
+
+- **Which matrices:** attention's four in every block by default;
+  `lora_targets` in `[finetune]` can pick any of `attn.w_q`, `attn.w_k`,
+  `attn.w_v`, `attn.w_o`, `ffn.w1`, `ffn.w2`.
+- **α** (`--lora-alpha`, `lora_alpha`) scales the update by α/R; it
+  defaults to 2R.
+- **The output is an adapter**, not a model: A and B for each matrix, with
+  Adam's state, `kind = lora` and the base model's SHA-256 in its metadata.
+  `--adapter FILE` resumes one (with the same rank and α, on the same
+  model). `inspect` shows what an adapter holds; `generate` and `evaluate`
+  refuse one and say to merge it.
+- **`transformer merge`** folds the adapter into the base model, W + (α/R)·A·B,
+  writing an ordinary checkpoint (`kind = merged`) with the base model's
+  names and shapes. It uses the same operations, in the same order, as the
+  forward pass with the adapter, so the predictions are identical.
+- **LoRA usually wants a higher learning rate** than full fine-tuning, since
+  only a few numbers are moving; `make lora` passes `LORA_ARGS`
+  (default `--lora-rank 8 --learning-rate 0.003`).
+- **Cost:** the tape still computes the frozen weights' gradients (and
+  discards them), so a LoRA step takes about as long as a full fine-tuning
+  step. The savings are in the trained numbers, Adam's state and the file.
 
 ## `transformer evaluate`
 
@@ -442,6 +478,13 @@ starting shape with a small vocabulary, a 2-core Linux machine takes about
 - fine-tuning data: conversations parse into rows with only the reply and
   `<|end|>` scored, too-long ones are left out and counted, and malformed
   ones (no request, no reply, no end, two turns) are refused
+- LoRA: a fresh adapter (B = 0) gives exactly the base model's
+  predictions; every number of A and B against finite differences; the
+  merged model predicts exactly what base plus adapter does, in f32; LoRA
+  training changes only the adapter, lowers the loss, and resumes exactly
+  (10 + 10 steps = 20, bit for bit); adapters round-trip and are checked
+  against the base model's shapes; the tape's scale operation against
+  finite differences
 - evaluation: whole-word matching and the tokens it covers, parsing
   `chat-eval.tsv` and `chat-eval.txt`, the tally of requested and control
   words, the sign test's values, and per-token story losses equal to the
@@ -468,8 +511,8 @@ newer Unicode version could still be classed differently.
 
 ## Source
 
-- `src/main.rs`: the command line: `build`, `train`, `finetune`, `generate`,
-  `evaluate`, `inspect`, `bench`
+- `src/main.rs`: the command line: `build`, `train`, `finetune`, `merge`,
+  `generate`, `evaluate`, `inspect`, `bench`
 - `src/config.rs`: `config.toml`'s `[model]` section
 - `src/tokenizer.rs`: V and the fingerprint from `tok.bpe`; encoding and
   decoding, matching mini_bpe.py
@@ -486,6 +529,7 @@ newer Unicode version could still be classed differently.
 - `src/generate.rs`: `[generate]`, the KV-cache inference path, sampling,
   and the generation loop
 - `src/evaluate.rs`: word matching and the tally for `evaluate`
+- `src/lora.rs`: LoRA adapters: creating, merging, checking
 - `src/bench.rs`: the matrix-multiply benchmark and the training-step timing
 - `src/rng.rs`: the seeded random number generator (from attention/)
 

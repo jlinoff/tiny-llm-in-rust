@@ -39,6 +39,7 @@ names are explained where they first appear.
   - [Where each part is built](#where-each-part-is-built)
 - [Configuration](#configuration)
 - [Post-training](#post-training)
+- [LoRA: fine-tuning a low-rank adapter](#lora-fine-tuning-a-low-rank-adapter)
 - [Conventions for all code](#conventions-for-all-code)
 - [Where the stages live](#where-the-stages-live)
 - [word2vec: the historical side branch](#word2vec-the-historical-side-branch)
@@ -223,6 +224,10 @@ Grouped so that each definition uses only terms defined above it.
   of a sequence's predictions, such as only the assistant's reply in a
   conversation; the other positions are still read as context but aren't
   trained to be predicted.
+- **LoRA (low-rank adaptation)**: fine-tuning that freezes the pretrained
+  weights and trains, for each chosen weight matrix W, only a small update
+  of low rank r, W + (α/r)·A·B; the result is a small **adapter** file (see
+  [LoRA](#lora-fine-tuning-a-low-rank-adapter)).
 - **temperature**: a text-generation setting τ (often written T, but here T
   is the context length): the output scores are divided by τ before the
   softmax, exactly as temperature enters the Boltzmann
@@ -552,7 +557,9 @@ the last ¾ of T and continues (a sliding window).
   ```
 - **Status:** done (`chat/make_chat.py`, `transformer finetune`,
   `transformer evaluate`, `generate --chat`; `make finetune`, `make evaluate`,
-  `make chat`).
+  `make chat`), with LoRA as an option (`finetune --lora-rank`,
+  `transformer merge`, `make lora`; see
+  [LoRA](#lora-fine-tuning-a-low-rank-adapter)).
 
 **What it does:** runs the same training loop as step 4, continuing from the
 pretrained model on example conversations, with a lower learning rate.
@@ -1888,7 +1895,14 @@ first three are required; the defaults are those in `config.toml`.
 keys as `[training]`, with fine-tuning's own values: a lower learning rate
 (0.0005), fewer steps, and here `batch_size` counts conversations, each one
 row padded to the context length. `validation_fraction` holds out the last
-conversations.
+conversations. Three more keys, all optional, choose LoRA instead of
+fine-tuning every weight (see [LoRA](#lora-fine-tuning-a-low-rank-adapter));
+`finetune`'s `--lora-rank` and `--lora-alpha` override them:
+
+- `lora_rank` (0): the adapter's rank r; 0 fine-tunes every weight.
+- `lora_alpha` (2r): the adapter's update is scaled by α/r.
+- `lora_targets` (attention's four): which matrices of each block to adapt,
+  from `attn.w_q`, `attn.w_k`, `attn.w_v`, `attn.w_o`, `ffn.w1`, `ffn.w2`.
 
 **The `[generate]` hyperparameters** (read by step 6, generate). All are
 optional, and each can be overridden on the command line (`--max-tokens`,
@@ -1942,6 +1956,72 @@ that never occur in ordinary text, such as `<|user|>`, `<|assistant|>` and
 locally plausible but often meaningless, and fine-tuning it will mostly teach
 it the turn-taking format, not helpfulness. That's still the point: the
 mechanics are the same as in a production model, only the scale differs.
+
+## LoRA: fine-tuning a low-rank adapter
+
+Fine-tuning every weight, as step 5 does by default, changes each weight
+matrix W by some update ΔW. **LoRA** (low-rank adaptation; Hu et al. 2021)
+bets that ΔW has low rank, that it is close to a sum of a few outer
+products, and learns it in that form. For each chosen W (d_in × d_out):
+
+```
+W' = W + (α/r) · A·B      W: frozen, the pretrained weights
+                          A: d_in × r, starts random (std 1/√d_in)
+                          B: r × d_out, starts at zero
+```
+
+Only A and B are trained. B starts at zero, so training starts exactly at
+the pretrained model. α/r is a fixed scale (α defaults to 2r), so that
+changing r doesn't change how big the update starts out.
+
+**Why it's used so widely.** For open-weight models it's the standard way
+to fine-tune: Hugging Face's PEFT library ("parameter-efficient
+fine-tuning") is built around it, and QLoRA (Dettmers et al. 2023) stores
+the frozen model at 4-bit precision, putting fine-tuning of large models on
+a single consumer GPU. The savings:
+
+- **Trained numbers:** 2·d·r per matrix instead of d². For the full run's
+  model (d = 256, r = 8), 4,096 instead of 65,536; for a large model
+  (d = 4,096), 65,536 instead of 16.8M.
+- **Optimizer memory:** Adam keeps two averages per trained number, so 1% of
+  the trained numbers means 1% of the optimizer's state.
+- **Files:** the result is a small adapter; one base model can serve many,
+  one per task, and an adapter can be folded into W (`merge`), giving an
+  ordinary model with no extra cost at inference.
+
+**Why it works:** fine-tuning a pretrained model needs only a small
+subspace of the weights. Li et al. (2018) trained networks in random
+subspaces and found a few hundred dimensions enough for 90% of full
+performance ("intrinsic dimension"); Aghajanyan et al. (2021) found the
+same for fine-tuning language models, and the larger the pretrained model,
+the fewer dimensions it needed. LoRA is known to fall short when the new
+task needs much new knowledge rather than a new behavior.
+
+**In `transformer/`:**
+
+```
+transformer finetune --model model.safetensors --data chat.ids --tokenizer tok.bpe --config config.toml --lora-rank 8 --learning-rate 0.003 -o chat-lora.safetensors
+transformer merge --model model.safetensors --adapter chat-lora.safetensors -o chat-lora-merged.safetensors
+make lora lora-evaluate        # the same two steps, then the evaluation
+```
+
+- `finetune --lora-rank R` freezes the model and trains a rank-R adapter
+  on attention's four matrices in every block (or `lora_targets`), with the
+  rest of `[finetune]` as usual. The adapter file holds A and B (and
+  Adam's state, so it resumes with `--adapter`), plus the base model's
+  SHA-256, so it can't be applied to the wrong model.
+- `merge` folds it in: W + (α/r)·A·B, with the same operations in the same
+  order as the forward pass, so the merged model's predictions equal the
+  base-plus-adapter's bit for bit (a test checks this, in f32).
+- `generate` and `evaluate` take the merged model; given an adapter, they
+  say to merge it first.
+- Tests: a fresh adapter (B = 0) leaves the model's predictions exactly
+  unchanged; every number of A and B against finite differences; training
+  changes only the adapter, lowers the loss, and resumes exactly.
+- One honest limit: our tape still computes gradients for the frozen
+  weights (they're simply unused), so a LoRA step costs about as much as a
+  full fine-tuning step here. The savings are in the trained numbers, the
+  optimizer's state and the file.
 
 ## Conventions for all code
 
@@ -2403,8 +2483,9 @@ caffeinate -i transformer/target/release/transformer train --model out-full/mode
    from hand-set weights to two blocks forming an induction head, and the
    automatic differentiation tape (decision 7), checked against the
    hand-written gradients of items 3 and 4 and used by items 5 and 6.
-4. `transformer/`: ~~build~~, ~~train~~, ~~generate~~, ~~finetune~~ (done),
-   then [the full TinyStories run](#the-full-tinystories-run) (prepared). This builds step 6 before step 5, on
+4. `transformer/`: ~~build~~, ~~train~~, ~~generate~~, ~~finetune~~ (done,
+   with ~~LoRA~~ as an option), then
+   [the full TinyStories run](#the-full-tinystories-run) (running). This builds step 6 before step 5, on
    purpose: the step numbers follow the data through the flow, not the
    order of building. Generate works on any checkpoint, and it's the only
    way to judge either model: fine-tuning's effect (answering in turns)
@@ -2606,6 +2687,19 @@ for language research.
   Model is Secretly a Reward Model." NeurIPS.
   [arXiv:2305.18290](https://arxiv.org/abs/2305.18290). DPO: preference tuning
   without a separate reward model.
+- Hu, E. J., et al. (2021). "LoRA: Low-Rank Adaptation of Large Language
+  Models." [arXiv:2106.09685](https://arxiv.org/abs/2106.09685). Fine-tuning
+  as a low-rank update to frozen weights; `finetune --lora-rank`.
+- Dettmers, T., et al. (2023). "QLoRA: Efficient Finetuning of Quantized
+  LLMs." NeurIPS. [arXiv:2305.14314](https://arxiv.org/abs/2305.14314). LoRA
+  on a 4-bit frozen model: large models fine-tuned on one GPU.
+- Li, C., Farkhoor, H., Liu, R., & Yosinski, J. (2018). "Measuring the
+  Intrinsic Dimension of Objective Landscapes." ICLR.
+  [arXiv:1804.08838](https://arxiv.org/abs/1804.08838), and Aghajanyan, A.,
+  Zettlemoyer, L., & Gupta, S. (2021). "Intrinsic Dimensionality Explains the
+  Effectiveness of Language Model Fine-Tuning." ACL.
+  [arXiv:2012.13255](https://arxiv.org/abs/2012.13255). Why a low-rank update
+  is enough.
 - Zhou, C., et al. (2023). "LIMA: Less Is More for Alignment." NeurIPS.
   [arXiv:2305.11206](https://arxiv.org/abs/2305.11206). Fine-tuning on only
   1,000 carefully chosen conversations works well, encouraging for a small

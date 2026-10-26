@@ -9,8 +9,10 @@
 
 use crate::config::ModelConfig;
 use crate::data::{self, Batch, Corpus};
-use crate::gpt::{forward, Params};
+use crate::gpt::{forward, forward_with, Params};
+use crate::lora::Lora;
 use crate::safetensors::{self, Tensor};
+use crate::tape::Var;
 use crate::tensor::Mat;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -62,6 +64,22 @@ pub struct TrainingConfig {
     pub eval_batches: usize,
     #[serde(default = "d_ckpt")]
     pub checkpoint_every: u64,
+    /// Fine-tuning only: LoRA's rank r; 0 (the default) fine-tunes every
+    /// weight. With r > 0, the pretrained weights are frozen and only a
+    /// low-rank adapter is trained (src/lora.rs).
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub lora_rank: usize,
+    /// LoRA's α: the adapter's update is scaled by α/r. Default 2r.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lora_alpha: Option<f64>,
+    /// The matrices to adapt in every block, from lora::TARGETS. Default
+    /// (empty): attention's four, attn.w_q, attn.w_k, attn.w_v, attn.w_o.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub lora_targets: Vec<String>,
+}
+
+fn is_zero(n: &usize) -> bool {
+    *n == 0
 }
 
 fn d_warmup() -> u64 {
@@ -121,6 +139,12 @@ impl TrainingConfig {
             .map_err(|e| format!("config {} [{section}]: {e}", path.display()))?;
         t.check()
             .map_err(|e| e.replace("[training]", &format!("[{section}]")))?;
+        if section == "training" && t.lora_rank > 0 {
+            return Err(format!(
+                "config {} [training]: lora_rank is for fine-tuning only",
+                path.display()
+            ));
+        }
         Ok(t)
     }
 
@@ -144,7 +168,37 @@ impl TrainingConfig {
                 "[training] log_every, eval_every and checkpoint_every must be at least 1".into(),
             );
         }
+        if self.lora_alpha.is_some_and(|a| a.is_nan() || a <= 0.0) {
+            return Err("[training] lora_alpha must be positive".into());
+        }
+        if let Some(t) = self
+            .lora_targets
+            .iter()
+            .find(|t| !crate::lora::TARGETS.contains(&t.as_str()))
+        {
+            return Err(format!(
+                "[training] lora_targets: unknown matrix {t:?} (choose from {})",
+                crate::lora::TARGETS.join(", ")
+            ));
+        }
         Ok(())
+    }
+
+    /// LoRA's α (default 2r).
+    pub fn alpha(&self) -> f64 {
+        self.lora_alpha.unwrap_or(2.0 * self.lora_rank as f64)
+    }
+
+    /// The matrices LoRA adapts in each block.
+    pub fn targets(&self) -> Vec<String> {
+        if self.lora_targets.is_empty() {
+            ["attn.w_q", "attn.w_k", "attn.w_v", "attn.w_o"]
+                .iter()
+                .map(|s| s.to_string())
+                .collect()
+        } else {
+            self.lora_targets.clone()
+        }
     }
 
     /// The learning rate at a step (counting from 1): a linear warm-up, then
@@ -164,14 +218,48 @@ impl TrainingConfig {
 /// Everything training needs: the weights, Adam's running averages for
 /// each weight (m, the gradient; v, its square), and how far it has got.
 pub struct State {
+    /// The weights being trained: the whole model, or with LoRA the adapter.
     pub params: Params<f32>,
+    /// With LoRA: the frozen pretrained model the adapter applies to.
+    pub frozen: Option<Frozen>,
     pub m: Vec<Mat<f32>>,
     pub v: Vec<Mat<f32>>,
     pub step: u64,
     pub tokens: u64,
 }
 
+/// LoRA's frozen base model and the adapter's shape.
+pub struct Frozen {
+    pub base: Params<f32>,
+    pub rank: usize,
+    pub alpha: f64,
+}
+
 impl State {
+    /// The forward pass on a batch, with the adapter if there is one.
+    /// Returns it with the leaves of the weights being trained.
+    fn forward(
+        &self,
+        c: &ModelConfig,
+        batch: &Batch,
+        seq: usize,
+    ) -> (crate::gpt::Forward<f32>, Vec<Var>) {
+        match &self.frozen {
+            None => {
+                let f = forward(&self.params, c, &batch.inputs, &batch.targets, seq);
+                let leaves = f.leaves.clone();
+                (f, leaves)
+            }
+            Some(fr) => {
+                let l = Lora::from_params(&self.params, fr.rank, fr.alpha)
+                    .expect("the adapter was checked when loaded");
+                let f = forward_with(&fr.base, Some(&l), c, &batch.inputs, &batch.targets, seq);
+                let leaves = f.lora_leaves.clone();
+                (f, leaves)
+            }
+        }
+    }
+
     /// From a checkpoint's tensors: resume if it holds Adam's state
     /// (`adam.m.<name>`, `adam.v.<name>`), otherwise start from step 0.
     pub fn from_checkpoint(f: &safetensors::File) -> Result<State, String> {
@@ -210,6 +298,7 @@ impl State {
         };
         Ok(match (find("adam.m."), find("adam.v.")) {
             (Some(m), Some(v)) => State {
+                frozen: None,
                 step: num("step"),
                 tokens: num("tokens_seen"),
                 params,
@@ -217,6 +306,7 @@ impl State {
                 v,
             },
             _ => State {
+                frozen: None,
                 m: zeros(),
                 v: zeros(),
                 step: 0,
@@ -258,10 +348,10 @@ pub fn step(
     batch: &Batch,
     seq: usize,
 ) -> (f64, f64) {
-    let mut f = forward(&state.params, c, &batch.inputs, &batch.targets, seq);
+    let (mut f, leaves) = state.forward(c, batch, seq);
     let loss = f.tape.value(f.loss).data[0] as f64;
     f.tape.backward(f.loss);
-    let grads: Vec<Mat<f32>> = f.leaves.iter().map(|&l| f.tape.take_grad(l)).collect();
+    let grads: Vec<Mat<f32>> = leaves.iter().map(|&l| f.tape.take_grad(l)).collect();
 
     // The gradient's overall length, all weights together (summed in a fixed
     // order, in f64), and clipping.
@@ -321,7 +411,7 @@ pub fn validation_loss(
     let total: f64 = batches
         .iter()
         .map(|b| {
-            let f = forward(&state.params, c, &b.inputs, &b.targets, seq);
+            let (f, _) = state.forward(c, b, seq);
             f.tape.value(f.loss).data[0] as f64
         })
         .sum();
@@ -652,6 +742,107 @@ mod tests {
         assert_eq!(straight.tokens, resumed.tokens);
         assert_eq!(straight.tensors(), resumed.tensors()); // bit for bit
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// LoRA training changes only the adapter, lowers the loss, and resumes
+    /// exactly: 10 steps + checkpoint + 10 steps = 20 steps, bit for bit.
+    #[test]
+    fn lora_trains_the_adapter_only_and_resumes_exactly() {
+        let c = tiny_model();
+        let vocab = 30;
+        let ids: Vec<u32> = (0..2000u32)
+            .map(|i| (i * 7 + i / 13) % vocab as u32)
+            .collect();
+        let pretrained = run(
+            fresh(&c, vocab),
+            &c,
+            &training(40),
+            &ids,
+            &std::env::temp_dir().join(format!("mt_lora_base_{}", std::process::id())),
+            &test_prov(),
+            |_| {},
+        )
+        .unwrap();
+        let base = pretrained.params.clone();
+        let lora_state = || {
+            let l = Lora::new(
+                &c,
+                &base,
+                2,
+                4.0,
+                &["attn.w_q".into(), "attn.w_v".into()],
+                1,
+            );
+            let p = l.to_params();
+            let zeros = || p.mats.iter().map(|m| Mat::zeros(m.rows, m.cols)).collect();
+            State {
+                m: zeros(),
+                v: zeros(),
+                params: p,
+                frozen: Some(Frozen {
+                    base: base.clone(),
+                    rank: 2,
+                    alpha: 4.0,
+                }),
+                step: 0,
+                tokens: 0,
+            }
+        };
+        let dir = std::env::temp_dir().join(format!("mt_lora_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut prov = test_prov();
+        prov.kind = "lora";
+        let before = validation_loss(
+            &lora_state(),
+            &c,
+            &[data::train_batch(&ids, 8, 16, 9, 1)],
+            16,
+        )
+        .unwrap();
+        let straight = run(
+            lora_state(),
+            &c,
+            &training(20),
+            &ids,
+            &dir.join("a"),
+            &prov,
+            |_| {},
+        )
+        .unwrap();
+        let after =
+            validation_loss(&straight, &c, &[data::train_batch(&ids, 8, 16, 9, 1)], 16).unwrap();
+        assert!(after < before, "loss {before} -> {after}");
+        assert_eq!(straight.frozen.as_ref().unwrap().base.mats, base.mats); // untouched
+
+        let half = dir.join("b");
+        run(lora_state(), &c, &training(10), &ids, &half, &prov, |_| {}).unwrap();
+        let mut resumed = State::from_checkpoint(&safetensors::read(&half).unwrap()).unwrap();
+        resumed.frozen = lora_state().frozen;
+        assert_eq!(resumed.step, 10);
+        let resumed = run(
+            resumed,
+            &c,
+            &training(20),
+            &ids,
+            &dir.join("c"),
+            &prov,
+            |_| {},
+        )
+        .unwrap();
+        assert_eq!(straight.tensors(), resumed.tensors()); // adapter and Adam's state, bit for bit
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn test_prov() -> Provenance {
+        Provenance {
+            kind: "train",
+            base: BTreeMap::new(),
+            training_toml: String::new(),
+            data_file: "test".into(),
+            data_sha256: String::new(),
+            parent_file: String::new(),
+            parent_sha256: String::new(),
+        }
     }
 
     #[test]

@@ -41,14 +41,19 @@ $(OUT)/corpus.ids: $(OUT)/tok.bpe $(CORPUS) tokenizer/mini_bpe.py | $(OUT)
 $(OUT):
 	mkdir -p $@
 
-# Step 3: build. Rebuilt when the tokenizer, the config or the Rust source changes.
+# Step 3: build. Rebuilt when the tokenizer or the config changes.
+# The transformer binary is an order-only prerequisite (after the |) of every
+# model file: make builds it if it's out of date, but a rebuilt binary doesn't
+# make existing models out of date, so new code never retrains a model by
+# itself. (After changing how models are built or trained, rebuild them on
+# purpose: delete the file, or make -B.)
 TRANSFORMER     := transformer/target/release/transformer
 TRANSFORMER_SRC := transformer/Cargo.toml $(wildcard transformer/src/*.rs)
 
 .PHONY: build
 build: $(OUT)/model-init.safetensors ## Step 3: create the model with random weights.
 
-$(OUT)/model-init.safetensors: $(OUT)/tok.bpe $(CONFIG) $(TRANSFORMER) | $(OUT)
+$(OUT)/model-init.safetensors: $(OUT)/tok.bpe $(CONFIG) | $(OUT) $(TRANSFORMER)
 	$(call hdr,build)
 	$(TRANSFORMER) build --tokenizer $(OUT)/tok.bpe --config $(CONFIG) -o $@
 
@@ -66,7 +71,7 @@ bench: $(TRANSFORMER) $(OUT)/model-init.safetensors ## Measure matrix-multiply s
 .PHONY: train
 train: $(OUT)/model.safetensors ## Step 4: train the model on corpus.ids.
 
-$(OUT)/model.safetensors: $(OUT)/model-init.safetensors $(OUT)/corpus.ids $(CONFIG) $(TRANSFORMER) | $(OUT)
+$(OUT)/model.safetensors: $(OUT)/model-init.safetensors $(OUT)/corpus.ids $(CONFIG) | $(OUT) $(TRANSFORMER)
 	$(call hdr,train)
 	time $(TRANSFORMER) train --model $(OUT)/model-init.safetensors --data $(OUT)/corpus.ids --config $(CONFIG) -o $@
 
@@ -90,9 +95,33 @@ $(OUT)/chat.ids: $(OUT)/chat.txt $(OUT)/tok.bpe tokenizer/mini_bpe.py | $(OUT)
 .PHONY: finetune
 finetune: $(OUT)/chat.safetensors ## Step 5: fine-tune the trained model on conversations.
 
-$(OUT)/chat.safetensors: $(OUT)/model.safetensors $(OUT)/chat.ids $(CONFIG) $(TRANSFORMER) | $(OUT)
+$(OUT)/chat.safetensors: $(OUT)/model.safetensors $(OUT)/chat.ids $(CONFIG) | $(OUT) $(TRANSFORMER)
 	$(call hdr,finetune)
 	time $(TRANSFORMER) finetune --model $(OUT)/model.safetensors --data $(OUT)/chat.ids --tokenizer $(OUT)/tok.bpe --config $(CONFIG) -o $@
+
+# Step 5 with LoRA (PLAN.md, "LoRA: fine-tuning a low-rank adapter"): the
+# same conversations and [finetune] settings, but the model is frozen and
+# only a small adapter is trained (chat-lora.safetensors), then folded into
+# the model (chat-lora-merged.safetensors) for generate and evaluate.
+# LORA_ARGS: the rank, and a learning rate (LoRA usually wants a higher one).
+LORA_ARGS ?= --lora-rank 8 --learning-rate 0.003
+
+$(OUT)/chat-lora.safetensors: $(OUT)/model.safetensors $(OUT)/chat.ids $(CONFIG) | $(OUT) $(TRANSFORMER)
+	$(call hdr,finetune with LoRA)
+	time $(TRANSFORMER) finetune --model $(OUT)/model.safetensors --data $(OUT)/chat.ids --tokenizer $(OUT)/tok.bpe --config $(CONFIG) $(LORA_ARGS) -o $@
+
+$(OUT)/chat-lora-merged.safetensors: $(OUT)/model.safetensors $(OUT)/chat-lora.safetensors | $(OUT) $(TRANSFORMER)
+	$(call hdr,merge)
+	$(TRANSFORMER) merge --model $(OUT)/model.safetensors --adapter $(OUT)/chat-lora.safetensors -o $@
+
+.PHONY: lora
+lora: $(OUT)/chat-lora-merged.safetensors ## Step 5 with LoRA: train a low-rank adapter, then merge it.
+
+.PHONY: lora-evaluate
+lora-evaluate: $(TRANSFORMER) $(OUT)/chat-eval.tsv $(OUT)/chat-eval.txt ## Measure the LoRA-tuned model, as evaluate does.
+	@test -f $(OUT)/chat-lora-merged.safetensors || { echo "no $(OUT)/chat-lora-merged.safetensors: run make lora first"; exit 1; }
+	$(call hdr,evaluate LoRA)
+	$(TRANSFORMER) evaluate --model $(OUT)/chat-lora-merged.safetensors --tokenizer $(OUT)/tok.bpe --config $(CONFIG) --requests $(OUT)/chat-eval.tsv --paired $(OUT)/chat-eval.txt --chat $(EVAL_ARGS)
 
 # How much the models use the requests: the pretrained model (requests as
 # plain text) against the fine-tuned one (as conversations). Each run does
@@ -110,11 +139,14 @@ evaluate: $(TRANSFORMER) $(OUT)/chat-eval.tsv $(OUT)/chat-eval.txt ## Measure fi
 	$(TRANSFORMER) evaluate --model $(OUT)/chat.safetensors --tokenizer $(OUT)/tok.bpe --config $(CONFIG) --requests $(OUT)/chat-eval.tsv --paired $(OUT)/chat-eval.txt --chat $(EVAL_ARGS)
 
 # Talk to the fine-tuned model: make chat PROMPT='Write a story with the words frog, bell and egg.'
+# CHAT_MODEL picks another, such as the LoRA one: CHAT_MODEL=out/chat-lora-merged.safetensors
+CHAT_MODEL ?= $(OUT)/chat.safetensors
+
 .PHONY: chat
 chat: $(TRANSFORMER) ## Step 6 with the fine-tuned model: PROMPT is the request.
 	$(call hdr,$@)
-	@test -f $(OUT)/chat.safetensors || { echo "no $(OUT)/chat.safetensors: run make finetune first"; exit 1; }
-	$(TRANSFORMER) generate --model $(OUT)/chat.safetensors --tokenizer $(OUT)/tok.bpe --config $(CONFIG) --chat --prompt '$(PROMPT)' $(GEN_ARGS)
+	@test -f $(CHAT_MODEL) || { echo "no $(CHAT_MODEL): run make finetune first"; exit 1; }
+	$(TRANSFORMER) generate --model $(CHAT_MODEL) --tokenizer $(OUT)/tok.bpe --config $(CONFIG) --chat --prompt '$(PROMPT)' $(GEN_ARGS)
 
 # Step 6. generate (inference)
 # Always runs (nothing is written). Override the prompt or the sampling:
@@ -137,12 +169,13 @@ generate: $(TRANSFORMER) ## Step 6: write text from PROMPT with the trained mode
 # config-full.toml, about a day of training. Any target with full- in front
 # runs with these settings, its files in out-full/ (which make clean leaves
 # alone): make full-bench, full-train, full-finetune, full-evaluate,
-# full-chat. For a day-long run: caffeinate -i make full-train
+# full-chat, full-lora, full-lora-evaluate. For a day-long run:
+# caffeinate -i make full-train
 FULL_VARS = OUT=out-full CORPUS=data/TinyStoriesV2-GPT4-train.txt \
 	TOK_CORPUS=data/TinyStoriesV2-GPT4-valid.txt CONFIG=config-full.toml \
 	CHAT_ARGS='--max-stories 200000 --eval-fraction 0.004'
 
-full-%: data/TinyStoriesV2-GPT4-train.txt data/TinyStoriesV2-GPT4-valid.txt ## The full run (PLAN.md): full-bench, full-train, full-finetune, full-evaluate, full-chat
+full-%: data/TinyStoriesV2-GPT4-train.txt data/TinyStoriesV2-GPT4-valid.txt ## The full run (PLAN.md): full-bench, full-train, full-finetune, full-evaluate, full-chat, full-lora
 	$(MAKE) $* $(FULL_VARS)
 
 # attention (the learning step before transformer/)
@@ -240,10 +273,12 @@ help:  ## This help message.
 		sed -e 's@^@   @'
 	@printf "\n\033[35;1m%s\033[0m\n" "Variables"
 	@printf "   %-18s  %s\n" "CHAT_ARGS" "$(CHAT_ARGS)"
+	@printf "   %-18s  %s\n" "CHAT_MODEL" "$(CHAT_MODEL)"
 	@printf "   %-18s  %s\n" "CONFIG" "$(CONFIG)"
 	@printf "   %-18s  %s\n" "CORPUS" "$(CORPUS)"
 	@printf "   %-18s  %s\n" "EVAL_ARGS" "$(EVAL_ARGS)"
 	@printf "   %-18s  %s\n" "GEN_ARGS" "$(GEN_ARGS)"
+	@printf "   %-18s  %s\n" "LORA_ARGS" "$(LORA_ARGS)"
 	@printf "   %-18s  %s\n" "MERGES" "$(MERGES)"
 	@printf "   %-18s  %s\n" "OUT" "$(OUT)"
 	@printf "   %-18s  %s\n" "PROMPT" "$(PROMPT)"

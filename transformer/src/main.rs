@@ -1,7 +1,9 @@
 //! transformer: the LLM flow's steps 3–6 (PLAN.md, "The flows"). So far:
 //!   build     step 3: create the model with random weights
 //!   train     step 4: train it on token IDs (resumable)
-//!   finetune  step 5: train it further on conversations (chat.ids)
+//!   finetune  step 5: train it further on conversations (chat.ids), all
+//!             weights or (--lora-rank) a low-rank adapter
+//!   merge     fold a LoRA adapter into its base model
 //!   generate  step 6: write text from a prompt (inference)
 //!   evaluate  measure how often generated stories use requested words
 //!   inspect   show what a checkpoint holds, and check it against its config
@@ -13,6 +15,7 @@ mod data;
 mod evaluate;
 mod generate;
 mod gpt;
+mod lora;
 mod model;
 mod rng;
 mod safetensors;
@@ -95,7 +98,35 @@ enum Command {
         /// The config file; only [finetune] is read
         #[arg(long)]
         config: PathBuf,
-        /// The checkpoint to write (chat.safetensors)
+        /// The checkpoint to write (chat.safetensors; with LoRA, the adapter,
+        /// such as chat-lora.safetensors)
+        #[arg(short, long)]
+        output: PathBuf,
+        /// LoRA: train only a rank-R adapter, the model frozen (overrides
+        /// [finetune] lora_rank; 0 fine-tunes every weight)
+        #[arg(long)]
+        lora_rank: Option<usize>,
+        /// LoRA's α: the update is scaled by α/R (overrides [finetune]
+        /// lora_alpha; default 2R)
+        #[arg(long)]
+        lora_alpha: Option<f64>,
+        /// Override [finetune] learning_rate
+        #[arg(long)]
+        learning_rate: Option<f64>,
+        /// LoRA: resume this adapter (made by finetune from the same --model)
+        #[arg(long)]
+        adapter: Option<PathBuf>,
+    },
+    /// Fold a LoRA adapter into its base model, giving an ordinary checkpoint
+    /// of the original shape (for generate and evaluate).
+    Merge {
+        /// The base model the adapter was trained on (model.safetensors)
+        #[arg(long)]
+        model: PathBuf,
+        /// The adapter (chat-lora.safetensors)
+        #[arg(long)]
+        adapter: PathBuf,
+        /// The merged checkpoint to write
         #[arg(short, long)]
         output: PathBuf,
     },
@@ -211,7 +242,28 @@ fn main() -> ExitCode {
             tokenizer,
             config,
             output,
-        } => finetune_command(&model, &data, &tokenizer, &config, &output),
+            lora_rank,
+            lora_alpha,
+            learning_rate,
+            adapter,
+        } => finetune_command(
+            &model,
+            &data,
+            &tokenizer,
+            &config,
+            &output,
+            FinetuneOptions {
+                lora_rank,
+                lora_alpha,
+                learning_rate,
+                adapter,
+            },
+        ),
+        Command::Merge {
+            model,
+            adapter,
+            output,
+        } => merge_command(&model, &adapter, &output),
         Command::Evaluate {
             model,
             tokenizer,
@@ -323,6 +375,15 @@ fn weights_fingerprint(tensors: &[safetensors::Tensor]) -> String {
         }
     }
     hex(&h.finalize())
+}
+
+/// A byte count for people: "512 bytes", "37 kB", "1.4 MB".
+fn size_text(bytes: usize) -> String {
+    match bytes {
+        0..=999 => format!("{bytes} bytes"),
+        1_000..=999_999 => format!("{:.0} kB", bytes as f64 / 1e3),
+        _ => format!("{:.1} MB", bytes as f64 / 1e6),
+    }
 }
 
 fn same_file(a: &Path, b: &Path) -> bool {
@@ -624,8 +685,17 @@ impl Loaded {
     /// "untrained", "trained to step N" or "fine-tuned for N steps".
     fn describe(&self) -> String {
         let step = self.ckpt.metadata.get("step");
+        let rank = self
+            .ckpt
+            .metadata
+            .get("lora_rank")
+            .cloned()
+            .unwrap_or_default();
         match (self.ckpt.metadata.get("kind").map(String::as_str), step) {
             (Some("finetune"), Some(s)) => format!("fine-tuned for {s} steps"),
+            (Some("merged"), Some(s)) => {
+                format!("fine-tuned with a rank-{rank} LoRA adapter for {s} steps, merged")
+            }
             (_, Some(s)) => format!("trained to step {s}"),
             _ => "untrained".into(),
         }
@@ -650,6 +720,12 @@ fn load_checkpoint(path: &Path) -> Result<Loaded, String> {
     if l.meta("format")? != FORMAT {
         return Err(format!(
             "{}: not a mini_transformer checkpoint",
+            path.display()
+        ));
+    }
+    if l.ckpt.metadata.get("kind").map(String::as_str) == Some("lora") {
+        return Err(format!(
+            "{} is a LoRA adapter, not a whole model: fold it into its base model first (transformer merge)",
             path.display()
         ));
     }
@@ -857,12 +933,21 @@ fn generate_command(
     Ok(())
 }
 
+/// Command-line values that replace or add to the config's [finetune].
+struct FinetuneOptions {
+    lora_rank: Option<usize>,
+    lora_alpha: Option<f64>,
+    learning_rate: Option<f64>,
+    adapter: Option<PathBuf>,
+}
+
 fn finetune_command(
     model_path: &Path,
     data_path: &Path,
     tok_path: &Path,
     config_path: &Path,
     output: &Path,
+    opts: FinetuneOptions,
 ) -> Result<(), String> {
     // Check every input and output first, before doing any work. As with
     // train, the output may be the input checkpoint (resuming in place).
@@ -870,7 +955,15 @@ fn finetune_command(
     check_readable(data_path, "data")?;
     check_readable(tok_path, "tokenizer")?;
     check_readable(config_path, "config")?;
-    for input in [data_path, tok_path, config_path] {
+    if let Some(a) = &opts.adapter {
+        check_readable(a, "adapter")?;
+    }
+    for input in [data_path, tok_path, config_path, model_path] {
+        // The model may be the output only when resuming full fine-tuning
+        // in place; a LoRA adapter must not overwrite its base.
+        if input == model_path && (opts.lora_rank.unwrap_or(0) == 0 && opts.adapter.is_none()) {
+            continue;
+        }
         if same_file(input, output) {
             return Err(format!(
                 "output {} would overwrite an input",
@@ -885,7 +978,21 @@ fn finetune_command(
     let m = markers(&tok)?;
     let corpus = data::Corpus::load(data_path)?;
     train::check_data(&corpus, model.vocab, &model.meta("tokenizer_fingerprint")?)?;
-    let tcfg = train::TrainingConfig::load_section(config_path, "finetune")?;
+    let mut tcfg = train::TrainingConfig::load_section(config_path, "finetune")?;
+    if let Some(r) = opts.lora_rank {
+        tcfg.lora_rank = r;
+    }
+    if opts.lora_alpha.is_some() {
+        tcfg.lora_alpha = opts.lora_alpha;
+    }
+    if let Some(lr) = opts.learning_rate {
+        tcfg.learning_rate = lr;
+    }
+    tcfg.check()?;
+    let lora = tcfg.lora_rank > 0;
+    if opts.adapter.is_some() && !lora {
+        return Err("--adapter resumes a LoRA run: give --lora-rank too".into());
+    }
     let config = model.config.clone();
     let seq = config.context;
     let convs = data::Conversations::parse(&corpus.ids, &m, seq)
@@ -905,8 +1012,13 @@ fn finetune_command(
     // pretraining's gradients, not these). From a fine-tuning checkpoint:
     // resume.
     let parent_kind = model.ckpt.metadata.get("kind").cloned().unwrap_or_default();
-    let mut state = train::State::from_checkpoint(&model.ckpt)?;
-    if parent_kind != "finetune" {
+    let model_sha = sha256_file(model_path)?;
+    let mut state = if lora {
+        lora_state(&model, &model_sha, &tcfg, opts.adapter.as_deref())?
+    } else {
+        train::State::from_checkpoint(&model.ckpt)?
+    };
+    if !lora && parent_kind != "finetune" {
         state.step = 0;
         state.tokens = 0;
         for a in state.m.iter_mut().chain(state.v.iter_mut()) {
@@ -929,13 +1041,31 @@ fn finetune_command(
         .sum();
     let all_tokens: usize = convs.rows.iter().map(|r| r.len() - 1).sum();
     let n: usize = state.params.mats.iter().map(|w| w.data.len()).sum();
-    println!("=== transformer finetune ===");
+    let n_model = model::formula(&config, model.vocab);
     println!(
-        "Model {}: {n} parameters, context {seq}, V = {}, {}",
+        "=== transformer finetune{} ===",
+        if lora { " (LoRA)" } else { "" }
+    );
+    println!(
+        "Model {}: {n_model} parameters, context {seq}, V = {}, {}",
         model_path.display(),
         model.vocab,
         model.describe()
     );
+    if lora {
+        println!(
+            "LoRA adapter: rank {}, α {} (updates scaled by {}), on {} in each of {} blocks",
+            tcfg.lora_rank,
+            tcfg.alpha(),
+            tcfg.alpha() / tcfg.lora_rank as f64,
+            tcfg.targets().join(", "),
+            config.layers
+        );
+        println!(
+            "  {n} trained numbers ({:.2}% of the model's); the model's own weights are frozen",
+            100.0 * n as f64 / n_model as f64
+        );
+    }
     if state.step > 0 {
         println!("  resuming at fine-tuning step {}", state.step);
     }
@@ -994,14 +1124,21 @@ fn finetune_command(
     for k in RUN_KEYS {
         base.remove(k);
     }
+    if lora {
+        base.insert("lora_rank".into(), tcfg.lora_rank.to_string());
+        base.insert("lora_alpha".into(), tcfg.alpha().to_string());
+        base.insert("lora_targets".into(), tcfg.targets().join(","));
+        base.insert("base_file".into(), model_path.display().to_string());
+        base.insert("base_sha256".into(), model_sha.clone());
+    }
     let prov = train::Provenance {
-        kind: "finetune",
+        kind: if lora { "lora" } else { "finetune" },
         base,
         training_toml: toml::to_string(&tcfg).expect("a flat struct always serializes"),
         data_file: data_path.display().to_string(),
         data_sha256: sha256_file(data_path)?,
         parent_file: model_path.display().to_string(),
-        parent_sha256: sha256_file(model_path)?,
+        parent_sha256: model_sha,
     };
     let start = std::time::Instant::now();
     let batches =
@@ -1036,8 +1173,170 @@ fn finetune_command(
         "Wrote {} with Adam's state (resumable); read back and verified.",
         output.display()
     );
+    if lora {
+        println!(
+            "  a LoRA adapter, {n} numbers ({} of weights, {} with Adam's state); to use it:",
+            size_text(4 * n),
+            size_text(12 * n)
+        );
+        println!(
+            "  transformer merge --model {} --adapter {} -o merged.safetensors",
+            model_path.display(),
+            output.display()
+        );
+    }
     let weights = &tensors[..state.params.mats.len()];
     println!("  weights fingerprint {}", weights_fingerprint(weights));
+    Ok(())
+}
+
+/// The training state for a LoRA run: a fresh adapter on the model, or the
+/// adapter given to resume (which must have been made from this very model).
+fn lora_state(
+    model: &Loaded,
+    model_sha: &str,
+    tcfg: &train::TrainingConfig,
+    adapter: Option<&Path>,
+) -> Result<train::State, String> {
+    let base = model.params();
+    let (rank, alpha) = (tcfg.lora_rank, tcfg.alpha());
+    let state = match adapter {
+        None => {
+            let l = lora::Lora::new(
+                &model.config,
+                &base,
+                rank,
+                alpha,
+                &tcfg.targets(),
+                tcfg.seed,
+            );
+            let zeros = || {
+                l.to_params()
+                    .mats
+                    .iter()
+                    .map(|m| tensor::Mat::zeros(m.rows, m.cols))
+                    .collect()
+            };
+            train::State {
+                params: l.to_params(),
+                frozen: None,
+                m: zeros(),
+                v: zeros(),
+                step: 0,
+                tokens: 0,
+            }
+        }
+        Some(path) => {
+            let f = safetensors::read(path)?;
+            let meta = |k: &str| f.metadata.get(k).cloned().unwrap_or_default();
+            if meta("kind") != "lora" {
+                return Err(format!("{} is not a LoRA adapter", path.display()));
+            }
+            if meta("base_sha256") != model_sha {
+                return Err(format!(
+                    "{} was trained on a different model than {} (checksums differ)",
+                    path.display(),
+                    model.path.display()
+                ));
+            }
+            if meta("lora_rank") != rank.to_string() || meta("lora_alpha") != alpha.to_string() {
+                return Err(format!(
+                    "{} has rank {} and α {}; give the same --lora-rank and --lora-alpha",
+                    path.display(),
+                    meta("lora_rank"),
+                    meta("lora_alpha")
+                ));
+            }
+            train::State::from_checkpoint(&f)?
+        }
+    };
+    lora::Lora::from_params(&state.params, rank, alpha)?.check(&base)?;
+    Ok(train::State {
+        frozen: Some(train::Frozen { base, rank, alpha }),
+        ..state
+    })
+}
+
+fn merge_command(model_path: &Path, adapter_path: &Path, output: &Path) -> Result<(), String> {
+    check_readable(model_path, "checkpoint")?;
+    check_readable(adapter_path, "adapter")?;
+    for input in [model_path, adapter_path] {
+        if same_file(input, output) {
+            return Err(format!(
+                "output {} would overwrite an input",
+                output.display()
+            ));
+        }
+    }
+    check_writable(output)?;
+    let model = load_checkpoint(model_path)?;
+    let f = safetensors::read(adapter_path)?;
+    let meta = |k: &str| f.metadata.get(k).cloned().unwrap_or_default();
+    if meta("kind") != "lora" {
+        return Err(format!("{} is not a LoRA adapter", adapter_path.display()));
+    }
+    if meta("base_sha256") != sha256_file(model_path)? {
+        return Err(format!(
+            "{} was trained on a different model than {} (checksums differ)",
+            adapter_path.display(),
+            model_path.display()
+        ));
+    }
+    let rank: usize = meta("lora_rank").parse().map_err(|_| "bad lora_rank")?;
+    let alpha: f64 = meta("lora_alpha").parse().map_err(|_| "bad lora_alpha")?;
+    let adapter_tensors: Vec<safetensors::Tensor> = f
+        .tensors
+        .iter()
+        .filter(|t| !t.name.starts_with("adam."))
+        .cloned()
+        .collect();
+    let l = lora::Lora::from_params(
+        &gpt::Params::<f32>::from_tensors(&adapter_tensors),
+        rank,
+        alpha,
+    )?;
+    let base = model.params();
+    l.check(&base)?;
+    let merged = l.merge(&base);
+    // The merged weights, with the base checkpoint's names and shapes.
+    let tensors: Vec<safetensors::Tensor> = model
+        .ckpt
+        .tensors
+        .iter()
+        .filter(|t| !t.name.starts_with("adam."))
+        .zip(&merged.mats)
+        .map(|(t, m)| safetensors::Tensor::new(&t.name, &t.shape, m.data.clone()))
+        .collect();
+    let mut md = f.metadata.clone();
+    md.insert("kind".into(), "merged".into());
+    md.insert("adapter_file".into(), adapter_path.display().to_string());
+    md.insert("adapter_sha256".into(), sha256_file(adapter_path)?);
+    md.insert(
+        "producer".into(),
+        format!("transformer merge {}", env!("CARGO_PKG_VERSION")),
+    );
+    safetensors::write(output, &tensors, &md)?;
+    let back = safetensors::read(output)?;
+    if back.tensors != tensors || back.metadata != md {
+        return Err(format!(
+            "{}: read-back doesn't match what was written",
+            output.display()
+        ));
+    }
+    println!("=== transformer merge ===");
+    println!(
+        "Base {}: {} parameters; adapter {}: rank {rank}, α {alpha}, {} numbers on {} matrices",
+        model_path.display(),
+        model::formula(&model.config, model.vocab),
+        adapter_path.display(),
+        l.size(),
+        l.targets.len()
+    );
+    println!(
+        "Wrote {}: W + (α/r)·A·B for each adapted matrix; read back and verified.",
+        output.display()
+    );
+    println!("  weights fingerprint {}", weights_fingerprint(&tensors));
     Ok(())
 }
 
@@ -1285,6 +1584,28 @@ fn inspect(path: &Path, verbose: bool) -> Result<(), String> {
         for t in &f.tensors {
             println!("  {:<28} {:?}", t.name, t.shape);
         }
+    }
+    if meta("kind") == Some("lora") {
+        let rank: usize = meta("lora_rank")
+            .and_then(|r| r.parse().ok())
+            .ok_or("no lora_rank")?;
+        let alpha: f64 = meta("lora_alpha")
+            .and_then(|a| a.parse().ok())
+            .ok_or("no lora_alpha")?;
+        let weights: Vec<safetensors::Tensor> = f
+            .tensors
+            .iter()
+            .filter(|t| !t.name.starts_with("adam."))
+            .cloned()
+            .collect();
+        let l = lora::Lora::from_params(&gpt::Params::<f32>::from_tensors(&weights), rank, alpha)?;
+        println!(
+            "\nA LoRA adapter: rank {rank}, α {alpha}, {} numbers on {} matrices; fold it into its base model with transformer merge.",
+            l.size(),
+            l.targets.len()
+        );
+        println!("  weights fingerprint {}", weights_fingerprint(&weights));
+        return Ok(());
     }
     let (Some(model_text), Some(v)) = (meta("model"), meta("vocab_size")) else {
         return Err("no stored [model] or vocab_size: can't check the layout".into());

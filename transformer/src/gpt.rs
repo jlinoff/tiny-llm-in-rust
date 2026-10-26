@@ -10,6 +10,7 @@
 //!   loss   = mean cross-entropy against the next tokens
 
 use crate::config::ModelConfig;
+use crate::lora::Lora;
 use crate::safetensors::Tensor;
 use crate::tape::{Tape, Var};
 use crate::tensor::{Float, Mat};
@@ -42,6 +43,11 @@ impl<T: Float> Params<T> {
         Params { names, mats }
     }
 
+    /// Where the weight called `name` is.
+    pub fn position(&self, name: &str) -> usize {
+        self.index(name)
+    }
+
     fn index(&self, name: &str) -> usize {
         self.names
             .iter()
@@ -56,6 +62,8 @@ impl<T: Float> Params<T> {
 pub struct Forward<T: Float> {
     pub tape: Tape<T>,
     pub leaves: Vec<Var>,
+    /// With an adapter: A, B, A, B, … in the adapter's `to_params` order.
+    pub lora_leaves: Vec<Var>,
     pub logits: Var,
     pub loss: Var,
 }
@@ -69,6 +77,20 @@ pub fn forward<T: Float>(
     targets: &[Option<usize>],
     seq: usize,
 ) -> Forward<T> {
+    forward_with(p, None, c, inputs, targets, seq)
+}
+
+/// The forward pass, optionally with a LoRA adapter: each adapted weight W
+/// is replaced by W + (α/r)·A·B, computed on the tape so that A and B get
+/// gradients.
+pub fn forward_with<T: Float>(
+    p: &Params<T>,
+    lora: Option<&Lora<T>>,
+    c: &ModelConfig,
+    inputs: &[usize],
+    targets: &[Option<usize>],
+    seq: usize,
+) -> Forward<T> {
     assert!(
         seq >= 1 && seq <= c.context,
         "sequence length must be 1 to context"
@@ -76,7 +98,21 @@ pub fn forward<T: Float>(
     assert_eq!(inputs.len() % seq, 0, "inputs must be whole sequences");
     let mut t = Tape::new();
     let leaves: Vec<Var> = p.mats.iter().map(|m| t.leaf(m.clone())).collect();
-    let w = |name: &str| leaves[p.index(name)];
+    // The weights as used: the leaves, or for adapted ones W + (α/r)·A·B.
+    let mut used = leaves.clone();
+    let mut lora_leaves = Vec::new();
+    if let Some(l) = lora {
+        let s = l.scale();
+        for (k, name) in l.targets.iter().enumerate() {
+            let (a, b) = (t.leaf(l.a[k].clone()), t.leaf(l.b[k].clone()));
+            let ab = t.matmul(a, b);
+            let ab = t.scale(ab, s);
+            let i = p.index(name);
+            used[i] = t.add(leaves[i], ab);
+            lora_leaves.extend([a, b]);
+        }
+    }
+    let w = |name: &str| used[p.index(name)];
 
     // x = E[token] + P[position]
     let e = w("token_embedding");
@@ -116,6 +152,7 @@ pub fn forward<T: Float>(
     Forward {
         tape: t,
         leaves,
+        lora_leaves,
         logits,
         loss,
     }

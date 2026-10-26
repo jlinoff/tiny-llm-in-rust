@@ -33,6 +33,8 @@ enum Op<T> {
     Add(Var, Var),
     /// C = A + b, the row vector b added to every row (biases)
     AddRow(Var, Var),
+    /// C = s·A for a fixed number s (LoRA's α/r)
+    Scale(Var, T),
     /// Layer norm of each row with scale γ and shift β (row vectors). Keeps
     /// the normalized rows x̂ and each row's 1/σ for the backward pass.
     LayerNorm {
@@ -226,6 +228,11 @@ impl<T: Float> Tape<T> {
             }
         });
         self.push(v, Op::AddRow(a, b))
+    }
+
+    pub fn scale(&mut self, a: Var, s: T) -> Var {
+        let v = self.value(a).map(|x| x * s);
+        self.push(v, Op::Scale(a, s))
     }
 
     pub fn layer_norm(&mut self, x: Var, gamma: Var, beta: Var) -> Var {
@@ -422,6 +429,11 @@ impl<T: Float> Tape<T> {
             Op::Add(a, b) => vec![(*a, g.clone()), (*b, g.clone())],
             // C = A + b (every row):  dA = dC,  db = column sums of dC
             Op::AddRow(a, b) => vec![(*a, g.clone()), (*b, col_sums(g))],
+            // C = s·A:  dA = s·dC
+            Op::Scale(a, s) => {
+                let s = *s;
+                vec![(*a, g.map(|x| x * s))]
+            }
             // y = γ ⊙ x̂ + β:  dγ = Σ dy ⊙ x̂,  dβ = Σ dy, and with d = dy ⊙ γ,
             // dx = (d − mean(d) − x̂ · mean(d ⊙ x̂)) / σ, row by row
             Op::LayerNorm {
@@ -608,6 +620,16 @@ mod tests {
             let c = t.matmul(v[0], v[1]); // 5 × 3
             let d = t.matmul_nt(c, v[2]); // 5 × 6
             reduce(t, d)
+        });
+        assert!(e < TOL, "{e}");
+    }
+
+    #[test]
+    fn scale() {
+        let e = check(&[rand(3, 4, 1), rand(4, 2, 2)], |t, v| {
+            let m = t.matmul(v[0], v[1]);
+            let s = t.scale(m, 2.5);
+            reduce(t, s)
         });
         assert!(e < TOL, "{e}");
     }
