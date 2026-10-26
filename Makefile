@@ -142,7 +142,7 @@ FULL_VARS = OUT=out-full CORPUS=data/TinyStoriesV2-GPT4-train.txt \
 	TOK_CORPUS=data/TinyStoriesV2-GPT4-valid.txt CONFIG=config-full.toml \
 	CHAT_ARGS='--max-stories 200000 --eval-fraction 0.004'
 
-full-%: data/TinyStoriesV2-GPT4-train.txt data/TinyStoriesV2-GPT4-valid.txt ## The full run: make full-train, full-finetune, full-evaluate, ...
+full-%: data/TinyStoriesV2-GPT4-train.txt data/TinyStoriesV2-GPT4-valid.txt ## The full run (PLAN.md): full-bench, full-train, full-finetune, full-evaluate, full-chat
 	$(MAKE) $* $(FULL_VARS)
 
 # attention (the learning step before transformer/)
