@@ -43,6 +43,11 @@ Options:
   data, approximately (pretraining holds out the last 5% of the tokens), so
   neither training step sees the evaluation stories.
 - `--eval-count N`: evaluation requests to write (default 200)
+- `--max-stories N`: make training conversations from only the first N
+  stories; the evaluation stories still come from the end of the file. For
+  a large corpus: fine-tuning needs far fewer conversations than the 2.7M
+  stories of TinyStories V2. The candidate words then come from the stories
+  used.
 - `--min-stories N`: a requested word must occur in at least N stories, so
   the model has seen it (default 20)
 - `--skip-common N`: leave out the N words that occur in the most stories
@@ -68,6 +73,12 @@ A story with fewer than three eligible words is skipped, and the count is
 reported. If there are too few eligible words to make requests at all (a
 small or unusual corpus), the script stops with an error: lower
 `--skip-common` or `--min-stories`.
+
+## Large files
+
+The file is read as bytes and split at the separator lines there; only the
+stories used are decoded. A single string of a 2.2 GB file could take 8.8 GB
+(Python stores a string at the width of its widest character).
 
 ## Checks
 

@@ -144,6 +144,8 @@ It prints a line every `log_every` steps:
 - the learning rate
 - the mean gradient length before clipping
 - tokens per second
+- the time remaining, from the pace since the last line (including any
+  validation run in it)
 
 **Checkpoints and resuming.** Every `checkpoint_every` steps, and at the
 end, it writes the output checkpoint: the weights, Adam's state for every
@@ -395,8 +397,9 @@ Accelerate library, could be several times faster. These measurements
 decide whether that's worth doing (PLAN.md, open decision 6).
 
 With `--checkpoint`, `bench` also times a real training step for that
-model: forward and backward on a batch of 16 sequences of up to 128 tokens,
-in f32, on all threads (the optimizer isn't included yet). For PLAN.md's
+model: forward and backward on a batch of 16 sequences of the model's full
+context, in f32, on all threads (the optimizer isn't included). The full
+context matters: attention's share of the work grows with it. For PLAN.md's
 starting shape with a small vocabulary, a 2-core Linux machine takes about
 870 ms per step: 2,350 tokens per second, 36% of its matrix-multiply speed.
 

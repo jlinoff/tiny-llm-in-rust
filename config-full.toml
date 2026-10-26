@@ -1,0 +1,56 @@
+# config-full.toml: the full TinyStories run (PLAN.md, "The full TinyStories
+# run"). The same sections and keys as config.toml; the Makefile's full-*
+# targets use it (make full-train, ...). Comments here note only what
+# differs from config.toml.
+
+# 7,432,704 parameters: about the size of the TinyStories paper's 8.3M model.
+[model]
+d_model = 256   # twice the starting model's width
+layers  = 8
+heads   = 8     # head size 32, as before
+context = 256
+d_ff    = 1024  # 4 × d_model
+seed    = 1
+
+# 36,000 steps × 4,096 tokens = 147M tokens, about 20 per parameter (the
+# compute-optimal ratio): about a day on the M4, to be checked with
+# make full-bench before starting.
+[training]
+learning_rate = 0.001   # a bigger model trains best with a smaller peak rate
+steps         = 36000
+batch_size    = 16      # 16 × 256 = 4,096 tokens per step
+warmup_steps  = 1000
+min_lr_fraction = 0.1
+weight_decay  = 0.1
+grad_clip     = 2.0     # the 1.35M model's gradient norm settled near 2
+beta1         = 0.9
+beta2         = 0.95
+seed          = 1
+validation_fraction = 0.005  # 0.5% of ~550M tokens is plenty to measure on
+log_every     = 100
+eval_every    = 1000
+eval_batches  = 20
+checkpoint_every = 1000      # a stopped run loses at most a few minutes
+
+[generate]
+max_tokens  = 200
+temperature = 0.8
+top_k       = 40
+seed        = 1
+
+# Conversations from the first 200,000 training stories (CHAT_ARGS in the
+# Makefile); 10,000 steps of 8 draw 80,000 of them, under half a pass.
+[finetune]
+learning_rate = 0.001   # what worked for the 1.35M model (6,000 steps)
+steps         = 10000
+batch_size    = 8
+warmup_steps  = 100
+min_lr_fraction = 0.1
+weight_decay  = 0.1
+grad_clip     = 2.0
+seed          = 1
+validation_fraction = 0.05
+log_every     = 100
+eval_every    = 500
+eval_batches  = 10
+checkpoint_every = 1000

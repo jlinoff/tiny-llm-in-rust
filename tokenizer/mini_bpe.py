@@ -42,6 +42,9 @@ Usage:
 
 Run with -h for all options.
 """
+# One self-contained script, for reading top to bottom; longer than pylint's
+# default module length on purpose.
+# pylint: disable=too-many-lines
 import argparse
 import hashlib
 import heapq
@@ -530,10 +533,18 @@ IDS_VERSION = 1
 IDS_HEADER = struct.Struct("<8sIIIIQ32s")
 
 
+def id_array(vocab_size):
+    """An empty array for token IDs, 2 bytes each (4 if V > 65,536): a list
+    would cost an 8-byte pointer per ID, too much for a large corpus."""
+    return array("H" if vocab_size <= 1 << 16 else "I")
+
+
 def write_ids(path, ids, vocab_size, fingerprint):
     """Write token IDs to `path` in the .ids format; return bytes per ID."""
     width = 2 if vocab_size <= 1 << 16 else 4
-    arr = array("H" if width == 2 else "I", ids)
+    arr = id_array(vocab_size)
+    arr = ids if isinstance(ids, array) and ids.typecode == arr.typecode \
+        else array(arr.typecode, ids)
     if arr.itemsize != width:  # 'I' is 4 bytes on every common platform
         raise RuntimeError(f"array type has {arr.itemsize}-byte items, "
                            f"expected {width}")
@@ -589,18 +600,12 @@ def split_documents(text, sep):
     Empty documents, such as from two separators in a row, are skipped.
     Returns (documents, number of separator lines).
     """
-    docs, current, seps = [], [], 0
-    for line in text.splitlines(keepends=True):
-        if line.rstrip("\r\n") == sep:
-            seps += 1
-            docs.append("".join(current))
-            current = []
-        else:
-            current.append(line)
-    docs.append("".join(current))
+    # One split of the whole text, not a list of its lines: for a corpus
+    # of gigabytes, tens of millions of line strings would cost gigabytes.
+    docs = re.split(rf"(?m)^{re.escape(sep)}\r?(?:\n|$)", text)
     docs = [d[:-2] if d.endswith("\r\n") else d[:-1] if d.endswith("\n") else d
             for d in docs]
-    return [d for d in docs if d], seps
+    return [d for d in docs if d], len(docs) - 1
 
 
 def add_documents(texts, text, split_on):
@@ -854,16 +859,32 @@ def check_outputs(ap, args):
             check_writable(ap, path, what)
 
 
-def read_text(ap, path):
-    """Read a UTF-8 text file, or stop with an error."""
+def read_bytes(ap, path):
+    """Read a file's bytes, or stop with an error."""
     try:
-        with open(path, encoding="utf-8") as fh:
+        with open(path, "rb") as fh:
             return fh.read()
     except OSError as e:
         ap.error(f"can't read text file {path!r}: {e.strerror}")
-    except UnicodeDecodeError:
-        ap.error(f"text file {path!r} is not valid UTF-8 text")
     return None  # not reached: ap.error exits
+
+
+def document_spans(raw, sep):
+    """The byte ranges of the documents in `raw`, exactly as split_documents
+    splits the decoded text, and the number of separator lines. Splitting
+    the bytes and decoding one document at a time keeps memory near the
+    file's size: a single string of the whole file would take 4 bytes per
+    character if it held even one emoji."""
+    pattern = rb"(?m)^" + re.escape(sep.encode("utf-8")) + rb"\r?(?:\n|$)"
+    cuts = [(m.start(), m.end()) for m in re.finditer(pattern, raw)]
+    ends = [a for a, _ in cuts] + [len(raw)]
+    starts = [0] + [b for _, b in cuts]
+    spans = []
+    for s, e in zip(starts, ends):
+        e -= 2 if raw.endswith(b"\r\n", s, e) else 1 if raw.endswith(b"\n", s, e) else 0
+        if e > s:
+            spans.append((s, e))
+    return spans, len(cuts)
 
 
 def encode_document(where, doc_text, tok, cache, allow_special):
@@ -892,26 +913,27 @@ def encode_file(ap, path, tok, cache, args):
     each followed by EOS, with a round-trip check per document. Prints a
     line about the file. Returns (IDs, number of documents, bytes of
     document text)."""
-    text = read_text(ap, path)
-    docs, seps = (([text], None) if args.split_on is None
-                  else split_documents(text, args.split_on))
-    ids, nbytes = [], 0
-    for i, doc_text in enumerate(docs):
+    raw = read_bytes(ap, path)
+    docs, seps = (([(0, len(raw))], None) if args.split_on is None
+                  else document_spans(raw, args.split_on))
+    ids = id_array(tok.vocab_size)
+    for i, (start, end) in enumerate(docs):
+        where = f"{path!r}{'' if seps is None else f', document {i + 1}'}"
         try:
-            ids += encode_document(
-                f"{path!r}{'' if seps is None else f', document {i + 1}'}",
-                doc_text, tok, cache, args.allow_special)
+            ids.extend(encode_document(where, raw[start:end].decode("utf-8"),
+                                       tok, cache, args.allow_special))
+        except UnicodeDecodeError:
+            ap.error(f"{where} is not valid UTF-8 text")
         except ValueError as e:
             ap.error(str(e))
         ids.append(tok.special_id(EOS))
-        nbytes += len(doc_text.encode("utf-8"))
-    head = f"  {path:<24} {len(text.encode('utf-8')):>12,} bytes -> "
+    head = f"  {path:<24} {len(raw):>12,} bytes -> "
     if seps is None:
         print(f"{head}{len(ids) - 1:>11,} tokens + EOS")
     else:
         print(f"{head}{len(docs):,} documents ({seps:,} separator lines "
               f"dropped), {len(ids) - len(docs):,} tokens + one EOS each")
-    return ids, len(docs), nbytes
+    return ids, len(docs), sum(b - a for a, b in docs)
 
 
 def print_marker_counts(ids, tok):
@@ -938,7 +960,7 @@ def encode_mode(ap, args, tok):
         ap.error(f"the tokenizer has no {EOS} (EOS) token; it was saved by "
                  f"an older version of mini_bpe.py, so retrain it")
     print(f"\n=== Encode: {' '.join(args.encode)} -> {args.output} ===")
-    ids, cache, nbytes, ndocs = [], {}, 0, 0
+    ids, cache, nbytes, ndocs = id_array(tok.vocab_size), {}, 0, 0
     for path in args.encode:
         file_ids, docs, doc_bytes = encode_file(ap, path, tok, cache, args)
         ids += file_ids

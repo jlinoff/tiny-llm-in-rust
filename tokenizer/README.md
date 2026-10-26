@@ -285,7 +285,15 @@ the tokenizer from the example above (trained on `sample.txt` and `news.txt`):
 ```
 
 Each document's IDs are decoded again and compared with its file; if any
-differ, the run stops with an error and writes nothing. Because text never
+differ, the run stops with an error and writes nothing.
+
+**Memory, for large files.** The file is read as bytes, split into documents
+at the separator lines, and each document is decoded and encoded on its
+own, with the IDs collected in a compact array (2 bytes each). A single
+string of the whole file would cost up to 4 bytes per character (Python
+stores a string at the width of its widest character, so one emoji is
+enough), and a list of IDs 8 bytes per ID. Peak memory is about twice the
+file's size: about 4 GB for TinyStories V2's 2.2 GB training file. Because text never
 produces the EOS ID, splitting the IDs at EOS recovers the documents exactly.
 
 ### Files holding many documents

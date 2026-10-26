@@ -77,7 +77,9 @@ pub fn run(model: Option<&Model>) {
 
     // A real step: forward and backward on a random batch, f32, all threads.
     let n: usize = m.tensors.iter().map(|t| t.data.len()).sum();
-    let seq = m.config.context.min(128);
+    // The model's full context, as training uses it: attention's share of
+    // the work grows with the sequence length.
+    let seq = m.config.context;
     let batch = 16;
     let p = Params::<f32>::from_tensors(&m.tensors);
     let mut rng = crate::rng::Rng::new(1);

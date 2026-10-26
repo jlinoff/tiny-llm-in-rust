@@ -396,6 +396,21 @@ pub fn check_data(corpus: &Corpus, vocab: usize, fingerprint_hex: &str) -> Resul
     Ok(())
 }
 
+/// A duration for the log, to the precision that matters: "2h05m", "14m",
+/// "40s", or "—" for none left.
+pub fn duration(secs: f64) -> String {
+    let s = secs.round() as u64;
+    match s {
+        0 => "—".into(),
+        1..=59 => format!("{s}s"),
+        60..=3599 => format!("{}m", (s + 30) / 60),
+        _ => {
+            let m = (s + 30) / 60;
+            format!("{}h{:02}m", m / 60, m % 60)
+        }
+    }
+}
+
 /// Report progress after a window of steps.
 pub struct Window {
     pub loss_sum: f64,
@@ -452,7 +467,7 @@ pub fn run_with(
     let mut win = Window::new();
     let mut last_loss = None;
     let mut last_valid = None;
-    report("   step    loss   valid      lr  grad norm  tokens/s");
+    report("   step    loss   valid      lr  grad norm  tokens/s  remaining");
     while state.step < t.steps {
         let batch = batches(state.step + 1);
         let (loss, norm) = step(&mut state, c, t, &batch, seq);
@@ -470,14 +485,17 @@ pub fn run_with(
         }
         if s % t.log_every == 0 || last || evaluate {
             let mean = win.loss_sum / win.steps as f64;
-            let tps = tokens_per_step * win.steps as f64 / win.start.elapsed().as_secs_f64();
+            let secs = win.start.elapsed().as_secs_f64();
+            let tps = tokens_per_step * win.steps as f64 / secs;
+            // From this window's pace (it includes any validation run in it).
+            let remaining = duration((t.steps - s) as f64 * secs / win.steps as f64);
             let v = if evaluate {
                 last_valid.map_or("     —".into(), |l| format!("{l:7.3}"))
             } else {
                 "       ".into()
             };
             report(&format!(
-                "  {s:>5}   {mean:.3} {v}  {:.2e}  {:9.3}  {tps:8.0}",
+                "  {s:>5}   {mean:.3} {v}  {:.2e}  {:9.3}  {tps:8.0}  {remaining:>9}",
                 t.lr(s),
                 win.norm_sum / win.steps as f64
             ));
@@ -520,6 +538,15 @@ mod tests {
             metadata: BTreeMap::new(),
         };
         State::from_checkpoint(&f).unwrap()
+    }
+
+    #[test]
+    fn durations_read_naturally() {
+        assert_eq!(duration(0.2), "—");
+        assert_eq!(duration(40.0), "40s");
+        assert_eq!(duration(14.0 * 60.0 + 10.0), "14m");
+        assert_eq!(duration(2.0 * 3600.0 + 5.0 * 60.0), "2h05m");
+        assert_eq!(duration(23.0 * 3600.0 + 59.0 * 60.0 + 50.0), "24h00m");
     }
 
     #[test]

@@ -1760,6 +1760,7 @@ directories would mean copying that code or reaching across directories for it.
 llm/
 ├── PLAN.md        # this file
 ├── Makefile       # one target per step: make tokenize, make encode, ...
+├── config.toml    # settings for steps 3-6; config-full.toml for the full run
 ├── out/           # generated files: tok.bpe, *.ids, *.safetensors (git-ignored; make clean removes it)
 ├── data/          # downloaded corpora, e.g. text8, TinyStories (git-ignored)
 ├── tokenizer/     # text <-> token IDs: tokenize, encode, decode
@@ -2043,7 +2044,9 @@ text8, matching gensim (a widely used Python library with its own word2vec) at
    `train` reports its real tokens per second. The plan:
    - develop and debug on the validation file (a few million tokens, minutes
      to train)
-   - then train on a subset of the training file, 20–100M tokens
+   - then train on a subset of the training file, 20–100M tokens (decided
+     later: 147M tokens of V2, the GPT-4-only version, for a 7.4M model;
+     see [The full TinyStories run](#the-full-tinystories-run))
 
    text8 (17 million words of Wikipedia, used for word2vec) was the earlier
    candidate; it has no punctuation or capitals, so a model trained on it
@@ -2093,6 +2096,67 @@ text8, matching gensim (a widely used Python library with its own word2vec) at
    tape from its parts lets a test compare the derived gradient with the
    closed-form formula.
 
+## The full TinyStories run
+
+Everything so far trained in minutes on TinyStories' 19 MB validation file.
+The full run uses the real training data and a bigger model, for about a
+day. Decided:
+
+- **Budget: about a day**, so **7.4M parameters**: d = 256, 8 layers, 8
+  heads (head size 32), context 256, d_ff = 1024. The size of the
+  TinyStories paper's 8.3M model (7/10 for grammar, 5/10 for consistency
+  in its evaluations).
+- **Data: TinyStories V2** (`TinyStoriesV2-GPT4-train.txt`, 2.2 GB), which
+  according to the dataset's README holds only the stories GPT-4 wrote, a
+  cleaner subset of V1 (which also has GPT-3.5's). The tokenizer is learned
+  again, from V2's own validation file (22 MB): 3,836 merges, V = 4,096.
+- **Tokens: 147M** (36,000 steps × 16 sequences × 256 tokens), about 20 per
+  parameter, the compute-optimal ratio of Hoffmann et al. (2022). Training
+  costs about 6·N·D floating-point operations plus about 12% for attention
+  at context 256: about 7.4 × 10¹⁵, or 23 hours at 90 GFLOP/s.
+  `make full-bench` times a real step for this shape before committing.
+- **Settings** (`config-full.toml`): peak learning rate 0.001 (smaller than
+  the 1.35M model's 0.002, as usual for a bigger model), 1,000 warm-up
+  steps, `grad_clip` 2 (the small model's gradient norm settled near 2),
+  0.5% of the tokens held out for validation (about 2.7M), validation and
+  a checkpoint every 1,000 steps.
+- **Fine-tuning**: conversations from the first 200,000 training stories
+  (`--max-stories`), 10,000 steps at 0.001, the setting that worked for the
+  small model. The evaluation requests come from the last 0.4% of the
+  stories, inside pretraining's 0.5% held-out tail, so neither step sees
+  them.
+
+What had to change for a 2.2 GB file:
+
+- **The encoder held every ID in a Python list**, an 8-byte pointer each:
+  about 4 GB for 550M tokens. It now uses a compact array (2 bytes each).
+- **Python's strings take 1, 2 or 4 bytes per character, set by the
+  widest character in the string.** A single emoji anywhere in a 2.2 GB
+  file makes the whole-file string 8.8 GB. The encoder and make_chat now
+  split the file's raw bytes at the separator lines and decode one story
+  at a time. Measured on a 194 MB file: peak memory from 1,355 MB to
+  349 MB; encoding output byte-for-byte identical. For V2: about 4 GB and
+  17 minutes.
+- **A time-remaining column** in the training log, from the recent pace.
+- **`bench` times the model's full context**, since attention's share of
+  the work grows with it.
+
+How to run it (all files in `out-full/`, which `make clean` leaves alone):
+
+```
+make full-bench                  # downloads V2, learns the tokenizer, builds, times a step
+caffeinate -i make full-train    # about a day; caffeinate keeps the Mac awake
+make full-finetune full-evaluate
+make full-chat PROMPT='Write a story with the words frog, bell and egg.'
+```
+
+If the run stops (a restart, a crash), resume from the last checkpoint, in
+place; at most 1,000 steps are lost, and resuming is exact:
+
+```
+caffeinate -i transformer/target/release/transformer train --model out-full/model.safetensors --data out-full/corpus.ids --config config-full.toml -o out-full/model.safetensors
+```
+
 ## Order of work
 
 1. ~~Finish word2vec.~~ Done.
@@ -2105,7 +2169,7 @@ text8, matching gensim (a widely used Python library with its own word2vec) at
    automatic differentiation tape (decision 7), checked against the
    hand-written gradients of items 3 and 4 and used by items 5 and 6.
 4. `transformer/`: ~~build~~, ~~train~~, ~~generate~~, ~~finetune~~ (done),
-   then the full TinyStories run. This builds step 6 before step 5, on
+   then [the full TinyStories run](#the-full-tinystories-run) (prepared). This builds step 6 before step 5, on
    purpose: the step numbers follow the data through the flow, not the
    order of building. Generate works on any checkpoint, and it's the only
    way to judge either model: fine-tuning's effect (answering in turns)
