@@ -413,7 +413,10 @@ request rather than to one sentence.
   long stream; here each sequence in a batch is one whole conversation,
   starting with EOS (as a document does), padded to the context length.
   Conversations longer than the context are left out, which is why the
-  context is now 256 tokens: most stories, with their request, fit.
+  context is now 256 tokens. Measured on TinyStories' validation file
+  (20,885 conversations, median 209 tokens): 1.9% fit in 128 tokens, 78%
+  in 256, 92% in 384. 256 keeps most of them without paying for attention
+  over 384 positions.
 - **Loss masking.** Only the reply is scored: the story's tokens and its
   `<|end|>`. The request is read as context but never predicted, so the
   model learns to answer requests, not to write them. Padding isn't scored
