@@ -8,7 +8,8 @@
 d_model = 128   # the model width d: the length of every token's vector
 layers  = 4     # transformer blocks, applied one after another
 heads   = 4     # attention heads per block; must divide d_model (head size 32)
-context = 128   # the most tokens the model sees at once (T)
+context = 256   # the most tokens the model sees at once (T); a whole story
+                # and its request fit, for fine-tuning and generation
 d_ff    = 512   # the FFN's inner width, conventionally 4 × d_model
 seed    = 1     # random seed for the initial weights
 
@@ -17,7 +18,7 @@ seed    = 1     # random seed for the initial weights
 [training]
 learning_rate = 0.002   # peak learning rate, reached after the warm-up
 steps         = 2000    # train until this step (counted across resumes)
-batch_size    = 16      # sequences per step, each `context` tokens long
+batch_size    = 8       # sequences per step, each `context` tokens long
 warmup_steps  = 100     # the learning rate rises linearly from 0 over these
 min_lr_fraction = 0.1   # then falls along a cosine curve to this fraction
 weight_decay  = 0.1     # AdamW decay, for matrices and embeddings only
@@ -40,5 +41,20 @@ temperature = 0.8   # below 1 favors likely tokens, above 1 flattens; 0 = greedy
 top_k       = 40    # sample only from the 40 likeliest tokens; 0 = no cutoff
 seed        = 1     # same seed + same prompt = same text
 
-# Later steps (not yet built):
-# [finetune]   read by step 5, finetune
+# [finetune] is read by step 5, finetune, and copied into the checkpoint it
+# writes. The same keys as [training]; here each sequence is one
+# conversation, padded to `context`, and only the reply's tokens are scored.
+[finetune]
+learning_rate = 0.0005  # lower than pretraining: adjust the model, don't remake it
+steps         = 1500    # 12,000 conversations drawn, under one pass; minutes on a laptop
+batch_size    = 8       # conversations per step
+warmup_steps  = 30
+min_lr_fraction = 0.1
+weight_decay  = 0.1
+grad_clip     = 1.0
+seed          = 1
+validation_fraction = 0.05  # the last 5% of the conversations, held out
+log_every     = 50
+eval_every    = 250
+eval_batches  = 10
+checkpoint_every = 500

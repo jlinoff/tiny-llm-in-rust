@@ -142,6 +142,106 @@ pub fn valid_batches(data: &[u32], batches: usize, batch: usize, seq: usize) -> 
         .collect()
 }
 
+/// The special tokens that structure a conversation.
+#[derive(Clone, Copy, Debug)]
+pub struct Markers {
+    pub eos: u32,
+    pub user: u32,
+    pub assistant: u32,
+    pub end: u32,
+}
+
+/// Conversations for fine-tuning (step 5), from a `.ids` file written with
+/// --allow-special: documents separated by EOS, each
+///   <|user|> request <|assistant|> reply <|end|>
+/// Each becomes one row of a batch: EOS first (as in generate, it marks
+/// the start of a document), then the conversation.
+pub struct Conversations {
+    /// Each row: EOS, then the conversation's tokens.
+    pub rows: Vec<Vec<u32>>,
+    /// Per row: the position of <|assistant|>. The targets scored are the
+    /// tokens after it, the reply and its <|end|>.
+    pub reply_at: Vec<usize>,
+    /// Conversations longer than the context, left out.
+    pub dropped: usize,
+}
+
+impl Conversations {
+    pub fn parse(ids: &[u32], m: &Markers, context: usize) -> Result<Conversations, String> {
+        let mut c = Conversations {
+            rows: Vec::new(),
+            reply_at: Vec::new(),
+            dropped: 0,
+        };
+        for (k, doc) in ids.split(|&t| t == m.eos).enumerate() {
+            if doc.is_empty() {
+                continue; // after the final EOS
+            }
+            let count = |t: u32| doc.iter().filter(|&&x| x == t).count();
+            let a = doc.iter().position(|&t| t == m.assistant);
+            let ok = doc[0] == m.user
+                && *doc.last().unwrap() == m.end
+                && count(m.user) == 1
+                && count(m.assistant) == 1
+                && count(m.end) == 1;
+            let Some(a) = a.filter(|_| ok) else {
+                return Err(format!(
+                    "conversation {} isn't <|user|> … <|assistant|> … <|end|> (was the file encoded with --allow-special?)",
+                    k + 1
+                ));
+            };
+            // A row of n + 1 tokens gives n (input, target) pairs, so a
+            // conversation of up to `context` tokens fits.
+            if doc.len() > context {
+                c.dropped += 1;
+                continue;
+            }
+            let mut row = Vec::with_capacity(doc.len() + 1);
+            row.push(m.eos);
+            row.extend_from_slice(doc);
+            c.rows.push(row);
+            c.reply_at.push(a + 1);
+        }
+        Ok(c)
+    }
+
+    /// A batch of the given conversations (indexes into `rows`), each
+    /// padded to `seq`. Only the reply's tokens are targets: input position
+    /// i predicts row[i + 1], scored when i ≥ the <|assistant|> position.
+    pub fn batch(&self, which: &[usize], seq: usize, pad: u32) -> Batch {
+        let mut inputs = Vec::with_capacity(which.len() * seq);
+        let mut targets = Vec::with_capacity(which.len() * seq);
+        for &r in which {
+            let (row, a) = (&self.rows[r], self.reply_at[r]);
+            for i in 0..seq {
+                inputs.push(*row.get(i).unwrap_or(&pad) as usize);
+                targets.push(if i >= a && i + 1 < row.len() {
+                    Some(row[i + 1] as usize)
+                } else {
+                    None
+                });
+            }
+        }
+        Batch { inputs, targets }
+    }
+
+    /// The training batch for a step: `batch` conversations drawn at random
+    /// from rows 0…n_train − 1, depending only on the seed and the step.
+    pub fn train_batch(
+        &self,
+        n_train: usize,
+        batch: usize,
+        seq: usize,
+        seed: u64,
+        step: u64,
+        pad: u32,
+    ) -> Batch {
+        let mut rng = Rng::stream(seed, step);
+        let which: Vec<usize> = (0..batch).map(|_| rng.below(n_train)).collect();
+        self.batch(&which, seq, pad)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -215,6 +315,57 @@ mod tests {
             "only {} distinct starts",
             starts.len()
         );
+    }
+
+    const M: Markers = Markers {
+        eos: 0,
+        user: 1,
+        assistant: 2,
+        end: 3,
+    };
+
+    #[test]
+    fn conversations_score_only_the_reply() {
+        // <|user|> 10 11 <|assistant|> 20 21 22 <|end|>, then a longer one.
+        let ids = [
+            1, 10, 11, 2, 20, 21, 22, 3, 0, 1, 10, 2, 20, 21, 22, 23, 24, 25, 3, 0,
+        ];
+        let c = Conversations::parse(&ids, &M, 8).unwrap();
+        assert_eq!(c.rows.len(), 1); // the second (10 tokens) doesn't fit in 8
+        assert_eq!(c.dropped, 1);
+        assert_eq!(c.rows[0], vec![0, 1, 10, 11, 2, 20, 21, 22, 3]);
+        let b = c.batch(&[0], 10, 0);
+        assert_eq!(b.inputs, vec![0, 1, 10, 11, 2, 20, 21, 22, 3, 0]);
+        // Targets: nothing for the request; the reply and <|end|>; nothing
+        // after (padding).
+        let none = None;
+        assert_eq!(
+            b.targets,
+            vec![
+                none,
+                none,
+                none,
+                none,
+                Some(20),
+                Some(21),
+                Some(22),
+                Some(3),
+                none,
+                none
+            ]
+        );
+    }
+
+    #[test]
+    fn malformed_conversations_are_refused() {
+        for bad in [
+            &[10, 2, 20, 3, 0][..],      // no <|user|>
+            &[1, 10, 20, 3, 0][..],      // no <|assistant|>
+            &[1, 10, 2, 20, 0][..],      // no <|end|>
+            &[1, 2, 1, 2, 20, 3, 0][..], // two turns
+        ] {
+            assert!(Conversations::parse(bad, &M, 100).is_err(), "{bad:?}");
+        }
     }
 
     #[test]

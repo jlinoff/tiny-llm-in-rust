@@ -148,7 +148,10 @@ Grouped so that each definition uses only terms defined above it.
 - **pretraining**: training on a large corpus to predict the next token.
   **Post-training**: further training that turns the result into an assistant
   (see [Post-training](#post-training)). **Fine-tuning**: continuing to train
-  an already trained model on new data.
+  an already trained model on new data. **Loss masking**: scoring only some
+  of a sequence's predictions, such as only the assistant's reply in a
+  conversation; the other positions are still read as context but aren't
+  trained to be predicted.
 - **temperature**: a text-generation setting T: the output scores are divided
   by T before the softmax, exactly as temperature enters the Boltzmann
   distribution. Low values make the most likely next token dominate; higher
@@ -232,11 +235,13 @@ Key: each step reads the files to the left of `──►` and writes the one fil
 its right. Text after `#` is a comment describing what that file contains.
 `[model]`, `[training]`, `[finetune]` and `[generate]` are sections of the configuration
 file (see [Configuration](#configuration)). `chat.ids` is step 2 run on
-`chat.txt`, a file of example conversations.
+`chat.txt`, a file of example conversations, which `chat/make_chat.py` builds
+from the corpus's own stories (see [Step 5](#step-5-finetune)).
 
 Steps 1–4 are **pretraining**; step 5 is **post-training** (see
 [Post-training](#post-training)). Step 6 works after either: with
-`model.safetensors` it continues text, with `chat.safetensors` it answers in turns.
+`model.safetensors` it continues text, with `chat.safetensors` and `--chat`
+it answers a request.
 
 The files are the interfaces between stages, so their
 formats must be defined exactly. This matters doubly because the tokenizer is
@@ -282,12 +287,13 @@ frozen and used unchanged by every later step that needs it.
 - **Command:**
 
   ```
-  python3 tokenizer/mini_bpe.py --load tok.bpe --encode corpus.txt -o corpus.ids
-  python3 tokenizer/mini_bpe.py --load tok.bpe --encode chat.txt   -o chat.ids
+  python3 tokenizer/mini_bpe.py --load tok.bpe --encode corpus.txt -o corpus.ids --split-on '<|endoftext|>'
+  python3 tokenizer/mini_bpe.py --load tok.bpe --encode chat.txt   -o chat.ids   --split-on '<|endoftext|>' --allow-special
   ```
 
   `--load` reads the saved tokenizer, `--encode` names the text, `-o` the
-  output.
+  output, `--split-on` the line between documents. `--allow-special` turns
+  the turn markers written in `chat.txt` into their special tokens.
 - **Status:** done (`tokenizer/mini_bpe.py --encode`)
 
 **What it does:** turns text into the integers the model consumes. Real
@@ -299,9 +305,9 @@ decoded and compared with the input. The format is described in
 `tokenizer/README.md`. Encoding is also where special tokens enter the data:
 each input file is a document, and EOS is appended after each one (done); a
 file holding many documents, such as TinyStories with `<|endoftext|>` lines
-between its stories, is split at those lines with `--split-on` (done); each
-message of `chat.txt` will be wrapped in turn markers (planned; see
-[Special tokens](#special-tokens)).
+between its stories, is split at those lines with `--split-on` (done); in
+`chat.txt` the turn markers are written as text and become special tokens
+with `--allow-special` (done; see [Special tokens](#special-tokens)).
 
 ##### Step 3: build
 
@@ -362,20 +368,71 @@ the config. The tokenizer is not involved; it already did its work in step 2.
 
 - **Inputs:**
   - `model.safetensors`
-  - `chat.ids`
-  - config `[finetune]`: learning rate, steps
+  - `chat.ids`, made from the corpus's stories (below)
+  - `tok.bpe`, for the turn markers' IDs
+  - config `[finetune]`: the same keys as `[training]` (see
+    [Configuration](#configuration))
 - **Output:**
   - `chat.safetensors`: the same weights, tuned on conversations
-- **Command** (proposed):
+- **Command:**
 
   ```
-  transformer finetune --model model.safetensors --data chat.ids --config config.toml -o chat.safetensors
+  python3 chat/make_chat.py corpus.txt -o chat.txt --eval chat-eval.tsv
+  python3 tokenizer/mini_bpe.py --load tok.bpe --encode chat.txt -o chat.ids --split-on '<|endoftext|>' --allow-special
+  transformer finetune --model model.safetensors --data chat.ids --tokenizer tok.bpe --config config.toml -o chat.safetensors
+  transformer evaluate --model chat.safetensors --tokenizer tok.bpe --config config.toml --requests chat-eval.tsv --chat
   ```
-- **Status:** not started
+- **Status:** done (`chat/make_chat.py`, `transformer finetune`,
+  `transformer evaluate`, `generate --chat`; `make finetune`, `make evaluate`,
+  `make chat`).
 
 **What it does:** runs the same training loop as step 4, continuing from the
-pretrained model on example conversations, usually with a lower learning rate.
+pretrained model on example conversations, with a lower learning rate.
 This is post-training (see [Post-training](#post-training)).
+
+**The data: requests made from the stories themselves.** A model that has
+read only children's stories can't answer general questions, so its
+assistant is a storyteller. For each story, `chat/make_chat.py` picks three
+uncommon words that occur in it and writes a request around them, and the
+story becomes the reply:
+
+```
+<|user|>Write a story with the words dog, ball and park.<|assistant|>Once upon a time … <|end|>
+```
+
+The requests are honest (each story really contains its words), and they
+make fine-tuning measurable. The words are lowercase (capitalized words are
+mostly names), occur in enough stories for the model to know them, and
+leave out the most widespread words ("the", "happy", "day"). Several
+phrasings of the request are used, so the model learns to respond to a
+request rather than to one sentence.
+
+**How it's trained:**
+
+- **One conversation per row.** Pretraining cuts random windows from one
+  long stream; here each sequence in a batch is one whole conversation,
+  starting with EOS (as a document does), padded to the context length.
+  Conversations longer than the context are left out, which is why the
+  context is now 256 tokens: most stories, with their request, fit.
+- **Loss masking.** Only the reply is scored: the story's tokens and its
+  `<|end|>`. The request is read as context but never predicted, so the
+  model learns to answer requests, not to write them. Padding isn't scored
+  either. (The training loop already allowed a position to have no target.)
+- **A fresh optimizer.** Fine-tuning starts its own step count and resets
+  Adam's averages, which describe pretraining's gradients. A fine-tuning
+  checkpoint resumes like a training one.
+- **A record of where it came from.** `chat.safetensors` keeps the
+  pretraining run's settings, step and validation loss in its metadata,
+  beside its own.
+
+**How it's measured.** `chat-eval.tsv` holds requests built from the last 5%
+of the stories, the part pretraining held out, so neither step saw them.
+`transformer evaluate` generates a story for each and counts how many of the
+three requested words appear (as whole words, ignoring case). The control:
+the same stories, checked for the words of a *different* request. A model
+that ignores requests scores about the same on both, so the difference is
+what following the request adds. The pretrained model is the baseline,
+given each request as plain text to continue.
 
 ##### Step 6: generate
 
@@ -614,7 +671,11 @@ Run it before planning a long training run; it's how open decision 6's
 time estimates were checked.
 
 Generation speed (step 6) is printed by `make generate` itself, prefill and
-decode separately; on the M4: (to be measured).
+decode separately. On the M4, with the 1.33M-parameter TinyStories model:
+200 tokens at about 2,300 tokens per second, including 3 cache rebuilds
+past the context. That's no faster than the 2-core Linux machine, so at
+this size the time goes to per-operation overhead, not arithmetic (a
+200-token run, under 0.1 s, is also too short to time precisely).
 
 ## Special tokens
 
@@ -644,20 +705,28 @@ What makes them special:
 3. **Never produced from text.** If the text contains the literal characters
    `<|endoftext|>`, the encoder treats them as ordinary bytes. Otherwise any
    text could fake a document boundary or a change of speaker, a
-   tokenizer-level form of injection. Special IDs are inserted only by code.
+   tokenizer-level form of injection. Special IDs are inserted only by code,
+   with one deliberate exception: `--allow-special`, for training files we
+   write ourselves (`chat.txt`). A user's prompt never gets it: in
+   `generate --chat`, a prompt containing the characters `<|end|>` is
+   still encoded as ordinary bytes, and only the code adds the markers.
 
 Where they appear in the flow:
 
 - **Step 1, tokenize:** defined. The list is saved in `tok.bpe`, each gets a
-  reserved ID, and they count toward V and the fingerprint. EOS
-  (`<|endoftext|>`) is always reserved (done).
+  reserved ID, and they count toward V and the fingerprint. Four are always
+  reserved (done): EOS (`<|endoftext|>`) and the turn markers `<|user|>`,
+  `<|assistant|>` and `<|end|>`, so V = 256 + merges + 4.
 - **Step 2, encode:** inserted. EOS after each document in `corpus.ids`
-  (done); turn markers around each message when `chat.txt` is encoded (to
-  do).
+  (done); the turn markers in `chat.ids`, from `chat.txt` with
+  `--allow-special` (done).
 - **Step 3, build:** each needs its row in the embedding table, which is why
   they must be defined before the model is built.
-- **Step 6, generate:** used. Generation stops at EOS or end-of-turn, and the
-  prompt is wrapped in the same turn markers.
+- **Step 5, finetune:** learned. The turn markers' embedding rows were
+  never trained in pretraining (the markers never occurred), so fine-tuning
+  is where they get their meaning.
+- **Step 6, generate:** used. Generation stops at EOS, or with `--chat` at
+  `<|end|>`, and a `--chat` prompt is wrapped in the same turn markers (done).
 
 ## The transformer block
 
@@ -1386,8 +1455,9 @@ holds parameters.
 | seed | the random seed for the initial weights |
 
 The starting values in `config.toml` (d = 128, 4 layers, 4 heads, context
-128, d_ff = 512) give a model that trains in minutes on a laptop; they're
-meant to be varied as experiments.
+256, d_ff = 512) give a model that trains in minutes on a laptop; they're
+meant to be varied as experiments. (The context started at 128 and was
+raised to 256 for fine-tuning, so that a whole story and its request fit.)
 
 **Counting the parameters.** Write L for layers, T for the context length,
 and V for the vocabulary size (from `tok.bpe`). For the GPT-2 design (learned
@@ -1430,9 +1500,12 @@ Makefile's default tokenizer (1,000 merges, so V = 256 + 1000 + 1 = 1,257):
 
 The embeddings are 18% of that model, against 32% of GPT-2 small: the
 smaller d is, the larger the share the embedding table takes. With the
-TinyStories tokenizer (3,839 merges, so V = 4,096), the embeddings grow to
-540,672 and N = 1,334,016, 41% of it embeddings: the count `make build`
-printed for the first TinyStories run.
+TinyStories tokenizer (V = 4,096), the embeddings grow to 540,672 and
+N = 1,334,016, 41% of it embeddings: the count `make build` printed for the
+first TinyStories run. With the context raised to 256 for fine-tuning (so
+a story and its request fit), the position embeddings double, to 32,768,
+and N = 1,350,400. (V stays 4,096: 3,836 merges + 4 special tokens, EOS
+and the three turn markers.)
 
 If `transformer/` makes different choices, adjust N:
 
@@ -1452,8 +1525,8 @@ first three are required; the defaults are those in `config.toml`.
   training, across resumes, so resuming a run that stopped at step 2000
   with `steps = 3000` trains 1,000 more. The schedule below is stretched
   over `steps`, so changing it changes the learning rate at every step.
-- `batch_size` (16): sequences per step, each a full context long, so a
-  step sees `batch_size` × context tokens (2,048 here).
+- `batch_size` (8): sequences per step, each a full context long, so a
+  step sees `batch_size` × context tokens (2,048 here, with context 256).
 - `warmup_steps` (100): the **warm-up**, over which the learning rate rises
   linearly from 0 to its peak. At the start Adam's running averages hold
   almost no history, so its first steps are unreliable; small steps keep
@@ -1490,6 +1563,12 @@ first three are required; the defaults are those in `config.toml`.
   windows every time, so measurements are comparable across steps.
 - `checkpoint_every` (500): write a checkpoint every this many steps, so a
   stopped run loses at most this much work.
+
+**The `[finetune]` hyperparameters** (read by step 5, finetune) are the same
+keys as `[training]`, with fine-tuning's own values: a lower learning rate
+(0.0005), fewer steps, and here `batch_size` counts conversations, each one
+row padded to the context length. `validation_fraction` holds out the last
+conversations.
 
 **The `[generate]` hyperparameters** (read by step 6, generate). All are
 optional, and each can be overridden on the command line (`--max-tokens`,
@@ -1596,8 +1675,9 @@ llm/
 ├── PLAN.md        # this file
 ├── Makefile       # one target per step: make tokenize, make encode, ...
 ├── out/           # generated files: tok.bpe, *.ids, *.safetensors (git-ignored; make clean removes it)
-├── data/          # corpora and example conversations, e.g. text8, chat.txt (git-ignored)
+├── data/          # downloaded corpora, e.g. text8, TinyStories (git-ignored)
 ├── tokenizer/     # text <-> token IDs: tokenize, encode, decode
+├── chat/          # make_chat.py: fine-tuning conversations from the stories
 ├── word2vec/      # word vectors, the historical precursor
 ├── attention/     # self-attention on its own, then a look at one full block
 └── transformer/   # the model: build, train, finetune, generate
@@ -1605,10 +1685,11 @@ llm/
 
 | directory | flow steps | status |
 |---|---|---|
-| `tokenizer/` | LLM 1 tokenize, 2 encode; decode for 6 | steps 1 and 2 done (`mini_bpe.py`), with EOS; turn markers to do |
+| `tokenizer/` | LLM 1 tokenize, 2 encode; decode for 6 | steps 1 and 2 done (`mini_bpe.py`), with EOS and the turn markers |
+| `chat/` | data for LLM 5 finetune | done (`make_chat.py`) |
 | `word2vec/` | word2vec 1 train, 2 explore | done |
 | `attention/` | none: a learning exercise before `transformer/` | all 6 items of [its list](#where-each-part-is-built) done (`example`, `random`, `train`, `heads`, `block`, `induction`) |
-| `transformer/` | LLM 3 build, 4 train, 5 finetune, 6 generate | steps 3, 4 and 6 done (`transformer build`, `train`, `generate`, plus `inspect` and `bench`); the TinyStories run next, then finetune |
+| `transformer/` | LLM 3 build, 4 train, 5 finetune, 6 generate | all four done (`transformer build`, `train`, `finetune`, `generate`, plus `evaluate`, `inspect` and `bench`); the full TinyStories run next |
 
 The Makefile in `llm/` drives the flow, with one target per step. Each target
 knows which files it needs, so `make train`, for example, first reruns any
@@ -1616,8 +1697,11 @@ earlier step whose inputs have changed, and skips the ones that are up to
 date:
 
 ```
-make tokenize  →  make encode  →  make build  →  make train  →  make finetune  →  make generate
+make tokenize  →  make encode  →  make build  →  make train  →  make finetune  →  make chat
 ```
+
+plus `make generate` (the pretrained model continuing a prompt), `make
+evaluate` (fine-tuning measured), and `make bench`.
 
 Generated files go in `out/` (so `make clean` is simply `rm -rf out`), and
 corpora stay in `data/`. Make tracks files, not variables: after changing a
@@ -1626,28 +1710,30 @@ the targets run, one per step:
 
 ```
 # 1 tokenize
-python3 tokenizer/mini_bpe.py corpus.txt -n 1000 --save tok.bpe
+python3 tokenizer/mini_bpe.py corpus.txt -n 3836 --split-on '<|endoftext|>' --save tok.bpe
 # 2 encode (the corpus for step 4, the conversations for step 5)
-python3 tokenizer/mini_bpe.py --load tok.bpe --encode corpus.txt -o corpus.ids
-python3 tokenizer/mini_bpe.py --load tok.bpe --encode chat.txt   -o chat.ids
+python3 tokenizer/mini_bpe.py --load tok.bpe --encode corpus.txt -o corpus.ids --split-on '<|endoftext|>'
+python3 chat/make_chat.py corpus.txt -o chat.txt --eval chat-eval.tsv
+python3 tokenizer/mini_bpe.py --load tok.bpe --encode chat.txt -o chat.ids --split-on '<|endoftext|>' --allow-special
 # 3 build
 transformer build    --tokenizer tok.bpe --config config.toml -o model-init.safetensors
 # 4 train (end of pretraining)
 transformer train    --model model-init.safetensors --data corpus.ids --config config.toml -o model.safetensors
-# 5 finetune (post-training)
-transformer finetune --model model.safetensors --data chat.ids --config config.toml -o chat.safetensors
+# 5 finetune (post-training), and its measurement
+transformer finetune --model model.safetensors --data chat.ids --tokenizer tok.bpe --config config.toml -o chat.safetensors
+transformer evaluate --model chat.safetensors --tokenizer tok.bpe --config config.toml --requests chat-eval.tsv --chat
 # 6 generate
-transformer generate --model chat.safetensors --tokenizer tok.bpe --config config.toml --prompt "Hello"
+transformer generate --model model.safetensors --tokenizer tok.bpe --config config.toml --prompt "Once upon a time"
+transformer generate --model chat.safetensors --tokenizer tok.bpe --config config.toml --chat --prompt "Write a story with the words frog, bell and egg."
 ```
 
-As in [What each stage does](#what-each-stage-does), everything after step 2
-is proposed. The `tokenize` and `encode` targets exist so far; the others are added as
-each step is built. (The paths above are shortened: in the Makefile, the
-corpus is `data/corpus.txt` and generated files are in `out/`.)
+(The paths above are shortened: in the Makefile, the corpus is
+`data/TinyStories-valid.txt` and generated files are in `out/`.)
 
-**Where post-training lives.** The example conversations (`chat.txt`) are in
-`data/`. The special tokens are reserved by `tokenizer/` in `tok.bpe`, and
-`chat.txt` is encoded with the same `--encode` as the corpus. Fine-tuning
+**Where post-training lives.** The example conversations (`chat.txt`) are
+generated into `out/` by `chat/make_chat.py`, from the corpus. The special
+tokens are reserved by `tokenizer/` in `tok.bpe`, and `chat.txt` is encoded
+with the same `--encode` as the corpus, plus `--allow-special`. Fine-tuning
 itself is `transformer finetune`, the same training loop as `train`, so it
 shares all the model code. Preference tuning, if it's ever added, would be
 another `transformer` subcommand for the same reason.
@@ -1877,9 +1963,14 @@ text8, matching gensim (a widely used Python library with its own word2vec) at
    candidate; it has no punctuation or capitals, so a model trained on it
    generates word salad, where TinyStories gives stories to read.
 
-   *Still open:* fine-tuning data, a few hundred to a few thousand short
-   example conversations: hand-written, generated, or from a small public
-   dataset.
+   *Decided for fine-tuning:* conversations built from the stories
+   themselves (`chat/make_chat.py`): a request naming three uncommon words
+   from a story, answered by that story. No download, honest requests, and
+   a measurable result (how often the requested words appear in the
+   model's stories). Hand-written conversations would take hours and stay
+   few; general question-and-answer data would ask for knowledge a model
+   trained only on children's stories doesn't have. See
+   [Step 5](#step-5-finetune).
 
 7. **How gradients are computed.** *Decided:* (b), a small reverse-mode
    automatic differentiation tape in Rust, built before item 5, so items 5
@@ -1927,14 +2018,14 @@ text8, matching gensim (a widely used Python library with its own word2vec) at
    from hand-set weights to two blocks forming an induction head, and the
    automatic differentiation tape (decision 7), checked against the
    hand-written gradients of items 3 and 4 and used by items 5 and 6.
-4. `transformer/`: ~~build~~, ~~train~~, ~~generate~~ (done), then the
-   TinyStories run, then finetune. This builds step 6 before step 5, on
+4. `transformer/`: ~~build~~, ~~train~~, ~~generate~~, ~~finetune~~ (done),
+   then the full TinyStories run. This builds step 6 before step 5, on
    purpose: the step numbers follow the data through the flow, not the
    order of building. Generate works on any checkpoint, and it's the only
    way to judge either model: fine-tuning's effect (answering in turns)
    shows up only in generated text, so generate comes first, used on the
    pretrained model now and to compare it with the fine-tuned one later.
-   Fine-tuning also waits on an open decision, its data (decision 6).
+   (Fine-tuning followed, once its data was decided: decision 6.)
 5. Throughout: add each step's Makefile target as the step is built
    (`tokenize` exists). At the end, fold this plan into `llm/README.md`.
 

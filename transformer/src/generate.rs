@@ -415,7 +415,8 @@ impl Utf8Stream {
 /// How a generation went, for the speed report.
 pub struct Report {
     pub generated: Vec<usize>,
-    pub stopped_at_eos: bool,
+    /// The stop token that ended generation, if one did (else the limit).
+    pub stopped_at: Option<usize>,
     pub prompt_tokens: usize,
     pub prefill_secs: f64,
     pub decode_secs: f64,
@@ -424,7 +425,8 @@ pub struct Report {
 }
 
 /// Generate from `prompt` (token IDs, at least one). `emit` gets each new
-/// token as it's chosen. Stops at `eos` (not emitted) or after max_tokens.
+/// token as it's chosen. Stops at any token in `stop` (not emitted: EOS,
+/// or <|end|> in a conversation) or after max_tokens.
 ///
 /// Past the context length: the model has no positions beyond T − 1, so
 /// when the cache is full it's rebuilt from the most recent 3/4 of T
@@ -435,7 +437,7 @@ pub fn generate<T: Float>(
     g: &mut Generator<T>,
     cfg: &GenerateConfig,
     prompt: &[usize],
-    eos: Option<usize>,
+    stop: &[usize],
     mut emit: impl FnMut(usize),
 ) -> Report {
     assert!(!prompt.is_empty(), "the prompt needs at least one token");
@@ -452,13 +454,13 @@ pub fn generate<T: Float>(
 
     let t1 = std::time::Instant::now();
     let mut generated = Vec::new();
-    let mut stopped_at_eos = false;
+    let mut stopped_at = None;
     let mut rebuilds = 0;
     while generated.len() < cfg.max_tokens {
         let scores: Vec<f64> = logits.row(0).iter().map(|v| v.to_f64()).collect();
         let next = sample(&scores, cfg.temperature, cfg.top_k, &mut rng);
-        if Some(next) == eos {
-            stopped_at_eos = true;
+        if stop.contains(&next) {
+            stopped_at = Some(next);
             break;
         }
         generated.push(next);
@@ -477,7 +479,7 @@ pub fn generate<T: Float>(
     }
     Report {
         generated,
-        stopped_at_eos,
+        stopped_at,
         prompt_tokens: prompt.len(),
         prefill_secs,
         decode_secs: t1.elapsed().as_secs_f64(),
@@ -595,8 +597,8 @@ mod tests {
             seed: 4,
         };
         let mut g = Generator::new(&p, &c);
-        let a = generate(&mut g, &cfg, &[1, 2], None, |_| {});
-        let b = generate(&mut g, &cfg, &[1, 2], None, |_| {});
+        let a = generate(&mut g, &cfg, &[1, 2], &[], |_| {});
+        let b = generate(&mut g, &cfg, &[1, 2], &[], |_| {});
         assert_eq!(a.generated.len(), 40);
         assert_eq!(a.generated, b.generated);
         assert!(a.rebuilds >= 3, "{} rebuilds", a.rebuilds);
@@ -607,7 +609,7 @@ mod tests {
                 ..cfg.clone()
             },
             &[1, 2],
-            None,
+            &[],
             |_| {},
         );
         assert_ne!(a.generated, other.generated);
@@ -630,11 +632,11 @@ mod tests {
                 ..cfg.clone()
             },
             &[3],
-            None,
+            &[],
             |_| {},
         );
-        let r = generate(&mut g, &cfg, &[3], Some(first.generated[0]), |_| {});
-        assert!(r.stopped_at_eos);
+        let r = generate(&mut g, &cfg, &[3], &[first.generated[0]], |_| {});
+        assert_eq!(r.stopped_at, Some(first.generated[0]));
         assert!(r.generated.is_empty());
     }
 

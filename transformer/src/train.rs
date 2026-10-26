@@ -1,4 +1,5 @@
-//! Step 4, train: the training loop.
+//! Step 4, train: the training loop. Step 5, finetune, runs the same loop
+//! on conversations (`run_with`).
 //!
 //! Each step: take a batch of random windows from the training data, run
 //! the model forward and backward (the tape works out every gradient),
@@ -100,19 +101,27 @@ fn d_ckpt() -> u64 {
     500
 }
 
-#[derive(Deserialize)]
-struct File {
-    training: TrainingConfig,
-}
-
 impl TrainingConfig {
+    /// The `[training]` section of the config file.
     pub fn load(path: &Path) -> Result<TrainingConfig, String> {
+        Self::load_section(path, "training")
+    }
+
+    /// A section with the same keys: `[training]`, or `[finetune]` for step 5.
+    pub fn load_section(path: &Path, section: &str) -> Result<TrainingConfig, String> {
         let text = std::fs::read_to_string(path)
             .map_err(|e| format!("can't read config {}: {e}", path.display()))?;
-        let f: File =
+        let mut table: toml::Table =
             toml::from_str(&text).map_err(|e| format!("config {}: {e}", path.display()))?;
-        f.training.check()?;
-        Ok(f.training)
+        let value = table
+            .remove(section)
+            .ok_or(format!("config {}: no [{section}] section", path.display()))?;
+        let t: TrainingConfig = value
+            .try_into()
+            .map_err(|e| format!("config {} [{section}]: {e}", path.display()))?;
+        t.check()
+            .map_err(|e| e.replace("[training]", &format!("[{section}]")))?;
+        Ok(t)
     }
 
     pub fn check(&self) -> Result<(), String> {
@@ -321,6 +330,9 @@ pub fn validation_loss(
 
 /// What a checkpoint records about how it was made.
 pub struct Provenance {
+    /// "train" or "finetune": the checkpoint's kind, and the command that
+    /// wrote it.
+    pub kind: &'static str,
     /// The input checkpoint's metadata, carried forward (model, tokenizer…).
     pub base: BTreeMap<String, String>,
     pub training_toml: String,
@@ -340,7 +352,7 @@ pub fn save(
     valid_loss: Option<f64>,
 ) -> Result<(), String> {
     let mut meta = prov.base.clone();
-    meta.insert("kind".into(), "train".into());
+    meta.insert("kind".into(), prov.kind.into());
     meta.insert("training".into(), prov.training_toml.clone());
     meta.insert("step".into(), state.step.to_string());
     meta.insert("tokens_seen".into(), state.tokens.to_string());
@@ -356,7 +368,7 @@ pub fn save(
     meta.insert("parent_sha256".into(), prov.parent_sha256.clone());
     meta.insert(
         "producer".into(),
-        format!("transformer train {}", env!("CARGO_PKG_VERSION")),
+        format!("transformer {} {}", prov.kind, env!("CARGO_PKG_VERSION")),
     );
     let tensors = state.tensors();
     let tmp = path.with_extension("safetensors.tmp");
@@ -403,28 +415,46 @@ impl Window {
     }
 }
 
-/// Run training until `t.steps`; `report` receives each log line. Returns
-/// the final state and the last training-window loss.
-#[allow(clippy::too_many_arguments)]
+/// Pretraining (step 4): train on random windows of `corpus_ids` until
+/// `t.steps`; `report` receives each log line. Returns the final state.
 pub fn run(
-    mut state: State,
+    state: State,
     c: &ModelConfig,
     t: &TrainingConfig,
     corpus_ids: &[u32],
     output: &Path,
     prov: &Provenance,
-    mut report: impl FnMut(&str),
+    report: impl FnMut(&str),
 ) -> Result<State, String> {
     let seq = c.context;
     let split = data::split(corpus_ids, t.validation_fraction, seq)?;
     let valid = data::valid_batches(split.valid, t.eval_batches, t.batch_size, seq);
+    let batches = |step: u64| data::train_batch(split.train, t.batch_size, seq, t.seed, step);
+    run_with(state, c, t, batches, &valid, output, prov, report)
+}
+
+/// The training loop, for any source of batches: `batches(step)` gives the
+/// batch for a step (it must depend only on the step, so a resumed run
+/// sees the same batches); `valid` is measured every `t.eval_every` steps.
+#[allow(clippy::too_many_arguments)]
+pub fn run_with(
+    mut state: State,
+    c: &ModelConfig,
+    t: &TrainingConfig,
+    batches: impl Fn(u64) -> Batch,
+    valid: &[Batch],
+    output: &Path,
+    prov: &Provenance,
+    mut report: impl FnMut(&str),
+) -> Result<State, String> {
+    let seq = c.context;
     let tokens_per_step = (t.batch_size * seq) as f64;
     let mut win = Window::new();
     let mut last_loss = None;
     let mut last_valid = None;
     report("   step    loss   valid      lr  grad norm  tokens/s");
     while state.step < t.steps {
-        let batch = data::train_batch(split.train, t.batch_size, seq, t.seed, state.step + 1);
+        let batch = batches(state.step + 1);
         let (loss, norm) = step(&mut state, c, t, &batch, seq);
         if !loss.is_finite() {
             return Err(format!("the loss became {loss} at step {}", state.step));
@@ -436,7 +466,7 @@ pub fn run(
         let last = s == t.steps;
         let evaluate = s % t.eval_every == 0 || last;
         if evaluate {
-            last_valid = validation_loss(&state, c, &valid, seq);
+            last_valid = validation_loss(&state, c, valid, seq);
         }
         if s % t.log_every == 0 || last || evaluate {
             let mean = win.loss_sum / win.steps as f64;
@@ -546,6 +576,7 @@ mod tests {
             std::env::temp_dir().join(format!("mini_transformer_test_{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let prov = Provenance {
+            kind: "train",
             base: BTreeMap::new(),
             training_toml: String::new(),
             data_file: "test".into(),

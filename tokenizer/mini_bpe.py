@@ -37,6 +37,8 @@ Usage:
                                                   # two documents, each ending in EOS
   python3 mini_bpe.py --load tok.bpe --encode stories.txt -o s.ids --split-on '<|endoftext|>'
                                                   # one document per story, each ending in EOS
+  python3 mini_bpe.py --load tok.bpe --encode chat.txt -o chat.ids --split-on SEP --allow-special
+                                                  # conversations: turn markers -> special tokens
 
 Run with -h for all options.
 """
@@ -356,6 +358,29 @@ def decode(ids, vocab):
     return b"".join(vocab[i] for i in ids).decode("utf-8")
 
 
+def encode_with_specials(text, tok, cache=None):
+    """Like encode, but each special-token name written in the text (other
+    than EOS) becomes that special token's ID: for conversations written
+    with turn markers. The text between markers is encoded as usual."""
+    names = [n for n in tok.specials if n != EOS]
+    if not names:
+        return encode(text, tok.merges, tok.pattern, cache)
+    marker = re.compile("|".join(re.escape(n) for n in names))
+    ids, pos = [], 0
+    for m in marker.finditer(text):
+        ids += encode(text[pos:m.start()], tok.merges, tok.pattern, cache)
+        ids.append(tok.special_id(m.group()))
+        pos = m.end()
+    return ids + encode(text[pos:], tok.merges, tok.pattern, cache)
+
+
+def decode_with_specials(ids, tok):
+    """Like decode, but special tokens come back as their names."""
+    first = 256 + len(tok.merges)
+    return b"".join(tok.specials[i - first].encode("utf-8") if i >= first
+                    else tok.vocab[i] for i in ids).decode("utf-8")
+
+
 def report(text, merges, vocab, pattern=PATTERN):
     """Tokenize `text` and print its tokens, IDs, compression, and a check
     that decoding reproduces it exactly."""
@@ -372,11 +397,16 @@ FORMAT_VERSION = "mini_bpe tokenizer v1"
 
 
 # Special tokens: token IDs reserved by hand for structure, not text. They
-# get the IDs after the merges and never come out of encoding text: if a
-# document contains the characters "<|endoftext|>", they're encoded as
-# ordinary bytes. Only code inserts a special token's ID.
+# get the IDs after the merges and never come out of encoding ordinary text:
+# if a document contains the characters "<|endoftext|>", they're encoded as
+# ordinary bytes. Only code inserts a special token's ID, or --allow-special
+# for files written to contain the turn markers (conversations).
 EOS = "<|endoftext|>"  # end of sequence: marks the end of each document
-DEFAULT_SPECIALS = [EOS]
+# Turn markers, for conversations (step 5): who speaks, where a reply ends.
+USER = "<|user|>"
+ASSISTANT = "<|assistant|>"
+END = "<|end|>"
+DEFAULT_SPECIALS = [EOS, USER, ASSISTANT, END]
 
 
 @dataclass
@@ -685,6 +715,12 @@ examples:
                          "at lines consisting exactly of SEP (dropping those "
                          "lines), e.g. '<|endoftext|>' for TinyStories; "
                          "without it, each file is one document")
+    ap.add_argument("--allow-special", action="store_true",
+                    help="in --encode files, turn the tokenizer's special-token "
+                         "names written in the text (the turn markers "
+                         f"{USER}, {ASSISTANT}, {END}) into their special "
+                         "tokens; for conversations. EOS text is refused: "
+                         "documents are separated with --split-on")
     ap.add_argument("-o", "--output", metavar="FILE",
                     help="where --encode writes the token IDs (binary .ids "
                          "format, described in the README)")
@@ -798,6 +834,8 @@ def check_outputs(ap, args):
     training or encoding starts."""
     if args.output and not args.encode:
         ap.error("-o/--output is only used with --encode")
+    if args.allow_special and not args.encode:
+        ap.error("--allow-special is only used with --encode")
     if args.split_on is not None and (not args.split_on.strip()
                                       or "\n" in args.split_on
                                       or "\r" in args.split_on):
@@ -828,24 +866,44 @@ def read_text(ap, path):
     return None  # not reached: ap.error exits
 
 
-def encode_file(ap, path, tok, cache, split_on):
-    """Encode one --encode file: its documents, each followed by EOS, with
-    a round-trip check per document. Prints a line about the file.
-    Returns (IDs, number of documents, bytes of document text)."""
+def encode_document(where, doc_text, tok, cache, allow_special):
+    """Encode one document, checking that decoding gives it back exactly.
+    Raises ValueError naming the document (`where`) if it can't."""
+    if allow_special:
+        if EOS in doc_text:
+            raise ValueError(f"{where} contains {EOS}; with --allow-special, "
+                             f"separate documents with --split-on instead")
+        doc = encode_with_specials(doc_text, tok, cache)
+        back = decode_with_specials(doc, tok)
+    else:
+        doc = encode(doc_text, tok.merges, tok.pattern, cache)
+        back = decode(doc, tok.vocab)
+    # Round-trip check per document: the IDs between EOS tokens must
+    # decode to exactly this document. Encoding text never produces the
+    # EOS ID, so the document boundaries are unambiguous.
+    if back != doc_text:
+        raise ValueError(f"round-trip check failed for {where}: "
+                         f"decoding didn't reproduce the text")
+    return doc
+
+
+def encode_file(ap, path, tok, cache, args):
+    """Encode one --encode file: its documents (split at args.split_on),
+    each followed by EOS, with a round-trip check per document. Prints a
+    line about the file. Returns (IDs, number of documents, bytes of
+    document text)."""
     text = read_text(ap, path)
-    docs, seps = (([text], None) if split_on is None
-                  else split_documents(text, split_on))
+    docs, seps = (([text], None) if args.split_on is None
+                  else split_documents(text, args.split_on))
     ids, nbytes = [], 0
     for i, doc_text in enumerate(docs):
-        doc = encode(doc_text, tok.merges, tok.pattern, cache)
-        # Round-trip check per document: the IDs between EOS tokens must
-        # decode to exactly this document. Encoding text never produces the
-        # EOS ID, so the document boundaries are unambiguous.
-        if decode(doc, tok.vocab) != doc_text:
-            ap.error(f"round-trip check failed for {path!r}"
-                     f"{'' if seps is None else f', document {i + 1}'}: "
-                     f"decoding didn't reproduce the text")
-        ids += doc + [tok.special_id(EOS)]
+        try:
+            ids += encode_document(
+                f"{path!r}{'' if seps is None else f', document {i + 1}'}",
+                doc_text, tok, cache, args.allow_special)
+        except ValueError as e:
+            ap.error(str(e))
+        ids.append(tok.special_id(EOS))
         nbytes += len(doc_text.encode("utf-8"))
     head = f"  {path:<24} {len(text.encode('utf-8')):>12,} bytes -> "
     if seps is None:
@@ -854,6 +912,14 @@ def encode_file(ap, path, tok, cache, split_on):
         print(f"{head}{len(docs):,} documents ({seps:,} separator lines "
               f"dropped), {len(ids) - len(docs):,} tokens + one EOS each")
     return ids, len(docs), nbytes
+
+
+def print_marker_counts(ids, tok):
+    """How many of each turn marker an --allow-special encoding produced."""
+    counts = Counter(ids)
+    print("  turn markers: " + ", ".join(
+        f"{n} (ID {tok.special_id(n)}) x {counts[tok.special_id(n)]:,}"
+        for n in tok.specials if n != EOS))
 
 
 def encode_mode(ap, args, tok):
@@ -874,8 +940,7 @@ def encode_mode(ap, args, tok):
     print(f"\n=== Encode: {' '.join(args.encode)} -> {args.output} ===")
     ids, cache, nbytes, ndocs = [], {}, 0, 0
     for path in args.encode:
-        file_ids, docs, doc_bytes = encode_file(ap, path, tok, cache,
-                                                args.split_on)
+        file_ids, docs, doc_bytes = encode_file(ap, path, tok, cache, args)
         ids += file_ids
         ndocs += docs
         nbytes += doc_bytes
@@ -888,6 +953,8 @@ def encode_mode(ap, args, tok):
           f"{len(ids):,} IDs including {ndocs:,} EOS (ID {eos}); "
           f"{nbytes / max(len(ids) - ndocs, 1):.2f} bytes/token; "
           f"lossless round-trip of every document: True")
+    if args.allow_special:
+        print_marker_counts(ids, tok)
     print(f"  wrote {IDS_HEADER.size}-byte header + {len(ids):,} IDs x "
           f"{width} bytes; V = {tok.vocab_size:,}; "
           f"tokenizer fingerprint {fingerprint.hex()[:16]}…")

@@ -1,9 +1,9 @@
 # transformer
 
 The real model: a small GPT-style language model, and the LLM flow's steps 3
-to 6 in PLAN.md (build, train, finetune, generate). Steps 3 (build), 4
-(train) and 6 (generate) are done; 6 was built before 5 on purpose (PLAN.md,
-"Order of work").
+to 6 in PLAN.md (build, train, finetune, generate). All four are done, plus
+`evaluate` (measuring fine-tuning), `inspect` and `bench`. Step 6 was built
+before step 5 on purpose (PLAN.md, "Order of work").
 
 Terms (tensor, checkpoint, safetensors, layer norm, …) are defined in
 [`../PLAN.md`](../PLAN.md#terms).
@@ -177,11 +177,77 @@ rising later. Each step now gets its own generator through SplitMix64's
 scrambling function (`Rng::stream`), and a test requires the windows of
 many steps to be as varied as random picks.
 
+## `transformer finetune` (step 5)
+
+```
+transformer finetune --model model.safetensors --data chat.ids --tokenizer tok.bpe --config config.toml -o chat.safetensors
+```
+
+Post-training: the same training loop as `train` (`train::run_with`), on
+conversations instead of random windows of text, with `[finetune]`'s
+settings (the same keys as `[training]`). `chat.ids` comes from
+`../chat/make_chat.py`, encoded with `mini_bpe.py --allow-special`: each
+document is `<|user|> request <|assistant|> story <|end|>`.
+
+- **One conversation per row**, starting with EOS, padded to the context
+  length. Conversations longer than the context are left out, and counted.
+- **Loss masking**: only the reply's tokens (the story and its `<|end|>`)
+  are scored. The request is context, never a target. The loss is the mean
+  over the scored tokens.
+- **A fresh optimizer** when starting from a pretrained checkpoint: step 0,
+  and Adam's averages reset. A fine-tuning checkpoint resumes exactly, as
+  in `train`.
+- **Before and after**: the validation loss on the held-out conversations'
+  replies is printed before the first step, then as training goes.
+- **Provenance**: `chat.safetensors` keeps the pretraining run's settings,
+  step, validation loss and data (`pretraining_*` in its metadata), and its
+  own as usual, with `kind = finetune`.
+- **Checks**: the tokenizer must be the model's and have the turn markers;
+  the data must come from the same tokenizer; every conversation must have
+  the shape above (one request, one reply).
+
+## `transformer evaluate`
+
+```
+transformer evaluate --model chat.safetensors --tokenizer tok.bpe --config config.toml --requests chat-eval.tsv --chat
+transformer evaluate --model model.safetensors --tokenizer tok.bpe --config config.toml --requests chat-eval.tsv
+make evaluate
+```
+
+Measures fine-tuning. For each request in `chat-eval.tsv` (from stories
+neither training step saw), it generates a story with `[generate]`'s
+sampling (request i uses seed + i) and counts how many of the three
+requested words appear, as whole words ignoring case ("ball" counts in
+"Ball." but not in "balloon" or "balls").
+
+The control: the same stories checked for the words of a *different*
+request (the next one). Words like "ball" are common in stories anyway, so
+the control measures how often a story contains three such words by chance.
+The difference between the two is what following the request adds. It also
+reports how many stories ended by themselves (at `<|end|>` with `--chat`,
+`<|endoftext|>` without) and their average length, and prints the first few
+stories with each word marked ✓ or ✗ (`--show N`).
+
+With `--chat`, each request is sent as a conversation. Without it, the
+request is plain text for the model to continue: the baseline for the
+pretrained model, which has never seen a turn marker. `make evaluate` runs
+both: the pretrained model without `--chat`, the fine-tuned one with it.
+
 ## `transformer generate` (step 6)
 
 ```
 transformer generate --model model.safetensors --tokenizer tok.bpe --config config.toml --prompt "Once upon a time"
 make generate PROMPT='The dog' GEN_ARGS='--temperature 0.5 --seed 7'
+```
+
+With `--chat`, the prompt is a request to a fine-tuned model: it's sent as
+`<|endoftext|> <|user|> request <|assistant|>`, exactly how each fine-tuning
+conversation began, and generation stops at `<|end|>`. The markers are added
+by the code: marker text typed into a prompt stays ordinary text.
+
+```
+transformer generate --model chat.safetensors --tokenizer tok.bpe --config config.toml --chat --prompt "Write a story with the words frog, bell and egg."
+make chat PROMPT='Write a story with the words frog, bell and egg.'
 ```
 
 Inference: the model continues the prompt one token at a time, printing
@@ -349,6 +415,11 @@ starting shape with a small vocabulary, a 2-core Linux machine takes about
   text (loss from ln V to under 0.2); data from another tokenizer is
   refused; and 10 steps + checkpoint + resume + 10 steps gives exactly the
   weights and Adam state of 20 steps
+- fine-tuning data: conversations parse into rows with only the reply and
+  `<|end|>` scored, too-long ones are left out and counted, and malformed
+  ones (no request, no reply, no end, two turns) are refused
+- evaluation: whole-word matching, parsing `chat-eval.tsv`, and the tally of
+  requested and control words
 - generation: the KV cache gives exactly the training forward pass's
   predictions (above); greedy and top-1 pick the likeliest token; sampling
   frequencies match the softmax (200,000 draws, within 5 standard
@@ -371,7 +442,8 @@ newer Unicode version could still be classed differently.
 
 ## Source
 
-- `src/main.rs`: the command line: `build`, `train`, `generate`, `inspect`, `bench`
+- `src/main.rs`: the command line: `build`, `train`, `finetune`, `generate`,
+  `evaluate`, `inspect`, `bench`
 - `src/config.rs`: `config.toml`'s `[model]` section
 - `src/tokenizer.rs`: V and the fingerprint from `tok.bpe`; encoding and
   decoding, matching mini_bpe.py
@@ -381,14 +453,17 @@ newer Unicode version could still be classed differently.
 - `src/tensor.rs`: the matrix type (f32 or f64) and the threaded multiplies
 - `src/tape.rs`: the batched automatic differentiation tape
 - `src/gpt.rs`: the model's forward pass, from a checkpoint's tensors
-- `src/data.rs`: reading `corpus.ids`, the validation split, and batches
-- `src/train.rs`: `[training]`, AdamW, the schedule, checkpoints, resuming
+- `src/data.rs`: reading `corpus.ids`, the validation split, and batches;
+  conversations for fine-tuning, with loss masking
+- `src/train.rs`: `[training]` and `[finetune]`, AdamW, the schedule, the
+  training loop for any batch source, checkpoints, resuming
 - `src/generate.rs`: `[generate]`, the KV-cache inference path, sampling,
   and the generation loop
+- `src/evaluate.rs`: word matching and the tally for `evaluate`
 - `src/bench.rs`: the matrix-multiply benchmark and the training-step timing
 - `src/rng.rs`: the seeded random number generator (from attention/)
 
 ## Next
 
-The full TinyStories run (a bigger model, about a day or more of
-training), then step 5, fine-tuning.
+The full TinyStories run: a bigger model, about a day or more of training,
+then fine-tuning it the same way.

@@ -12,8 +12,8 @@ everything visible:
    chunk boundary.
 2. **Train** — start from the 256 byte values, repeatedly merge the most
    frequent adjacent pair, and record each merge in order. The vocabulary is
-   the 256 bytes plus one new token per merge (plus EOS; see
-   [Special tokens](#special-tokens)).
+   the 256 bytes plus one new token per merge (plus four special tokens;
+   see [Special tokens](#special-tokens)).
 3. **Encode / decode** — apply the merges to new text, giving token IDs;
    decoding concatenates the tokens' bytes back. Tokenization is **lossless**:
    decoding reproduces the input exactly, including every space and newline.
@@ -34,9 +34,10 @@ two steps of the LLM flow:
 A model sizes its embedding table from the tokenizer's vocabulary size, V (one
 row per token), and trains on the token IDs, which select those rows.
 
-It is for understanding, not production use. It's pure Python, its only special
-token is EOS, and its regex approximates GPT-style pre-tokenization, so its splits
-won't exactly match any real model's.
+It is for understanding, not production use. It's pure Python, it has only
+four special tokens (EOS and three conversation markers), and its regex
+approximates GPT-style pre-tokenization, so its splits won't exactly match any
+real model's.
 
 ## Requirements
 
@@ -84,6 +85,9 @@ Options:
   lines consisting exactly of SEP, dropping those lines (see
   [Files holding many documents](#files-holding-many-documents)). Without
   it, each file is one document.
+- `--allow-special`: in `--encode` files, the turn markers written as text
+  (`<|user|>`, `<|assistant|>`, `<|end|>`) become their special tokens; for
+  conversations (see [Conversations](#conversations))
 - `-o FILE`, `--output FILE`: where `--encode` writes the token IDs
 - `-t STRING`, `--text STRING`: after training or loading, tokenize STRING;
   may be repeated
@@ -134,7 +138,8 @@ changes the text. The winning count never increases from one merge to the next.
 Training stops early when no pair occurs more than once, which is why a small
 corpus learns fewer merges than `-n` allows.
 
-**Summary.** The number of merges learned, the vocabulary size (256 + merges),
+**Summary.** The number of merges learned, the vocabulary size (256 + merges
++ 4 special tokens),
 and **bytes per token**: how well the tokenizer compresses the corpus. Higher
 means fewer, longer tokens.
 
@@ -177,7 +182,7 @@ Example (`./mini_bpe.py sample.txt news.txt -q --save tok.bpe`):
 
 ```
 # mini_bpe tokenizer v1
-# vocab_size: 365  (256 bytes + 108 merges + 1 special)
+# vocab_size: 368  (256 bytes + 108 merges + 4 special)
 # trained on: sample.txt  sha256 8e5a595442e28fa0e4ee1a7d…
 # trained on: news.txt  sha256 cf7a91850aa826969c1fb760…
 # Merge lines: '<left_id> <right_id>'; the merge on merge line k (from 0)
@@ -187,6 +192,9 @@ pattern '(?:[sdmt]|ll|ve|re)| ?[^\W\d_]+| ?\d+| ?(?:[^\s\w]|_)+|\s+(?!\S)|\s+
 104 101  # 257: [h] + [e] -> [he]
 …
 special <|endoftext|>  # 364
+special <|user|>  # 365
+special <|assistant|>  # 366
+special <|end|>  # 367
 ```
 
 Lines starting with `#` and text after `#` on a data line are comments for
@@ -206,25 +214,54 @@ would point at the wrong token.
 
 ## Special tokens
 
-A special token is a token ID reserved by hand for structure, not text. The
-tokenizer currently has one, **EOS** ("end of sequence"), named
-`<|endoftext|>` as in GPT-2. Training always reserves it, with the first ID
-after the merges, so V = 256 + merges + 1.
+A special token is a token ID reserved by hand for structure, not text.
+Training always reserves four, with the IDs after the merges, so
+V = 256 + merges + 4:
+
+- **EOS** ("end of sequence"), named `<|endoftext|>` as in GPT-2
+- **turn markers**, for conversations (fine-tuning, step 5): `<|user|>` and
+  `<|assistant|>` say who speaks next, and `<|end|>` ends a reply. The end
+  marker is what lets a chat model stop after its answer.
 
 EOS marks the end of each document. In training it keeps unrelated documents
 apart, so the model doesn't learn to continue a recipe with a news article;
 in generation, the model *predicting* EOS is how it signals that it's
 finished.
 
-**Text never becomes a special token.** If a document contains the
-characters `<|endoftext|>`, they're encoded as ordinary bytes; only the encoder
-itself inserts the EOS ID, at document boundaries. Otherwise any text could
-fake a document boundary, a tokenizer-level form of injection.
+**Text never becomes a special token**, by default. If a document contains
+the characters `<|endoftext|>`, they're encoded as ordinary bytes; only the
+encoder itself inserts the EOS ID, at document boundaries. Otherwise any text
+could fake a document boundary or a change of speaker, a tokenizer-level form
+of injection. The one exception is `--allow-special`, for conversation files
+we write ourselves (see [Conversations](#conversations)).
 
-The file format holds a list of special tokens, so the conversation markers
-needed for fine-tuning (see `../PLAN.md`) can be added later. A tokenizer saved
-before EOS existed has no `special` line: it still works for `-t` and `-f`,
-but `--encode` refuses it, so retrain it.
+A tokenizer saved before EOS existed has no `special` line: it still works for
+`-t` and `-f`, but `--encode` refuses it, so retrain it. One saved before the
+turn markers has only EOS: it works for pretraining, but fine-tuning needs the
+markers, so retrain it for that.
+
+## Conversations
+
+Fine-tuning data (`chat.txt`, written by `../chat/make_chat.py`) holds
+conversations with the turn markers written out as text, one conversation per
+document:
+
+```
+<|user|>Write a story with the words dog, ball and park.<|assistant|>Once upon a time …<|end|>
+<|endoftext|>
+<|user|>…
+```
+
+`--allow-special` makes the markers in the text become their special tokens;
+the text between them is encoded as usual:
+
+```
+./mini_bpe.py --load tok.bpe --encode chat.txt -o chat.ids --split-on '<|endoftext|>' --allow-special
+```
+
+The output adds a count of each marker. `<|endoftext|>` itself is still
+refused inside a document (documents are separated with `--split-on`), and
+the round-trip check decodes each marker back to its name.
 
 ## Encoding a corpus
 
@@ -243,8 +280,8 @@ the tokenizer from the example above (trained on `sample.txt` and `news.txt`):
 === Encode: sample.txt news.txt -> docs.ids ===
   sample.txt                        682 bytes ->         305 tokens + EOS
   news.txt                          137 bytes ->          58 tokens + EOS
-  2 document(s), 819 bytes of text -> 365 IDs including 2 EOS (ID 364); 2.26 bytes/token; lossless round-trip: True
-  wrote 64-byte header + 365 IDs x 2 bytes; V = 365; tokenizer fingerprint 3e9260d88f88bc69…
+  2 document(s), 819 bytes of text -> 365 IDs including 2 EOS (ID 364); 2.26 bytes/token; lossless round-trip of every document: True
+  wrote 64-byte header + 365 IDs x 2 bytes; V = 368; tokenizer fingerprint 2cdba0b577f1946f…
 ```
 
 Each document's IDs are decoded again and compared with its file; if any

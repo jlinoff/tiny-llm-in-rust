@@ -8,8 +8,9 @@ OUT       ?= out
 CORPUS    ?= data/TinyStories-valid.txt
 SPLIT_ON  ?= <|endoftext|>
 SPLIT      = $(if $(SPLIT_ON),--split-on '$(SPLIT_ON)')
-# 3,839 merges: V = 256 bytes + 3,839 merges + EOS = 4,096.
-MERGES    ?= 3839
+# 3,836 merges: V = 256 bytes + 3,836 merges + 4 special tokens (EOS and the
+# three turn markers) = 4,096.
+MERGES    ?= 3836
 
 # Print a section header: $(call hdr,text)
 hdr = @printf "\n\033[35;1m== %s ==\033[0m\n" "$(1)"
@@ -64,6 +65,49 @@ $(OUT)/model.safetensors: $(OUT)/model-init.safetensors $(OUT)/corpus.ids config
 	$(call hdr,train)
 	time $(TRANSFORMER) train --model $(OUT)/model-init.safetensors --data $(OUT)/corpus.ids --config config.toml -o $@
 
+# Step 5: finetune (post-training). The conversations are built from the
+# corpus's stories: a request naming three words from each story, answered
+# by the story. chat-eval.tsv holds requests from the held-out stories.
+# CHAT_ARGS: make_chat.py's options, such as '--skip-common 200'.
+CHAT_ARGS ?=
+
+$(OUT)/chat.txt: $(CORPUS) chat/make_chat.py | $(OUT)
+	$(call hdr,chat data)
+	python3 chat/make_chat.py $(CORPUS) $(SPLIT) $(CHAT_ARGS) -o $(OUT)/chat.txt --eval $(OUT)/chat-eval.tsv
+
+# Written by the same command as chat.txt.
+$(OUT)/chat-eval.tsv: $(OUT)/chat.txt ;
+
+$(OUT)/chat.ids: $(OUT)/chat.txt $(OUT)/tok.bpe tokenizer/mini_bpe.py | $(OUT)
+	$(call hdr,encode chat)
+	python3 tokenizer/mini_bpe.py --load $(OUT)/tok.bpe --encode $(OUT)/chat.txt --split-on '<|endoftext|>' --allow-special -o $@
+
+.PHONY: finetune
+finetune: $(OUT)/chat.safetensors ## Step 5: fine-tune the trained model on conversations.
+
+$(OUT)/chat.safetensors: $(OUT)/model.safetensors $(OUT)/chat.ids config.toml $(TRANSFORMER) | $(OUT)
+	$(call hdr,finetune)
+	time $(TRANSFORMER) finetune --model $(OUT)/model.safetensors --data $(OUT)/chat.ids --tokenizer $(OUT)/tok.bpe --config config.toml -o $@
+
+# How often stories use the requested words: the pretrained model (requests
+# as plain text) against the fine-tuned one (as conversations). Like
+# generate, the models are required but not prerequisites.
+EVAL_ARGS ?=
+
+.PHONY: evaluate
+evaluate: $(TRANSFORMER) $(OUT)/chat-eval.tsv ## Measure fine-tuning: requested words in stories, before and after.
+	@test -f $(OUT)/chat.safetensors || { echo "no $(OUT)/chat.safetensors: run make finetune first"; exit 1; }
+	$(call hdr,evaluate pretrained)
+	$(TRANSFORMER) evaluate --model $(OUT)/model.safetensors --tokenizer $(OUT)/tok.bpe --config config.toml --requests $(OUT)/chat-eval.tsv $(EVAL_ARGS)
+	$(call hdr,evaluate fine-tuned)
+	$(TRANSFORMER) evaluate --model $(OUT)/chat.safetensors --tokenizer $(OUT)/tok.bpe --config config.toml --requests $(OUT)/chat-eval.tsv --chat $(EVAL_ARGS)
+
+# Talk to the fine-tuned model: make chat PROMPT='Write a story with the words frog, bell and egg.'
+.PHONY: chat
+chat: $(TRANSFORMER) ## Step 6 with the fine-tuned model: PROMPT is the request.
+	$(call hdr,$@)
+	@test -f $(OUT)/chat.safetensors || { echo "no $(OUT)/chat.safetensors: run make finetune first"; exit 1; }
+	$(TRANSFORMER) generate --model $(OUT)/chat.safetensors --tokenizer $(OUT)/tok.bpe --config config.toml --chat --prompt '$(PROMPT)' $(GEN_ARGS)
 
 # Step 6. generate (inference)
 # Always runs (nothing is written). Override the prompt or the sampling:
@@ -164,7 +208,9 @@ help:  ## This help message.
 		sort -f | \
 		sed -e 's@^@   @'
 	@printf "\n\033[35;1m%s\033[0m\n" "Variables"
+	@printf "   %-18s  %s\n" "CHAT_ARGS" "$(CHAT_ARGS)"
 	@printf "   %-18s  %s\n" "CORPUS" "$(CORPUS)"
+	@printf "   %-18s  %s\n" "EVAL_ARGS" "$(EVAL_ARGS)"
 	@printf "   %-18s  %s\n" "GEN_ARGS" "$(GEN_ARGS)"
 	@printf "   %-18s  %s\n" "MERGES" "$(MERGES)"
 	@printf "   %-18s  %s\n" "OUT" "$(OUT)"

@@ -1,13 +1,16 @@
 //! transformer: the LLM flow's steps 3–6 (PLAN.md, "The flows"). So far:
 //!   build     step 3: create the model with random weights
 //!   train     step 4: train it on token IDs (resumable)
+//!   finetune  step 5: train it further on conversations (chat.ids)
 //!   generate  step 6: write text from a prompt (inference)
+//!   evaluate  measure how often generated stories use requested words
 //!   inspect   show what a checkpoint holds, and check it against its config
 //!   bench     measure this machine's matrix-multiply speed
 
 mod bench;
 mod config;
 mod data;
+mod evaluate;
 mod generate;
 mod gpt;
 mod model;
@@ -75,6 +78,27 @@ enum Command {
         #[arg(short, long)]
         output: PathBuf,
     },
+    /// Step 5: fine-tune a trained model on conversations (chat.ids, made by
+    /// chat/make_chat.py and mini_bpe.py --allow-special). Only the replies
+    /// are scored. Resumes if the input is a fine-tuning checkpoint.
+    Finetune {
+        /// The pretrained checkpoint (model.safetensors), or a fine-tuning
+        /// checkpoint to resume
+        #[arg(long)]
+        model: PathBuf,
+        /// The conversations' token IDs (chat.ids)
+        #[arg(long)]
+        data: PathBuf,
+        /// The tokenizer (tok.bpe), for the turn markers' IDs
+        #[arg(long)]
+        tokenizer: PathBuf,
+        /// The config file; only [finetune] is read
+        #[arg(long)]
+        config: PathBuf,
+        /// The checkpoint to write (chat.safetensors)
+        #[arg(short, long)]
+        output: PathBuf,
+    },
     /// Step 6: write text that continues a prompt, one token at a time
     /// (inference). Works with any checkpoint.
     Generate {
@@ -87,9 +111,14 @@ enum Command {
         /// The config file; only [generate] is read (all optional)
         #[arg(long)]
         config: PathBuf,
-        /// The text to continue; empty starts a new document
+        /// The text to continue (or with --chat, the request); empty starts
+        /// a new document
         #[arg(long, default_value = "")]
         prompt: String,
+        /// Treat the prompt as a user's request: wrap it in the turn markers
+        /// and stop at <|end|> (for a fine-tuned model)
+        #[arg(long)]
+        chat: bool,
         /// Override [generate] max_tokens
         #[arg(long)]
         max_tokens: Option<usize>,
@@ -100,6 +129,44 @@ enum Command {
         #[arg(long)]
         top_k: Option<usize>,
         /// Override [generate] seed
+        #[arg(long)]
+        seed: Option<u64>,
+    },
+    /// Measure how often generated stories use the words their requests ask
+    /// for (chat-eval.tsv, made by chat/make_chat.py), against a control.
+    Evaluate {
+        /// The checkpoint (chat.safetensors, or model.safetensors to compare)
+        #[arg(long)]
+        model: PathBuf,
+        /// The tokenizer the model was built with (tok.bpe)
+        #[arg(long)]
+        tokenizer: PathBuf,
+        /// The config file; [generate] sets the sampling
+        #[arg(long)]
+        config: PathBuf,
+        /// The evaluation requests (chat-eval.tsv)
+        #[arg(long)]
+        requests: PathBuf,
+        /// Send each request as a conversation (turn markers); without it,
+        /// as plain text for the model to continue
+        #[arg(long)]
+        chat: bool,
+        /// Use only the first N requests
+        #[arg(long)]
+        count: Option<usize>,
+        /// Print this many of the stories
+        #[arg(long, default_value_t = 3)]
+        show: usize,
+        /// Override [generate] max_tokens
+        #[arg(long)]
+        max_tokens: Option<usize>,
+        /// Override [generate] temperature
+        #[arg(long)]
+        temperature: Option<f64>,
+        /// Override [generate] top_k
+        #[arg(long)]
+        top_k: Option<usize>,
+        /// Override [generate] seed (request i uses seed + i)
         #[arg(long)]
         seed: Option<u64>,
     },
@@ -134,11 +201,46 @@ fn main() -> ExitCode {
             config,
             output,
         } => train_command(&model, &data, &config, &output),
+        Command::Finetune {
+            model,
+            data,
+            tokenizer,
+            config,
+            output,
+        } => finetune_command(&model, &data, &tokenizer, &config, &output),
+        Command::Evaluate {
+            model,
+            tokenizer,
+            config,
+            requests,
+            chat,
+            count,
+            show,
+            max_tokens,
+            temperature,
+            top_k,
+            seed,
+        } => evaluate_command(
+            &model,
+            &tokenizer,
+            &config,
+            &requests,
+            chat,
+            count,
+            show,
+            Overrides {
+                max_tokens,
+                temperature,
+                top_k,
+                seed,
+            },
+        ),
         Command::Generate {
             model,
             tokenizer,
             config,
             prompt,
+            chat,
             max_tokens,
             temperature,
             top_k,
@@ -148,6 +250,7 @@ fn main() -> ExitCode {
             &tokenizer,
             &config,
             &prompt,
+            chat,
             Overrides {
                 max_tokens,
                 temperature,
@@ -445,6 +548,7 @@ fn train_command(
         base.remove(k);
     }
     let prov = train::Provenance {
+        kind: "train",
         base,
         training_toml: toml::to_string(&tcfg).expect("a flat struct always serializes"),
         data_file: data_path.display().to_string(),
@@ -481,6 +585,108 @@ fn train_command(
     Ok(())
 }
 
+/// A checkpoint read and checked: a mini_transformer checkpoint whose
+/// tensors match its stored [model].
+struct Loaded {
+    path: PathBuf,
+    ckpt: safetensors::File,
+    config: ModelConfig,
+    vocab: usize,
+}
+
+impl Loaded {
+    fn meta(&self, k: &str) -> Result<String, String> {
+        self.ckpt
+            .metadata
+            .get(k)
+            .cloned()
+            .ok_or(format!("{}: no {k} in the metadata", self.path.display()))
+    }
+
+    /// The weights alone (without Adam's state), as f32 matrices.
+    fn params(&self) -> gpt::Params<f32> {
+        let weights: Vec<safetensors::Tensor> = self
+            .ckpt
+            .tensors
+            .iter()
+            .filter(|t| !t.name.starts_with("adam."))
+            .cloned()
+            .collect();
+        gpt::Params::<f32>::from_tensors(&weights)
+    }
+
+    /// "untrained", "trained to step N" or "fine-tuned for N steps".
+    fn describe(&self) -> String {
+        let step = self.ckpt.metadata.get("step");
+        match (self.ckpt.metadata.get("kind").map(String::as_str), step) {
+            (Some("finetune"), Some(s)) => format!("fine-tuned for {s} steps"),
+            (_, Some(s)) => format!("trained to step {s}"),
+            _ => "untrained".into(),
+        }
+    }
+}
+
+fn load_checkpoint(path: &Path) -> Result<Loaded, String> {
+    let ckpt = safetensors::read(path)?;
+    let mut l = Loaded {
+        path: path.to_path_buf(),
+        ckpt,
+        config: ModelConfig {
+            d_model: 1,
+            layers: 1,
+            heads: 1,
+            context: 1,
+            d_ff: 1,
+            seed: 0,
+        },
+        vocab: 0,
+    };
+    if l.meta("format")? != FORMAT {
+        return Err(format!(
+            "{}: not a mini_transformer checkpoint",
+            path.display()
+        ));
+    }
+    l.config = ModelConfig::from_toml(&l.meta("model")?)?;
+    l.vocab = l
+        .meta("vocab_size")?
+        .parse()
+        .map_err(|_| "vocab_size isn't a number")?;
+    let problems = model::check_layout(&l.ckpt.tensors, &l.config, l.vocab);
+    if !problems.is_empty() {
+        return Err(format!("{}: {}", path.display(), problems.join("; ")));
+    }
+    Ok(l)
+}
+
+/// The tokenizer, checked to be the one the model was built with.
+fn load_tokenizer(tok_path: &Path, model: &Loaded) -> Result<TokenizerInfo, String> {
+    let tok = TokenizerInfo::load(tok_path)?;
+    if hex(&tok.fingerprint) != model.meta("tokenizer_fingerprint")? {
+        return Err(format!(
+            "{} isn't the tokenizer {} was built with (fingerprints differ)",
+            tok_path.display(),
+            model.path.display()
+        ));
+    }
+    Ok(tok)
+}
+
+/// The special tokens a conversation needs.
+fn markers(tok: &TokenizerInfo) -> Result<data::Markers, String> {
+    let id = |name: &str| {
+        tok.special_id(name).map(|i| i as u32).ok_or(format!(
+            "the tokenizer has no {name}: retrain it with the current mini_bpe.py, which adds the turn markers"
+        ))
+    };
+    Ok(data::Markers {
+        eos: id("<|endoftext|>")?,
+        user: id("<|user|>")?,
+        assistant: id("<|assistant|>")?,
+        end: id("<|end|>")?,
+    })
+}
+
 /// Command-line values that replace the config's [generate] ones.
 struct Overrides {
     max_tokens: Option<usize>,
@@ -489,84 +695,22 @@ struct Overrides {
     seed: Option<u64>,
 }
 
-fn generate_command(
-    model_path: &Path,
-    tok_path: &Path,
+fn sampling_config(
     config_path: &Path,
-    prompt: &str,
-    over: Overrides,
-) -> Result<(), String> {
-    use std::io::Write;
-    // Check every input first, before doing any work.
-    check_readable(model_path, "checkpoint")?;
-    check_readable(tok_path, "tokenizer")?;
-    check_readable(config_path, "config")?;
+    over: &Overrides,
+) -> Result<generate::GenerateConfig, String> {
     let mut cfg = generate::GenerateConfig::load(config_path)?;
     cfg.max_tokens = over.max_tokens.unwrap_or(cfg.max_tokens);
     cfg.temperature = over.temperature.unwrap_or(cfg.temperature);
     cfg.top_k = over.top_k.unwrap_or(cfg.top_k);
     cfg.seed = over.seed.unwrap_or(cfg.seed);
     cfg.check()?;
+    Ok(cfg)
+}
 
-    let ckpt = safetensors::read(model_path)?;
-    let meta = |k: &str| {
-        ckpt.metadata
-            .get(k)
-            .cloned()
-            .ok_or(format!("{}: no {k} in the metadata", model_path.display()))
-    };
-    if meta("format")? != FORMAT {
-        return Err(format!(
-            "{}: not a mini_transformer checkpoint",
-            model_path.display()
-        ));
-    }
-    let config = ModelConfig::from_toml(&meta("model")?)?;
-    let vocab: usize = meta("vocab_size")?
-        .parse()
-        .map_err(|_| "vocab_size isn't a number")?;
-    let problems = model::check_layout(&ckpt.tensors, &config, vocab);
-    if !problems.is_empty() {
-        return Err(format!("{}: {}", model_path.display(), problems.join("; ")));
-    }
-    let tok = TokenizerInfo::load(tok_path)?;
-    if hex(&tok.fingerprint) != meta("tokenizer_fingerprint")? {
-        return Err(format!(
-            "{} isn't the tokenizer {} was built with (fingerprints differ)",
-            tok_path.display(),
-            model_path.display()
-        ));
-    }
-    let encoder = tok.encoder()?;
-    let eos = tok.special_id("<|endoftext|>");
-    // Each training document ended with EOS, so EOS is also what comes
-    // just before a document's start: putting it first tells the model a
-    // new document begins here.
-    let mut ids: Vec<usize> = eos.into_iter().collect();
-    ids.extend(encoder.encode(prompt)?);
-    if ids.is_empty() {
-        return Err("an empty prompt needs a tokenizer with <|endoftext|>".into());
-    }
-
-    let weights: Vec<safetensors::Tensor> = ckpt
-        .tensors
-        .into_iter()
-        .filter(|t| !t.name.starts_with("adam."))
-        .collect();
-    let params = gpt::Params::<f32>::from_tensors(&weights);
-    let n: usize = params.mats.iter().map(|m| m.data.len()).sum();
-    println!("=== transformer generate ===");
-    println!(
-        "Model {}: {n} parameters, context {}, V = {vocab}{}",
-        model_path.display(),
-        config.context,
-        match ckpt.metadata.get("step") {
-            Some(s) => format!(", trained to step {s}"),
-            None => " (untrained)".into(),
-        }
-    );
-    println!(
-        "Sampling: temperature {}, top-k {}, seed {}, at most {} tokens",
+fn describe_sampling(cfg: &generate::GenerateConfig) -> String {
+    format!(
+        "temperature {}, top-k {}, seed {}, at most {} tokens",
         cfg.temperature,
         if cfg.top_k == 0 {
             "off".to_string()
@@ -575,23 +719,96 @@ fn generate_command(
         },
         cfg.seed,
         cfg.max_tokens
+    )
+}
+
+/// The prompt's token IDs, and the tokens that end generation.
+///
+/// Plain: EOS, then the text. Each training document ended with EOS, so EOS
+/// is also what comes just before a document's start: putting it first
+/// tells the model a new document begins. Generation stops at EOS.
+///
+/// Chat: EOS, <|user|>, the request, <|assistant|>: exactly how each
+/// fine-tuning conversation began, so the model's next tokens are its
+/// reply. Generation stops at <|end|> (or EOS).
+fn prompt_ids(
+    tok: &TokenizerInfo,
+    encoder: &tokenizer::Encoder,
+    prompt: &str,
+    chat: bool,
+) -> Result<(Vec<usize>, Vec<usize>), String> {
+    if chat {
+        let m = markers(tok)?;
+        let mut ids = vec![m.eos as usize, m.user as usize];
+        ids.extend(encoder.encode(prompt)?);
+        ids.push(m.assistant as usize);
+        return Ok((ids, vec![m.end as usize, m.eos as usize]));
+    }
+    let eos = tok.special_id("<|endoftext|>");
+    let mut ids: Vec<usize> = eos.into_iter().collect();
+    ids.extend(encoder.encode(prompt)?);
+    if ids.is_empty() {
+        return Err("an empty prompt needs a tokenizer with <|endoftext|>".into());
+    }
+    Ok((ids, eos.into_iter().collect()))
+}
+
+fn generate_command(
+    model_path: &Path,
+    tok_path: &Path,
+    config_path: &Path,
+    prompt: &str,
+    chat: bool,
+    over: Overrides,
+) -> Result<(), String> {
+    use std::io::Write;
+    // Check every input first, before doing any work.
+    check_readable(model_path, "checkpoint")?;
+    check_readable(tok_path, "tokenizer")?;
+    check_readable(config_path, "config")?;
+    let cfg = sampling_config(config_path, &over)?;
+    let model = load_checkpoint(model_path)?;
+    let tok = load_tokenizer(tok_path, &model)?;
+    let encoder = tok.encoder()?;
+    let (ids, stop) = prompt_ids(&tok, &encoder, prompt, chat)?;
+    let params = model.params();
+    let config = &model.config;
+
+    let n: usize = params.mats.iter().map(|m| m.data.len()).sum();
+    println!(
+        "=== transformer generate{} ===",
+        if chat { " --chat" } else { "" }
     );
     println!(
-        "Prompt: {} token(s){}\n",
+        "Model {}: {n} parameters, context {}, V = {}, {}",
+        model_path.display(),
+        config.context,
+        model.vocab,
+        model.describe()
+    );
+    println!("Sampling: {}", describe_sampling(&cfg));
+    println!(
+        "Prompt: {} token(s), {}\n",
         ids.len(),
-        if eos.is_some() {
-            ", starting with <|endoftext|>"
+        if chat {
+            "<|endoftext|> <|user|> request <|assistant|>"
+        } else if stop.is_empty() {
+            "the text"
         } else {
-            ""
+            "starting with <|endoftext|>"
         }
     );
 
     let mut out = std::io::stdout().lock();
-    let _ = write!(out, "{prompt}");
+    if chat {
+        let _ = write!(out, "User: {prompt}\nAssistant: ");
+    } else {
+        let _ = write!(out, "{prompt}");
+    }
     let _ = out.flush();
     let mut text = generate::Utf8Stream::default();
-    let mut g = generate::Generator::new(&params, &config);
-    let report = generate::generate(&mut g, &cfg, &ids, eos, |t| {
+    let mut g = generate::Generator::new(&params, config);
+    let report = generate::generate(&mut g, &cfg, &ids, &stop, |t| {
         let s = text.push(encoder.token_bytes(t));
         let _ = write!(out, "{s}");
         let _ = out.flush();
@@ -602,10 +819,12 @@ fn generate_command(
     let made = report.generated.len();
     println!(
         "\n{}",
-        if report.stopped_at_eos {
-            format!("Stopped at <|endoftext|> after {made} tokens.")
-        } else {
-            format!("Stopped at the limit of {made} tokens.")
+        match report.stopped_at {
+            Some(t) => format!(
+                "Stopped at {} after {made} tokens.",
+                String::from_utf8_lossy(encoder.token_bytes(t))
+            ),
+            None => format!("Stopped at the limit of {made} tokens."),
         }
     );
     let prompt_in = report.prompt_tokens.min(config.context);
@@ -629,6 +848,322 @@ fn generate_command(
             }
         );
     }
+    Ok(())
+}
+
+fn finetune_command(
+    model_path: &Path,
+    data_path: &Path,
+    tok_path: &Path,
+    config_path: &Path,
+    output: &Path,
+) -> Result<(), String> {
+    // Check every input and output first, before doing any work. As with
+    // train, the output may be the input checkpoint (resuming in place).
+    check_readable(model_path, "checkpoint")?;
+    check_readable(data_path, "data")?;
+    check_readable(tok_path, "tokenizer")?;
+    check_readable(config_path, "config")?;
+    for input in [data_path, tok_path, config_path] {
+        if same_file(input, output) {
+            return Err(format!(
+                "output {} would overwrite an input",
+                output.display()
+            ));
+        }
+    }
+    check_writable(output)?;
+
+    let model = load_checkpoint(model_path)?;
+    let tok = load_tokenizer(tok_path, &model)?;
+    let m = markers(&tok)?;
+    let corpus = data::Corpus::load(data_path)?;
+    train::check_data(&corpus, model.vocab, &model.meta("tokenizer_fingerprint")?)?;
+    let tcfg = train::TrainingConfig::load_section(config_path, "finetune")?;
+    let config = model.config.clone();
+    let seq = config.context;
+    let convs = data::Conversations::parse(&corpus.ids, &m, seq)
+        .map_err(|e| format!("{}: {e}", data_path.display()))?;
+    let n_rows = convs.rows.len();
+    let n_valid = (n_rows as f64 * tcfg.validation_fraction).round() as usize;
+    let n_train = n_rows - n_valid;
+    if n_train == 0 {
+        return Err(format!(
+            "{}: no conversation to train on fits in the context of {seq} tokens",
+            data_path.display()
+        ));
+    }
+
+    // Starting from a pretrained checkpoint: fine-tuning is a new run, with
+    // its own step count and a fresh optimizer (Adam's averages describe
+    // pretraining's gradients, not these). From a fine-tuning checkpoint:
+    // resume.
+    let parent_kind = model.ckpt.metadata.get("kind").cloned().unwrap_or_default();
+    let mut state = train::State::from_checkpoint(&model.ckpt)?;
+    if parent_kind != "finetune" {
+        state.step = 0;
+        state.tokens = 0;
+        for a in state.m.iter_mut().chain(state.v.iter_mut()) {
+            a.data.iter_mut().for_each(|x| *x = 0.0);
+        }
+    }
+    if state.step >= tcfg.steps {
+        return Err(format!(
+            "{} is already at fine-tuning step {}; raise [finetune] steps to train further",
+            model_path.display(),
+            state.step
+        ));
+    }
+
+    let reply_tokens: usize = convs
+        .rows
+        .iter()
+        .zip(&convs.reply_at)
+        .map(|(r, &a)| r.len() - 1 - a)
+        .sum();
+    let all_tokens: usize = convs.rows.iter().map(|r| r.len() - 1).sum();
+    let n: usize = state.params.mats.iter().map(|w| w.data.len()).sum();
+    println!("=== transformer finetune ===");
+    println!(
+        "Model {}: {n} parameters, context {seq}, V = {}, {}",
+        model_path.display(),
+        model.vocab,
+        model.describe()
+    );
+    if state.step > 0 {
+        println!("  resuming at fine-tuning step {}", state.step);
+    }
+    println!(
+        "Data {}: {n_rows} conversations ({} longer than the context left out): {n_train} for training, {n_valid} held out",
+        data_path.display(),
+        convs.dropped
+    );
+    println!(
+        "  only the replies are scored: {reply_tokens} of {all_tokens} tokens ({:.0}%)",
+        evaluate::percent(reply_tokens, all_tokens)
+    );
+    println!(
+        "Fine-tuning: steps {} to {}, {} conversations per step (each padded to {seq} tokens), about {:.1} passes",
+        state.step + 1,
+        tcfg.steps,
+        tcfg.batch_size,
+        ((tcfg.steps - state.step) as usize * tcfg.batch_size) as f64 / n_train as f64
+    );
+    println!(
+        "  AdamW: peak learning rate {} after {} warm-up steps, cosine down to {} of it;",
+        tcfg.learning_rate, tcfg.warmup_steps, tcfg.min_lr_fraction
+    );
+    println!(
+        "  weight decay {}; gradient clipped at length {}",
+        tcfg.weight_decay, tcfg.grad_clip
+    );
+
+    let valid_rows: Vec<usize> = (n_train..n_rows)
+        .take(tcfg.eval_batches * tcfg.batch_size)
+        .collect();
+    let valid: Vec<data::Batch> = valid_rows
+        .chunks(tcfg.batch_size)
+        .map(|c| convs.batch(c, seq, m.eos))
+        .collect();
+    if let Some(l) = train::validation_loss(&state, &config, &valid, seq) {
+        println!("  validation loss on the replies before fine-tuning: {l:.3}");
+    }
+    println!();
+
+    let mut base = model.ckpt.metadata.clone();
+    if parent_kind == "train" {
+        // Keep a record of the pretraining run this started from.
+        for (from, to) in [
+            ("training", "pretraining"),
+            ("step", "pretraining_step"),
+            ("valid_loss", "pretraining_valid_loss"),
+            ("data_file", "pretraining_data_file"),
+            ("data_sha256", "pretraining_data_sha256"),
+        ] {
+            if let Some(v) = model.ckpt.metadata.get(from) {
+                base.insert(to.into(), v.clone());
+            }
+        }
+    }
+    for k in RUN_KEYS {
+        base.remove(k);
+    }
+    let prov = train::Provenance {
+        kind: "finetune",
+        base,
+        training_toml: toml::to_string(&tcfg).expect("a flat struct always serializes"),
+        data_file: data_path.display().to_string(),
+        data_sha256: sha256_file(data_path)?,
+        parent_file: model_path.display().to_string(),
+        parent_sha256: sha256_file(model_path)?,
+    };
+    let start = std::time::Instant::now();
+    let batches =
+        |step: u64| convs.train_batch(n_train, tcfg.batch_size, seq, tcfg.seed, step, m.eos);
+    let first = state.step;
+    let state = train::run_with(
+        state,
+        &config,
+        &tcfg,
+        batches,
+        &valid,
+        output,
+        &prov,
+        |line| println!("{line}"),
+    )?;
+    let secs = start.elapsed().as_secs_f64();
+
+    let tensors = state.tensors();
+    if safetensors::read(output)?.tensors != tensors {
+        return Err(format!(
+            "{}: read-back doesn't match what was written",
+            output.display()
+        ));
+    }
+    println!(
+        "\nFine-tuned to step {} in {:.1} minutes ({:.1} s per step).",
+        state.step,
+        secs / 60.0,
+        secs / (state.step - first) as f64
+    );
+    println!(
+        "Wrote {} with Adam's state (resumable); read back and verified.",
+        output.display()
+    );
+    let weights = &tensors[..state.params.mats.len()];
+    println!("  weights fingerprint {}", weights_fingerprint(weights));
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn evaluate_command(
+    model_path: &Path,
+    tok_path: &Path,
+    config_path: &Path,
+    requests_path: &Path,
+    chat: bool,
+    count: Option<usize>,
+    show: usize,
+    over: Overrides,
+) -> Result<(), String> {
+    check_readable(model_path, "checkpoint")?;
+    check_readable(tok_path, "tokenizer")?;
+    check_readable(config_path, "config")?;
+    check_readable(requests_path, "requests")?;
+    let cfg = sampling_config(config_path, &over)?;
+    let model = load_checkpoint(model_path)?;
+    let tok = load_tokenizer(tok_path, &model)?;
+    let encoder = tok.encoder()?;
+    let text = fs::read_to_string(requests_path)
+        .map_err(|e| format!("can't read {}: {e}", requests_path.display()))?;
+    let mut requests =
+        evaluate::parse_requests(&text).map_err(|e| format!("{}: {e}", requests_path.display()))?;
+    if let Some(n) = count {
+        requests.truncate(n);
+    }
+    if requests.len() < 2 {
+        return Err("need at least 2 requests (each is the other's control)".into());
+    }
+    let params = model.params();
+    println!(
+        "=== transformer evaluate{} ===",
+        if chat { " --chat" } else { "" }
+    );
+    println!(
+        "Model {}: {}, V = {}",
+        model_path.display(),
+        model.describe(),
+        model.vocab
+    );
+    println!(
+        "Requests {}: {}, sent {}",
+        requests_path.display(),
+        requests.len(),
+        if chat {
+            "as conversations: <|user|> request <|assistant|>"
+        } else {
+            "as plain text for the model to continue (no turn markers)"
+        }
+    );
+    println!(
+        "Sampling: {} (request i uses seed + i)\n",
+        describe_sampling(&cfg)
+    );
+
+    let mut g = generate::Generator::new(&params, &model.config);
+    let mut tally = evaluate::Tally::default();
+    let start = std::time::Instant::now();
+    for (i, r) in requests.iter().enumerate() {
+        let prompt = if chat {
+            r.text.clone()
+        } else {
+            format!("{}\n", r.text)
+        };
+        let (ids, stop) = prompt_ids(&tok, &encoder, &prompt, chat)?;
+        let cfg_i = generate::GenerateConfig {
+            seed: cfg.seed + i as u64,
+            ..cfg.clone()
+        };
+        let rep = generate::generate(&mut g, &cfg_i, &ids, &stop, |_| {});
+        let bytes: Vec<u8> = rep
+            .generated
+            .iter()
+            .flat_map(|&t| encoder.token_bytes(t).iter().copied())
+            .collect();
+        let story = String::from_utf8_lossy(&bytes);
+        let control = &requests[(i + 1) % requests.len()].words;
+        tally.add(
+            &story,
+            &r.words,
+            control,
+            rep.stopped_at.is_some(),
+            rep.generated.len(),
+        );
+        if i < show {
+            let marked: Vec<String> = r
+                .words
+                .iter()
+                .map(|w| {
+                    let yes = evaluate::contains_word(&story, w);
+                    format!("{w} {}", if yes { "✓" } else { "✗" })
+                })
+                .collect();
+            println!(
+                "[{}] {}\n{}\n  ({})\n",
+                i + 1,
+                r.text,
+                story.trim(),
+                marked.join(", ")
+            );
+        }
+    }
+    let t = &tally;
+    println!(
+        "{} stories in {:.1} s, {:.0} tokens on average; {:.0}% ended by themselves ({}).",
+        t.stories,
+        start.elapsed().as_secs_f64(),
+        t.tokens as f64 / t.stories as f64,
+        evaluate::percent(t.stopped, t.stories),
+        if chat { "<|end|>" } else { "<|endoftext|>" }
+    );
+    println!(
+        "Requested words used:   {:>5.1}%  ({} of {}); all three in {:.1}% of stories",
+        evaluate::percent(t.words_found, t.words_asked),
+        t.words_found,
+        t.words_asked,
+        evaluate::percent(t.all_found, t.stories)
+    );
+    println!(
+        "Control (another request's words, same stories): {:.1}%  ({} of {})",
+        evaluate::percent(t.control_found, t.control_asked),
+        t.control_found,
+        t.control_asked
+    );
+    println!(
+        "The difference, {:+.1} points, is what following the request adds.",
+        evaluate::percent(t.words_found, t.words_asked)
+            - evaluate::percent(t.control_found, t.control_asked)
+    );
     Ok(())
 }
 
