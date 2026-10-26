@@ -2687,7 +2687,8 @@ text8, matching gensim (a widely used Python library with its own word2vec) at
    tape from its parts lets a test compare the derived gradient with the
    closed-form formula.
 
-8. **Faster matrix products on Apple hardware.** *Open, deferred.* Nearly
+8. **Faster matrix products on Apple hardware.** *Open: (b) built as an
+   option, to be measured on the M4.* Nearly
    all training time is matrix products, which `transformer/` computes with
    plain Rust loops on the CPU cores (`src/tensor.rs`), spread over all
    cores with rayon (a Rust library for spreading work over threads).
@@ -2713,11 +2714,22 @@ text8, matching gensim (a widely used Python library with its own word2vec) at
      it would replace this project's own tensor and tape code, which is
      the point of the project
 
-   Leaning: (a) for now, since the goal is understanding and the speed
-   has been enough. (b) is the natural next step if training time becomes
-   the bottleneck, such as for a week-long run of a model of about 30M
-   parameters: a contained change behind `Mat::matmul`, measurable with
-   `make bench` before and after.
+   Leaning: (a) stays the default, since the goal is understanding. (b)
+   is now built as an option, a contained change behind `Mat::matmul` and
+   `Mat::matmul_tn` (`src/blas.rs`): `cargo build --release --features
+   blas` (or `make -B transformer/target/release/transformer
+   CARGO_FEATURES=blas`) links Accelerate on macOS. Only f32 products of at
+   least 2¹⁸ multiply-adds go to it, and only when called from outside our
+   thread pool (attention's many small products, run side by side in the
+   pool, stay in Rust), so every existing exactness test still runs on the
+   Rust loops. A test compares the library's products with the Rust loops
+   within rounding, and `bench` times both, side by side, in the same
+   binary. The calling code was tested off a Mac against Linux's reference
+   CBLAS library (the same interface; all tests pass), which is
+   unoptimized and slower than our loops, so it says nothing about
+   Accelerate's speed. The decision waits on `make full-bench` with the
+   feature on the M4. Since resuming doesn't need identical arithmetic, a
+   run can switch to it at any checkpoint.
 
 ## The full TinyStories run
 

@@ -10,6 +10,7 @@
 //!   bench     measure this machine's matrix-multiply speed
 
 mod bench;
+mod blas;
 mod config;
 mod data;
 mod evaluate;
@@ -576,6 +577,7 @@ fn train_command(
         "Model {}: {n} parameters, context {seq}, V = {vocab}",
         model_path.display()
     );
+    println!("  large matrix products: {}", blas::backend());
     if state.step > 0 {
         println!(
             "  resuming at step {} ({} tokens seen so far)",
@@ -1052,6 +1054,7 @@ fn finetune_command(
         model.vocab,
         model.describe()
     );
+    println!("  large matrix products: {}", blas::backend());
     if lora {
         println!(
             "LoRA adapter: rank {}, α {} (updates scaled by {}), on {} in each of {} blocks",

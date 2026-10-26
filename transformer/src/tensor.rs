@@ -133,6 +133,18 @@ impl<T: Float> Mat<T> {
         if m == 0 || k == 0 {
             return out;
         }
+        // Built with the blas feature: large f32 products go to the library.
+        if crate::blas::try_gemm(
+            false,
+            self.rows,
+            m,
+            k,
+            &self.data,
+            &other.data,
+            &mut out.data,
+        ) {
+            return out;
+        }
         if self.rows * k * m < PARALLEL_MIN_WORK {
             // Too little work to be worth sharing out: handing a job to
             // another thread costs microseconds, about as long as doing
@@ -190,6 +202,18 @@ impl<T: Float> Mat<T> {
     pub fn matmul_tn(&self, other: &Mat<T>) -> Mat<T> {
         assert_eq!(self.rows, other.rows, "matmul_tn shape mismatch");
         let (n, m) = (self.cols, other.cols);
+        let mut out = Mat::zeros(n, m);
+        if crate::blas::try_gemm(
+            true,
+            n,
+            m,
+            self.rows,
+            &self.data,
+            &other.data,
+            &mut out.data,
+        ) {
+            return out;
+        }
         const TOKENS_PER_BLOCK: usize = 64;
         let blocks = self.rows.div_ceil(TOKENS_PER_BLOCK);
         let partials: Vec<Mat<T>> = (0..blocks)
@@ -208,7 +232,6 @@ impl<T: Float> Mat<T> {
                 acc
             })
             .collect();
-        let mut out = Mat::zeros(n, m);
         for p in &partials {
             out.add_assign(p);
         }

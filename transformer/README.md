@@ -27,6 +27,24 @@ the model uses 32-bit floats (f32): half the memory and about twice the
 speed, and plenty of precision for training (PLAN.md, "Conventions for all
 code").
 
+### Optional: Apple's Accelerate library
+
+```
+cargo build --release --features blas
+```
+
+builds with a BLAS library (Basic Linear Algebra Subprograms, the standard
+interface for matrix products) for the large f32 products: Apple's
+Accelerate on macOS, which uses the chip's matrix hardware (`src/blas.rs`;
+PLAN.md, open decision 8). Only products of at least 2¹⁸ multiply-adds,
+called from outside the thread pool, go to it; everything else, and every
+build without the feature, uses the Rust loops. Results equal the Rust
+loops' to rounding, not bit for bit. `bench` times both, side by side;
+`train` and `finetune` say which is in use. On other systems the feature
+links any CBLAS library given to the build, such as
+`RUSTFLAGS="-l blas"` on Linux, which is how the calling code was tested
+off a Mac.
+
 ## `transformer build` (step 3)
 
 ```
@@ -461,7 +479,9 @@ starting shape with a small vocabulary, a 2-core Linux machine takes about
   reproducible, with the planned standard deviations; a layout check names
   a missing tensor and a wrong shape
 - the matrix multiplies (`matmul`, and `matmul_tn` for Aᵀ·B) equal the
-  definition, and give identical results for 1 and several threads
+  definition, and give identical results for 1 and several threads; with
+  the `blas` feature, the library's products equal the Rust loops' within
+  rounding
 - the tape: each operation against finite differences in f64; attention is
   causal and keeps sequences separate; f32 and f64 agree
 - the model: every weight of a two-block model against finite differences;
@@ -520,6 +540,7 @@ newer Unicode version could still be classed differently.
 - `src/model.rs`: weight names, shapes, the parameter formula,
   initialization and the layout check
 - `src/tensor.rs`: the matrix type (f32 or f64) and the threaded multiplies
+- `src/blas.rs`: the optional BLAS library (Accelerate) for large products
 - `src/tape.rs`: the batched automatic differentiation tape
 - `src/gpt.rs`: the model's forward pass, from a checkpoint's tensors
 - `src/data.rs`: reading `corpus.ids`, the validation split, and batches;

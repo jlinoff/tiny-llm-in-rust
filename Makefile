@@ -57,9 +57,14 @@ $(OUT)/model-init.safetensors: $(OUT)/tok.bpe $(CONFIG) | $(OUT) $(TRANSFORMER)
 	$(call hdr,build)
 	$(TRANSFORMER) build --tokenizer $(OUT)/tok.bpe --config $(CONFIG) -o $@
 
+# CARGO_FEATURES=blas builds with Apple's Accelerate library for the large
+# matrix products (PLAN.md, open decision 8). Make doesn't notice a change of
+# features: rebuild on purpose with make -B $(TRANSFORMER) CARGO_FEATURES=blas.
+CARGO_FEATURES ?=
+
 $(TRANSFORMER): $(TRANSFORMER_SRC)
 	$(call hdr,build transformer)
-	cargo build --release --manifest-path transformer/Cargo.toml
+	cargo build --release --manifest-path transformer/Cargo.toml $(if $(CARGO_FEATURES),--features $(CARGO_FEATURES))
 
 .PHONY: bench
 bench: $(TRANSFORMER) $(OUT)/model-init.safetensors ## Measure matrix-multiply speed and a real training step.
@@ -275,6 +280,7 @@ help:  ## This help message.
 		sort -f | \
 		sed -e 's@^@   @'
 	@printf "\n\033[35;1m%s\033[0m\n" "Variables"
+	@printf "   %-18s  %s\n" "CARGO_FEATURES" "$(CARGO_FEATURES)"
 	@printf "   %-18s  %s\n" "CHAT_ARGS" "$(CHAT_ARGS)"
 	@printf "   %-18s  %s\n" "CHAT_MODEL" "$(CHAT_MODEL)"
 	@printf "   %-18s  %s\n" "CONFIG" "$(CONFIG)"

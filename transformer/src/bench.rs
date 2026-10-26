@@ -3,6 +3,7 @@
 //! operations (N parameters, D tokens) divided by this speed, so measuring
 //! it turns PLAN.md's time estimates into figures for this computer.
 
+use crate::blas;
 use crate::config::ModelConfig;
 use crate::gpt::{forward, Params};
 use crate::safetensors::Tensor;
@@ -31,6 +32,22 @@ fn measure(n: usize, k: usize, m: usize, threads: usize, seconds: f64) -> f64 {
     })
 }
 
+/// GFLOP/s for the same product through the BLAS library (built with the
+/// blas feature), called from the main thread as training calls it.
+fn measure_library(n: usize, k: usize, m: usize, seconds: f64) -> f64 {
+    let a = Mat::<f32>::from_vec(n, k, (0..n * k).map(|i| (i % 7) as f32 * 0.1).collect());
+    let b = Mat::<f32>::from_vec(k, m, (0..k * m).map(|i| (i % 5) as f32 * 0.1).collect());
+    let flops = 2.0 * (n * k * m) as f64;
+    let _ = a.matmul(&b);
+    let start = Instant::now();
+    let mut reps = 0;
+    while start.elapsed().as_secs_f64() < seconds {
+        std::hint::black_box(a.matmul(&b));
+        reps += 1;
+    }
+    flops * reps as f64 / start.elapsed().as_secs_f64() / 1e9
+}
+
 /// A checkpoint's model, for timing a real training step.
 pub struct Model {
     pub config: ModelConfig,
@@ -41,7 +58,9 @@ pub struct Model {
 pub fn run(model: Option<&Model>) {
     let cores = std::thread::available_parallelism().map_or(1, |n| n.get());
     println!("=== Matrix multiply speed, f32 ===");
-    println!("{cores} hardware threads available.\n");
+    println!("{cores} hardware threads available.");
+    println!("Large matrix products: {}\n", blas::backend());
+    let library = blas::active();
     // Shapes from a training step: 16 sequences × 128 tokens = 2,048 rows,
     // times the model's matrices (d = 128: d × d and d × 4d; d = 256 too).
     let shapes = [
@@ -50,13 +69,25 @@ pub fn run(model: Option<&Model>) {
         (2048, 512, 128),
         (2048, 256, 1024),
     ];
-    println!("  shape (rows × k × cols)     1 thread     {cores} threads");
+    if library {
+        println!("  shape (rows × k × cols)     Rust, 1 thread  Rust, {cores} threads   library");
+    } else {
+        println!("  shape (rows × k × cols)     1 thread     {cores} threads");
+    }
     let mut best: f64 = 0.0;
     for &(n, k, m) in &shapes {
         let one = measure(n, k, m, 1, 0.5);
         let all = measure(n, k, m, cores, 0.5);
-        best = best.max(all);
-        println!("  {n:>5} × {k:>4} × {m:>4}      {one:>7.1} GFLOP/s  {all:>7.1} GFLOP/s");
+        if library {
+            let lib = measure_library(n, k, m, 0.5);
+            best = best.max(lib);
+            println!(
+                "  {n:>5} × {k:>4} × {m:>4}      {one:>7.1} GFLOP/s  {all:>7.1} GFLOP/s  {lib:>7.1} GFLOP/s"
+            );
+        } else {
+            best = best.max(all);
+            println!("  {n:>5} × {k:>4} × {m:>4}      {one:>7.1} GFLOP/s  {all:>7.1} GFLOP/s");
+        }
     }
     println!();
     println!("Training costs about 6 floating-point operations per parameter per token");
@@ -92,14 +123,26 @@ pub fn run(model: Option<&Model>) {
         f.tape.backward(f.loss);
         std::hint::black_box(f.tape.value(f.loss).data[0]);
     };
-    step(); // warm up
-    let start = Instant::now();
-    let mut reps = 0;
-    while start.elapsed().as_secs_f64() < 3.0 {
-        step();
-        reps += 1;
-    }
-    let secs = start.elapsed().as_secs_f64() / reps as f64;
+    let time_steps = || {
+        step(); // warm up
+        let start = Instant::now();
+        let mut reps = 0;
+        while start.elapsed().as_secs_f64() < 3.0 {
+            step();
+            reps += 1;
+        }
+        start.elapsed().as_secs_f64() / reps as f64
+    };
+    // With the library built in, time the step without it too.
+    let rust_secs = if library {
+        blas::set_enabled(false);
+        let s = time_steps();
+        blas::set_enabled(true);
+        Some(s)
+    } else {
+        None
+    };
+    let secs = time_steps();
     let tps = (batch * seq) as f64 / secs;
     let effective = 6.0 * n as f64 * tps / 1e9;
     println!("\nA real training step (forward and backward, no optimizer) for this model:");
@@ -111,6 +154,13 @@ pub fn run(model: Option<&Model>) {
         "  {tps:.0} tokens per second, about {effective:.0} GFLOP/s of useful work ({:.0}% of {best:.0})",
         100.0 * effective / best
     );
+    if let Some(r) = rust_secs {
+        println!(
+            "  with the Rust loops instead: {:.0} ms per step; the library is {:.2} times as fast",
+            r * 1000.0,
+            r / secs
+        );
+    }
     println!(
         "  20 million tokens would take about {:.1} hours.",
         20e6 / tps / 3600.0

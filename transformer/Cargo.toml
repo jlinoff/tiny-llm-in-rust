@@ -18,6 +18,11 @@ sha2 = "0.10"
 rayon = "1"
 toml = "0.8"
 
+[features]
+# Large f32 matrix products through a BLAS library: Apple's Accelerate on
+# macOS (cargo build --release --features blas). See src/blas.rs.
+blas = []
+
 [profile.release]
 codegen-units = 1
 lto = true
