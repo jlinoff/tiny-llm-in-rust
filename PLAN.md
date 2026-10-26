@@ -1989,6 +1989,28 @@ a single consumer GPU. The savings:
   one per task, and an adapter can be folded into W (`merge`), giving an
   ordinary model with no extra cost at inference.
 
+**What it's for: cost, not quality.** LoRA isn't meant to make the
+fine-tuned model better; it's meant to match full fine-tuning at a fraction
+of the cost. The original paper's numbers, for fine-tuning GPT-3 (175B
+parameters):
+
+- **Trained parameters:** about 10,000 times fewer.
+- **GPU memory in training:** about 3 times less (1.2 TB down to 350 GB),
+  mostly because Adam's state is kept only for the adapter.
+- **Checkpoints:** 35 MB per fine-tuned version instead of 350 GB.
+- **Speed:** about 25% faster, a modest gain: the forward pass and most of
+  backpropagation still run through the whole frozen model, and only the
+  frozen weights' own gradients and updates are skipped.
+- **Quality:** on par with full fine-tuning on the paper's benchmarks, or
+  slightly better.
+
+Quality holds when fine-tuning adapts behavior (a format, a style, a narrow
+task), and falls behind when it must teach a lot of new material.
+Biderman et al. (2024), "LoRA Learns Less and Forgets Less", fine-tuned on
+large amounts of code and mathematics: LoRA learned noticeably less than
+full fine-tuning, and also forgot less of what the base model already
+knew. A low-rank update can't move the model as far, in either direction.
+
 **Why it works:** fine-tuning a pretrained model needs only a small
 subspace of the weights. Li et al. (2018) trained networks in random
 subspaces and found a few hundred dimensions enough for 90% of full
@@ -2020,8 +2042,9 @@ make lora lora-evaluate        # the same two steps, then the evaluation
   changes only the adapter, lowers the loss, and resumes exactly.
 - One honest limit: our tape still computes gradients for the frozen
   weights (they're simply unused), so a LoRA step costs about as much as a
-  full fine-tuning step here. The savings are in the trained numbers, the
-  optimizer's state and the file.
+  full fine-tuning step here, without the paper's 25% speedup. Skipping
+  them would save roughly a third of each backward pass. The savings here
+  are in the trained numbers, the optimizer's state and the file.
 
 ## Conventions for all code
 
@@ -2693,6 +2716,9 @@ for language research.
 - Hu, E. J., et al. (2021). "LoRA: Low-Rank Adaptation of Large Language
   Models." [arXiv:2106.09685](https://arxiv.org/abs/2106.09685). Fine-tuning
   as a low-rank update to frozen weights; `finetune --lora-rank`.
+- Biderman, D., et al. (2024). "LoRA Learns Less and Forgets Less." TMLR.
+  [arXiv:2405.09673](https://arxiv.org/abs/2405.09673). Where LoRA falls
+  short of full fine-tuning (much new material), and what it preserves.
 - Dettmers, T., et al. (2023). "QLoRA: Efficient Finetuning of Quantized
   LLMs." NeurIPS. [arXiv:2305.14314](https://arxiv.org/abs/2305.14314). LoRA
   on a 4-bit frozen model: large models fine-tuned on one GPU.
