@@ -9,6 +9,51 @@ per step: `make tokenize`, `make encode`, and so on.
 Technical terms are defined in [Terms](#terms), just below; tool and product
 names are explained where they first appear.
 
+**Contents** (generated from the headings by `make toc`; don't edit by hand)
+
+<!-- toc -->
+- [Terms](#terms)
+- [Why Rust](#why-rust)
+- [The flows](#the-flows)
+  - [1. The LLM flow](#1-the-llm-flow)
+    - [What each stage does](#what-each-stage-does)
+      - [Step 1: tokenize](#step-1-tokenize)
+      - [Step 2: encode](#step-2-encode)
+      - [Step 3: build](#step-3-build)
+      - [Step 4: train](#step-4-train)
+      - [Step 5: finetune](#step-5-finetune)
+      - [Step 6: generate](#step-6-generate)
+    - [What crosses each boundary](#what-crosses-each-boundary)
+  - [2. The word2vec flow](#2-the-word2vec-flow)
+  - [3. The attention flow](#3-the-attention-flow)
+  - [4. The bench flow](#4-the-bench-flow)
+- [Special tokens](#special-tokens)
+- [The transformer block](#the-transformer-block)
+  - [The four parts](#the-four-parts)
+  - [How attention works: queries, keys and values](#how-attention-works-queries-keys-and-values)
+  - [How heads fit in](#how-heads-fit-in)
+  - [What runs in parallel](#what-runs-in-parallel)
+  - [The attention matrix: built, used, thrown away](#the-attention-matrix-built-used-thrown-away)
+  - [Why repeated normalization doesn't lose information](#why-repeated-normalization-doesnt-lose-information)
+  - [Position information](#position-information)
+  - [Where each part is built](#where-each-part-is-built)
+- [Configuration](#configuration)
+- [Post-training](#post-training)
+- [Conventions for all code](#conventions-for-all-code)
+- [Where the stages live](#where-the-stages-live)
+- [word2vec: the historical side branch](#word2vec-the-historical-side-branch)
+- [Open decisions](#open-decisions)
+- [The full TinyStories run](#the-full-tinystories-run)
+- [Order of work](#order-of-work)
+- [Bibliography](#bibliography)
+  - [Tokenization (tokenizer/)](#tokenization-tokenizer)
+  - [Word vectors (word2vec/)](#word-vectors-word2vec)
+  - [Attention and the transformer (attention/, transformer/)](#attention-and-the-transformer-attention-transformer)
+  - [Training data and small models](#training-data-and-small-models)
+  - [Post-training (transformer finetune)](#post-training-transformer-finetune)
+  - [Not papers, but excellent for this project](#not-papers-but-excellent-for-this-project)
+<!-- /toc -->
+
 ## Terms
 
 Grouped so that each definition uses only terms defined above it.
@@ -1947,6 +1992,7 @@ llm/
 ├── data/          # downloaded corpora, e.g. text8, TinyStories (git-ignored)
 ├── tokenizer/     # text <-> token IDs: tokenize, encode, decode
 ├── chat/          # make_chat.py: fine-tuning conversations from the stories
+├── tools/         # toc.py: this file's table of contents and link check (make toc)
 ├── word2vec/      # word vectors, the historical precursor
 ├── attention/     # self-attention on its own, then a look at one full block
 └── transformer/   # the model: build, train, finetune, generate

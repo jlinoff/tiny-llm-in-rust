@@ -210,6 +210,10 @@ data/TinyStoriesV2-GPT4-train.txt data/TinyStoriesV2-GPT4-valid.txt:
 	curl -fL -o $@.part https://huggingface.co/datasets/roneneldan/TinyStories/resolve/main/$(notdir $@)
 	mv $@.part $@
 
+.PHONY: toc
+toc: ## Update PLAN.md's table of contents and check its internal links.
+	python3 tools/toc.py PLAN.md
+
 .PHONY: clean
 clean: ## Remove generated files (keeps data/ and uncommitted work).
 	cd word2vec && cargo clean
