@@ -80,6 +80,10 @@ Options:
   can't be combined with corpus files, `-n`, `--dedup`, or `--save`.
 - `--encode TEXTFILE ...`: after training or loading, encode one or more text
   files into token IDs, each file a document followed by EOS; requires `-o`
+- `--split-on SEP`: split each corpus or `--encode` file into documents at
+  lines consisting exactly of SEP, dropping those lines (see
+  [Files holding many documents](#files-holding-many-documents)). Without
+  it, each file is one document.
 - `-o FILE`, `--output FILE`: where `--encode` writes the token IDs
 - `-t STRING`, `--text STRING`: after training or loading, tokenize STRING;
   may be repeated
@@ -246,6 +250,34 @@ the tokenizer from the example above (trained on `sample.txt` and `news.txt`):
 Each document's IDs are decoded again and compared with its file; if any
 differ, the run stops with an error and writes nothing. Because text never
 produces the EOS ID, splitting the IDs at EOS recovers the documents exactly.
+
+### Files holding many documents
+
+Some corpora put many documents in one file, with a separator line between
+them. TinyStories, for example, puts `<|endoftext|>` on a line of its own
+between stories (21,989 of them in its validation file). Encoding such a file
+as one document would be wrong twice over: the stories would run together,
+and each separator would be encoded as about a dozen ordinary tokens of text
+(the encoder never turns literal special-token text into the EOS ID; see
+[Special tokens](#special-tokens)). `--split-on SEP` handles this:
+
+```
+./mini_bpe.py --load tok.bpe --encode TinyStories-valid.txt -o valid.ids --split-on '<|endoftext|>'
+```
+
+- Every line consisting exactly of SEP ends a document; the separator lines
+  are dropped, not encoded.
+- One newline at the end of each document is dropped too, so a story ends
+  with its last word and then EOS, not with a line break.
+- Empty documents (two separators in a row) are skipped.
+- Each document is round-trip checked on its own, and followed by EOS.
+- SEP anywhere else, such as inside a line of a story, is still ordinary
+  text: you name the separator on the command line, so the injection rule in
+  [Special tokens](#special-tokens) still holds.
+
+Use the same option when training the tokenizer on such a file, so that no
+merges are spent on pieces of the separator. Without `--split-on`, encoding
+is unchanged (byte-identical output).
 
 **The `.ids` format.** A 64-byte header, then the IDs. All integers are
 unsigned and little-endian:

@@ -1,8 +1,15 @@
 SHELL     := /bin/bash
 SRC_FILES := $(shell git ls-files)
-CORPUS    ?= data/corpus.txt
-MERGES    ?= 1000
 OUT       ?= out
+
+# The corpus: TinyStories' validation file (19 MB, about 22,000 stories), for
+# developing; its stories are separated by '<|endoftext|>' lines (SPLIT_ON).
+# For a plain text file with no separators, use SPLIT_ON= (empty).
+CORPUS    ?= data/TinyStories-valid.txt
+SPLIT_ON  ?= <|endoftext|>
+SPLIT      = $(if $(SPLIT_ON),--split-on '$(SPLIT_ON)')
+# 3,839 merges: V = 256 bytes + 3,839 merges + EOS = 4,096.
+MERGES    ?= 3839
 
 # Print a section header: $(call hdr,text)
 hdr = @printf "\n\033[35;1m== %s ==\033[0m\n" "$(1)"
@@ -99,6 +106,7 @@ $(W2V): $(W2V_SRC)
 	$(call hdr,build mini_w2v)
 	cargo build --release --manifest-path word2vec/Cargo.toml
 
+# Data
 # Downloaded once; data/ is git-ignored and survives make clean.
 data/text8:
 	$(call hdr,$@)
@@ -107,6 +115,12 @@ data/text8:
 	curl -fL -o data/text8.gz https://github.com/RaRe-Technologies/gensim-data/releases/download/text8/text8.gz
 	gunzip data/text8.gz
 
+# Larger corpus for better inference
+data/TinyStories-valid.txt:
+	$(call hdr,$@)
+	mkdir -p data
+	curl -fL -o $@.part https://huggingface.co/datasets/roneneldan/TinyStories/resolve/main/TinyStories-valid.txt
+	mv $@.part $@
 
 .PHONY: clean
 clean: ## Remove generated files (keeps data/ and uncommitted work).

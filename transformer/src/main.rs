@@ -339,6 +339,10 @@ fn train_command(
             state.step
         ));
     }
+    // Check the data is big enough for the split and the windows now,
+    // before printing anything or doing any work.
+    data::split(&corpus.ids, tcfg.validation_fraction, config.context)
+        .map_err(|e| format!("{}: {e}", data_path.display()))?;
 
     let n: usize = state.params.mats.iter().map(|m| m.data.len()).sum();
     let seq = config.context;

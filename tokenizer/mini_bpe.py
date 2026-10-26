@@ -10,8 +10,12 @@ Same three stages as a real LLM tokenizer:
   3. Encode/decode: apply merges in learned order; decoding just
      concatenates the bytes back — lossless by construction.
 
-Each input file is treated as one "document". Its SHA-256 checksum is
-computed so exact duplicate documents can be recognized. Without --dedup,
+Each input file is treated as one "document", unless --split-on SEP is
+given: then every line consisting exactly of SEP separates documents within
+a file (TinyStories, for example, puts "<|endoftext|>" on a line between
+stories). The separator lines themselves are dropped; they're never encoded
+as text. Each file's SHA-256 checksum is computed so exact duplicate files
+can be recognized. Without --dedup,
 duplicates are reported but still counted (inflating their pair counts);
 with --dedup, only the first copy is used — the exact-match stage of the
 deduplication real training pipelines perform.
@@ -31,6 +35,8 @@ Usage:
                                                   # encode a text file into token IDs
   python3 mini_bpe.py --load tok.bpe --encode a.txt b.txt -o ab.ids
                                                   # two documents, each ending in EOS
+  python3 mini_bpe.py --load tok.bpe --encode stories.txt -o s.ids --split-on '<|endoftext|>'
+                                                  # one document per story, each ending in EOS
 
 Run with -h for all options.
 """
@@ -545,11 +551,46 @@ def check_writable(ap, path, what):
         os.remove(path)
 
 
-def read_corpus(ap, paths, dedup):
-    """Load documents, checksum each, optionally drop exact duplicates.
+def split_documents(text, sep):
+    """Split text into documents at lines consisting exactly of `sep`.
 
-    Returns (texts, sources): the texts to train on, and (path, sha256) for
-    each of them, recorded in the saved tokenizer as provenance.
+    The separator lines are dropped, along with one newline at the end of
+    each document (so a story ends with its last word, not a line break).
+    Empty documents, such as from two separators in a row, are skipped.
+    Returns (documents, number of separator lines).
+    """
+    docs, current, seps = [], [], 0
+    for line in text.splitlines(keepends=True):
+        if line.rstrip("\r\n") == sep:
+            seps += 1
+            docs.append("".join(current))
+            current = []
+        else:
+            current.append(line)
+    docs.append("".join(current))
+    docs = [d[:-2] if d.endswith("\r\n") else d[:-1] if d.endswith("\n") else d
+            for d in docs]
+    return [d for d in docs if d], seps
+
+
+def add_documents(texts, text, split_on):
+    """Append a file's documents to `texts`: the whole file, or its parts
+    between separator lines. Returns a note for the report."""
+    if split_on is None:
+        texts.append(text)
+        return ""
+    docs, seps = split_documents(text, split_on)
+    texts += docs
+    return f", {len(docs):,} documents ({seps:,} separators)"
+
+
+def read_corpus(ap, paths, dedup, split_on=None):
+    """Load documents, checksum each file, optionally drop exact duplicates.
+
+    With `split_on`, each file is split into documents at its separator
+    lines (see split_documents). Returns (texts, sources): the documents to
+    train on, and (path, sha256) for each file, recorded in the saved
+    tokenizer as provenance.
     """
     print(f"=== Documents ({'dedup ON' if dedup else 'dedup off'}) ===")
     texts, sources = [], []
@@ -574,7 +615,7 @@ def read_corpus(ap, paths, dedup):
             else:
                 first_seen[digest] = path
                 status = "kept"
-            texts.append(text)
+            status += add_documents(texts, text, split_on)
             sources.append((path, digest))
         print(f"  {path:<24} {len(raw):>9,} bytes  sha256 {digest[:16]}…  "
               f"{status}")
@@ -639,6 +680,11 @@ examples:
                     help="after training or loading, encode the text "
                          "file(s) into token IDs, each file a document "
                          "followed by EOS, and write them to the -o file")
+    ap.add_argument("--split-on", metavar="SEP",
+                    help="split each corpus or --encode file into documents "
+                         "at lines consisting exactly of SEP (dropping those "
+                         "lines), e.g. '<|endoftext|>' for TinyStories; "
+                         "without it, each file is one document")
     ap.add_argument("-o", "--output", metavar="FILE",
                     help="where --encode writes the token IDs (binary .ids "
                          "format, described in the README)")
@@ -698,11 +744,12 @@ def train_mode(ap, args):
     if not args.corpus:
         ap.error("give corpus file(s) to train on, or --load FILE")
     num_merges = 200 if args.merges is None else args.merges
-    texts, sources = read_corpus(ap, args.corpus, args.dedup)
+    texts, sources = read_corpus(ap, args.corpus, args.dedup, args.split_on)
 
     total_bytes = sum(len(t.encode("utf-8")) for t in texts)
     chunks = [c for t in texts for c in pretokenize(t)]
-    print(f"\n=== Corpus: {len(texts)} of {len(args.corpus)} documents — "
+    print(f"\n=== Corpus: {len(texts):,} "
+          f"{'documents' if args.split_on else f'of {len(args.corpus)} documents'} — "
           f"{total_bytes:,} bytes, {len(chunks):,} chunks, "
           f"{len(set(chunks)):,} unique ===")
     print("First 25 chunks:", fmt([c.encode() for c in chunks[:25]]), "\n")
@@ -751,6 +798,10 @@ def check_outputs(ap, args):
     training or encoding starts."""
     if args.output and not args.encode:
         ap.error("-o/--output is only used with --encode")
+    if args.split_on is not None and (not args.split_on.strip()
+                                      or "\n" in args.split_on
+                                      or "\r" in args.split_on):
+        ap.error("--split-on needs a non-blank separator without line breaks")
     if args.encode and not args.output:
         ap.error("--encode needs -o FILE for the token IDs")
     for path in args.encode or []:
@@ -777,41 +828,66 @@ def read_text(ap, path):
     return None  # not reached: ap.error exits
 
 
+def encode_file(ap, path, tok, cache, split_on):
+    """Encode one --encode file: its documents, each followed by EOS, with
+    a round-trip check per document. Prints a line about the file.
+    Returns (IDs, number of documents, bytes of document text)."""
+    text = read_text(ap, path)
+    docs, seps = (([text], None) if split_on is None
+                  else split_documents(text, split_on))
+    ids, nbytes = [], 0
+    for i, doc_text in enumerate(docs):
+        doc = encode(doc_text, tok.merges, tok.pattern, cache)
+        # Round-trip check per document: the IDs between EOS tokens must
+        # decode to exactly this document. Encoding text never produces the
+        # EOS ID, so the document boundaries are unambiguous.
+        if decode(doc, tok.vocab) != doc_text:
+            ap.error(f"round-trip check failed for {path!r}"
+                     f"{'' if seps is None else f', document {i + 1}'}: "
+                     f"decoding didn't reproduce the text")
+        ids += doc + [tok.special_id(EOS)]
+        nbytes += len(doc_text.encode("utf-8"))
+    head = f"  {path:<24} {len(text.encode('utf-8')):>12,} bytes -> "
+    if seps is None:
+        print(f"{head}{len(ids) - 1:>11,} tokens + EOS")
+    else:
+        print(f"{head}{len(docs):,} documents ({seps:,} separator lines "
+              f"dropped), {len(ids) - len(docs):,} tokens + one EOS each")
+    return ids, len(docs), nbytes
+
+
 def encode_mode(ap, args, tok):
     """Encode the --encode text files into token IDs and write the -o file.
 
-    Each file is one document. Its tokens are followed by the EOS token, so
-    the model can learn where a document ends, both to keep unrelated
-    documents apart during training and to know when to stop generating.
+    Each file is one document, or with --split-on, each part of a file
+    between separator lines (the separator lines are dropped, not encoded).
+    Each document's tokens are followed by the EOS token, so the model can
+    learn where a document ends, both to keep unrelated documents apart
+    during training and to know when to stop generating. Literal EOS text
+    inside a document is still encoded as ordinary bytes: only the named
+    separator, on a line of its own, marks a boundary.
     """
     eos = tok.special_id(EOS)
     if eos is None:
         ap.error(f"the tokenizer has no {EOS} (EOS) token; it was saved by "
                  f"an older version of mini_bpe.py, so retrain it")
     print(f"\n=== Encode: {' '.join(args.encode)} -> {args.output} ===")
-    ids, cache, nbytes = [], {}, 0
+    ids, cache, nbytes, ndocs = [], {}, 0, 0
     for path in args.encode:
-        text = read_text(ap, path)
-        doc = encode(text, tok.merges, tok.pattern, cache)
-        # Round-trip check per document: the IDs between EOS tokens must
-        # decode to exactly this file. Encoding text never produces the EOS
-        # ID, so the document boundaries are unambiguous.
-        if decode(doc, tok.vocab) != text:
-            ap.error(f"round-trip check failed for {path!r}: decoding "
-                     f"didn't reproduce the text")
-        ids += doc + [eos]
-        nbytes += len(text.encode("utf-8"))
-        print(f"  {path:<24} {len(text.encode('utf-8')):>12,} bytes -> "
-              f"{len(doc):>11,} tokens + EOS")
+        file_ids, docs, doc_bytes = encode_file(ap, path, tok, cache,
+                                                args.split_on)
+        ids += file_ids
+        ndocs += docs
+        nbytes += doc_bytes
     fingerprint = tok.fingerprint()
     try:
         width = write_ids(args.output, ids, tok.vocab_size, fingerprint)
     except OSError as e:
         ap.error(f"can't write {args.output!r}: {e.strerror}")
-    print(f"  {len(args.encode)} document(s), {nbytes:,} bytes of text -> "
-          f"{len(ids):,} IDs including {len(args.encode)} EOS (ID {eos}); "
-          f"{nbytes / max(len(ids) - len(args.encode), 1):.2f} bytes/token; "
-          f"lossless round-trip: True")
+    print(f"  {ndocs:,} document(s), {nbytes:,} bytes of text -> "
+          f"{len(ids):,} IDs including {ndocs:,} EOS (ID {eos}); "
+          f"{nbytes / max(len(ids) - ndocs, 1):.2f} bytes/token; "
+          f"lossless round-trip of every document: True")
     print(f"  wrote {IDS_HEADER.size}-byte header + {len(ids):,} IDs x "
           f"{width} bytes; V = {tok.vocab_size:,}; "
           f"tokenizer fingerprint {fingerprint.hex()[:16]}…")

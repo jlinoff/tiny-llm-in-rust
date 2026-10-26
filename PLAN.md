@@ -294,7 +294,9 @@ fingerprint of the tokenizer (a hash of its pattern and merges), so later steps
 can refuse IDs made by a different tokenizer. After encoding, the IDs are
 decoded and compared with the input. The format is described in
 `tokenizer/README.md`. Encoding is also where special tokens enter the data:
-each input file is a document, and EOS is appended after each one (done); each
+each input file is a document, and EOS is appended after each one (done); a
+file holding many documents, such as TinyStories with `<|endoftext|>` lines
+between its stories, is split at those lines with `--split-on` (done); each
 message of `chat.txt` will be wrapped in turn markers (planned; see
 [Special tokens](#special-tokens)).
 
