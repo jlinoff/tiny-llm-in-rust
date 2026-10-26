@@ -446,6 +446,30 @@ makes the story more predictable, above all at the requested words. Every
 story token counts, and a sign test says whether "own request lower" wins
 more often than a coin flip would.
 
+**What the paired check found** (the same two models; 134 of the 200
+held-out stories fit in the context with their request, the rest were
+left out):
+
+- **The fine-tuned model does use the requests, weakly.** Its own request
+  makes the requested words' tokens 1.12 times as likely on average (loss
+  5.971 against 6.088), and it's lower for 118 of 134 stories: a sign test
+  gives p ≈ 2 × 10⁻²⁰, so this is no accident. The whole story's loss is
+  also lower with its own request (96 of 134, p ≈ 6 × 10⁻⁷), by much less.
+- **Even the pretrained model shows a trace of it:** 1.04 times (93 of 135,
+  p ≈ 10⁻⁵), with the request given as plain text. The requested words
+  appear in its prompt, and a model that has learned to copy (the
+  induction heads of attention item 6) raises the probability of words it
+  has just seen. Fine-tuning tripled that effect, from 0.041 to 0.117 in
+  loss.
+- **Why sampling barely saw it:** a loss of about 6 means each requested
+  word's tokens get a probability of about e⁻⁶ ≈ 0.25% at any given point.
+  Multiplying that by 1.12 still leaves the word rare in a 200-token
+  sample. The effect is real but far too small to steer the stories.
+
+So the model has learned that the request matters, not yet how to act on
+it. That's the measure the next experiments (longer fine-tuning, a bigger
+model) are judged by.
+
 **First result (1.35M parameters, 1,500 fine-tuning steps, about 0.8
 passes): the format was learned, the requests mostly weren't.** On 200
 held-out requests:
