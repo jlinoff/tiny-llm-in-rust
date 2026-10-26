@@ -21,7 +21,7 @@ tokenize: $(OUT)/tok.bpe ## Step 1: learn the tokenizer from the training text.
 # Rebuilt only when the corpus or the script changes.
 $(OUT)/tok.bpe: $(CORPUS) tokenizer/mini_bpe.py | $(OUT)
 	$(call hdr,tokenize)
-	time python3 tokenizer/mini_bpe.py $(CORPUS) -n $(MERGES) --save $@
+	time python3 tokenizer/mini_bpe.py $(CORPUS) -n $(MERGES) $(SPLIT) --save $@
 
 # run make -B encode MERGES=2000 to rebuild everything when a variable changes.
 .PHONY: encode
@@ -30,7 +30,7 @@ encode: $(OUT)/corpus.ids ## Step 2: encode the corpus into token IDs.
 # Rebuilt when the tokenizer, the corpus or the script changes.
 $(OUT)/corpus.ids: $(OUT)/tok.bpe $(CORPUS) tokenizer/mini_bpe.py | $(OUT)
 	$(call hdr,encode)
-	time python3 tokenizer/mini_bpe.py --load $(OUT)/tok.bpe --encode $(CORPUS) -o $@
+	time python3 tokenizer/mini_bpe.py --load $(OUT)/tok.bpe --encode $(CORPUS) $(SPLIT) -o $@
 
 $(OUT):
 	mkdir -p $@
@@ -169,6 +169,7 @@ help:  ## This help message.
 	@printf "   %-18s  %s\n" "MERGES" "$(MERGES)"
 	@printf "   %-18s  %s\n" "OUT" "$(OUT)"
 	@printf "   %-18s  %s\n" "PROMPT" "$(PROMPT)"
+	@printf "   %-18s  %s\n" "SPLIT_ON" "$(SPLIT_ON)"
 	@printf "   %-18s  %s\n" "W2V" "$(W2V)"
 	@printf "   %-18s  %s\n" "W2V_CORPUS" "$(W2V_CORPUS)"
 	@printf "   %-18s  %s\n" "W2V_ARGS" "$(W2V_ARGS)"
