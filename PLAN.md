@@ -470,6 +470,31 @@ So the model has learned that the request matters, not yet how to act on
 it. That's the measure the next experiments (longer fine-tuning, a bigger
 model) are judged by.
 
+**Longer and stronger fine-tuning helps a lot.** The same pretrained model,
+fine-tuned for 6,000 steps (about 3.1 passes) at a peak learning rate of
+0.001 instead of 1,500 steps at 0.0005, 22.5 minutes on the M4:
+
+- **Requested words: 1.60 times as likely** with the story's own request
+  (loss 4.848 against 5.316), lower for 130 of 134 stories (p ≈ 10⁻³³). It
+  was 1.12 after 1,500 steps.
+- **Sampling now sees it:** 5.7% of the requested words used (34 of 600)
+  against 0.3% for the control, up from 2.2% against 0.5%. Still never all
+  three in one story.
+- **Better stories overall:** the loss on the held-out stories' tokens fell
+  from 3.28 to 2.95, and 90% of replies end by themselves with `<|end|>`
+  (72% before). Fine-tuning is also more training on story text, and the
+  pretrained model was far from converged.
+- **No sign of memorization** after 3 passes: the validation loss fell at
+  every measurement, from 3.509 before fine-tuning to 2.899, still slowly
+  falling at the end.
+- **The gradient norm grew** from 1.3 to about 2, so clipping at 1.0 cut
+  every step: the effective learning rate was lower than the schedule's.
+
+So the 1,500-step run was undertrained, not too small a model. How far
+more fine-tuning can go on the same 15,000 conversations is limited by
+memorization; the full TinyStories run (more stories, a bigger model)
+raises both limits.
+
 **First result (1.35M parameters, 1,500 fine-tuning steps, about 0.8
 passes): the format was learned, the requests mostly weren't.** On 200
 held-out requests:
