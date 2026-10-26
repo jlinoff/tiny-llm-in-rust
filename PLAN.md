@@ -438,6 +438,48 @@ next step: B new random windows
 Tokens arrive one at a time only in generation (step 6), where each token
 must be chosen before the next can be computed.
 
+**Where the windows come from: random places in one stream.** Training
+never sees stories, or documents of any kind. `corpus.ids` is one long
+stream, each document followed by EOS:
+
+```
+… end of story 41 <EOS> Once upon a time … (story 42, 300 tokens) … The end. <EOS> One day … (story 43) …
+```
+
+Each step picks B starting points uniformly at random anywhere in the
+stream (`data::train_batch`), and each window is the T + 1 tokens from
+there. Windows ignore document boundaries. For a 300-token story with
+T = 256, one window may cover its tokens 1–256, another may start at its
+token 120 and run past its EOS into the next story, another may start in
+the previous story and cross into this one. Over training, windows land at
+every possible offset, in random order: in expectation like taking every
+start point (1–256, 2–257, …), but sampled rather than enumerated. (Cutting
+the stream into non-overlapping chunks, 1–256 then 257–512, is the other
+common recipe; both work. Random starts keep a token from always sitting at
+the same position in its window.)
+
+- **How often each token is seen:** less often than "every offset"
+  suggests. The 1.35M model's run took 2,000 steps × 2,048 tokens = 4.1M
+  input positions from 4.65M training tokens: each token was in about 0.9
+  windows on average, some in none, some in two or three. That's the
+  "passes over the training data" the log reports.
+- **A long text's end can't see its beginning.** At most T − 1 earlier
+  tokens are in view, so a story's 300th token never sees its first 44.
+  That's the context limit.
+- **Positions mean "place in the window", not "place in the document".**
+  The same token is at position 10 in one window and 200 in another, so the
+  position table learns relative placement within the window. "A document
+  starts here" is signalled by the EOS just before it, not by a position.
+- **Attention can look back across an EOS** into the unrelated document
+  before it; nothing masks it. The model learns that EOS means "what came
+  before doesn't matter". Some production systems add a per-document mask
+  instead; with short documents the difference is small.
+
+The other steps treat long texts differently: fine-tuning (step 5) puts one
+whole conversation per row, padded to T, and leaves out conversations
+longer than T; generation (step 6), past T tokens, rebuilds its cache from
+the last ¾ of T and continues (a sliding window).
+
 ##### Step 5: finetune
 
 - **Inputs:**
