@@ -2065,6 +2065,31 @@ set of refinements. None changes the concepts in this plan; most pay off
 only at a scale or on hardware we don't have. For each: what it is, what it
 buys, and why it isn't here.
 
+**Tokenization and encoding**
+
+- **A tuned split pattern.** Our pre-tokenizer regex approximates GPT-2's.
+  Later tokenizers refine it; GPT-4's, for example, splits runs of digits
+  into groups of at most three, which makes numbers, and arithmetic on
+  them, more regular for the model. Not here: TinyStories has few numbers.
+- **Fast implementations**, in Rust or C++ (OpenAI's tiktoken, Hugging
+  Face's tokenizers). Not here: pure Python is clear and fast enough for
+  our corpora (V2's 2.2 GB encodes in about 6 minutes), though not for
+  trillions of tokens.
+- **Many more special tokens**: for system prompts, tool calls and their
+  results, image placeholders, and fill-in-the-middle for code (the model
+  fills a gap given the text before and after it). Not here: four cover a
+  single-turn storyteller.
+- **Chat templates**: the exact layout of system, user and assistant turns
+  over a whole conversation. Not here: one request, one reply.
+- **Other algorithms**: in SentencePiece, Google's tokenizer library, a
+  unigram model (used by T5, Google's 2019 text-to-text model) and a BPE
+  variant (Llama 1 and 2). Different ways of learning the vocabulary, the
+  same role. Not here: BPE is the most common, and one is enough to
+  understand the role.
+- **Data pipelines at scale**: the corpus sharded, streamed and shuffled
+  across many machines, sometimes with attention masked at document
+  boundaries. Not here: one file, in memory.
+
 **Architecture**
 
 - **RoPE (rotary position embedding).** Instead of adding a learned position
@@ -2190,11 +2215,30 @@ card (2025) describes several of these elements for that model, marked
 
 **Inference**
 
-- **Quantization** (weights stored as 8-bit or 4-bit integers), **batching
-  many users' requests together**, and **speculative decoding** (a small
-  model drafts several tokens and the large one checks them in one pass).
-  Not here: they make serving large models cheaper, and our model already
-  generates faster than anyone reads.
+- **More sampling methods.** We have temperature and top-k. Production
+  interfaces usually default to **top-p**, or nucleus sampling (Holtzman et
+  al. 2020): keep the smallest set of likeliest tokens whose probabilities
+  add up to p, so the cutoff adapts to how sure the model is (a few
+  candidates when it's confident, many when it isn't). Also frequency and
+  presence penalties against repetition, stop sequences, and biases that
+  favor or forbid particular tokens. Not here: temperature and top-k show
+  the idea; top-p would be about 20 lines, the most useful addition.
+- **Constrained decoding**: forcing the output to follow a grammar, such
+  as valid JSON, by ruling out forbidden tokens at each step. Not here:
+  stories have no grammar to enforce.
+- **Serving many users at once**: continuous batching (new requests join
+  a running batch as others finish), paged KV-cache memory (introduced by vLLM, an open-source
+  serving system), and
+  prefix caching (reusing the KV cache of a shared prompt, such as a long
+  system prompt, across requests). Not here: one user.
+- **Quantization** (weights stored as 8-bit or 4-bit integers) and
+  **speculative decoding** (a small model drafts several tokens and the
+  large one checks them all in one pass). Not here: they make serving
+  large models cheaper, and ours already generates faster than anyone
+  reads.
+- **Distillation**: training a smaller model to imitate a large one's
+  outputs, for cheaper serving. Not here: there's no larger model of ours
+  to imitate.
 
 ## Conventions for all code
 
