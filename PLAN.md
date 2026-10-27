@@ -2064,6 +2064,42 @@ make lora lora-evaluate        # the same two steps, then the evaluation
   them would save roughly a third of each backward pass. The savings here
   are in the trained numbers, the optimizer's state and the file.
 
+**Measured: LoRA against full fine-tuning.** The small model (1.35M
+parameters, context 256), the same chat data and 3,000 steps each; full
+fine-tuning at learning rate 0.001, LoRA at rank 8 (α = 16) on attention's
+four matrices at 0.003. The adapter trains 32,768 numbers, 2.4% of the
+model (131 kB; 393 kB with Adam's state). Evaluated on 134 held-out
+requests with `evaluate --paired` and 600 sampled stories:
+
+| | Pretrained | LoRA, rank 8 | Full fine-tuning |
+|---|---|---|---|
+| Trained numbers | — | 32,768 (2.4%) | 1.35M (100%) |
+| Validation loss on replies | 3.509 | 3.317 | 3.044 |
+| Requested words: own request's advantage | 1.04× | 1.08× | 1.28× |
+| Stories where the own request was better | 94 of 135 | 106 of 134 | 123 of 134 |
+| Loss on all story tokens | 3.42 | 3.35 | 3.10 |
+| Requested words in sampled stories (control) | 1.8% (0.8%) | 2.5% (0.7%) | 3.8% (0.7%) |
+
+- LoRA works: every measure moves the right way, and the request-following
+  is far beyond chance (106 of 134, sign test p = 7 × 10⁻¹²).
+- But it gets about a third of full fine-tuning's request-following (a
+  0.076 drop in the requested words' loss against 0.248) and about a
+  quarter of its general improvement in story loss.
+- Its validation loss had flattened: 3.320 at step 2,500, 3.317 at 3,000.
+  More steps wouldn't close the gap; a rank-8 update to attention alone
+  can't move this model as far.
+- Only 20% of its stories ended by themselves within 200 tokens, against
+  66% after full fine-tuning: learning when to stop seems to need the
+  feed-forward layers or the output layer, which this adapter doesn't
+  touch.
+
+This is the "learns less" side of Biderman et al., at small scale: a tiny
+model has no spare capacity for a small subspace to steer, and the chat
+data teaches it new material (the turn markers, the new task) rather than
+only a new format. The larger the pretrained model, the less this should
+hold (Aghajanyan et al., above). Adding the feed-forward matrices to
+`lora_targets`, or raising the rank, are the obvious next experiments.
+
 ## The limits of this model
 
 Some of what looks like a limit is only a setting; the real limits are set
