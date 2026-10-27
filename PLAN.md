@@ -2071,14 +2071,19 @@ four matrices at 0.003. The adapter trains 32,768 numbers, 2.4% of the
 model (131 kB; 393 kB with Adam's state). Evaluated on 134 held-out
 requests with `evaluate --paired` and 600 sampled stories:
 
-| | Pretrained | LoRA, rank 8 | Full fine-tuning |
-|---|---|---|---|
-| Trained numbers | — | 32,768 (2.4%) | 1.35M (100%) |
-| Validation loss on replies | 3.509 | 3.317 | 3.044 |
-| Requested words: own request's advantage | 1.04× | 1.08× | 1.28× |
-| Stories where the own request was better | 94 of 135 | 106 of 134 | 123 of 134 |
-| Loss on all story tokens | 3.42 | 3.35 | 3.10 |
-| Requested words in sampled stories (control) | 1.8% (0.8%) | 2.5% (0.7%) | 3.8% (0.7%) |
+| | Pretrained | LoRA, attention | LoRA, attention + FFN | Full fine-tuning |
+|---|---|---|---|---|
+| Trained numbers | — | 32,768 (2.4%) | 73,728 (5.5%) | 1.35M (100%) |
+| Validation loss on replies | 3.509 | 3.317 | 3.286 | 3.044 |
+| Requested words: own request's advantage | 1.04× | 1.08× | 1.09× | 1.28× |
+| Stories where the own request was better | 94 of 135 | 106 of 134 | 106 of 134 | 123 of 134 |
+| Loss on all story tokens | 3.42 | 3.35 | 3.32 | 3.10 |
+| Requested words in sampled stories (control) | 1.8% (0.8%) | 2.5% (0.7%) | 1.8% (0.8%) | 3.8% (0.7%) |
+| Stories that ended by themselves | — | 20% | 18% | 66% |
+
+Both adapters are rank 8; "attention + FFN" adds the feed-forward
+network's two matrices in each block (`lora_targets`), a second run made to
+test whether the targets were the limit.
 
 - LoRA works: every measure moves the right way, and the request-following
   is far beyond chance (106 of 134, sign test p = 7 × 10⁻¹²).
@@ -2088,17 +2093,25 @@ requests with `evaluate --paired` and 600 sampled stories:
 - Its validation loss had flattened: 3.320 at step 2,500, 3.317 at 3,000.
   More steps wouldn't close the gap; a rank-8 update to attention alone
   can't move this model as far.
-- Only 20% of its stories ended by themselves within 200 tokens, against
-  66% after full fine-tuning: learning when to stop seems to need the
-  feed-forward layers or the output layer, which this adapter doesn't
-  touch.
+- Adding the feed-forward matrices more than doubled the trained numbers
+  and barely moved anything: validation 3.317 → 3.286, request-following
+  1.08× → 1.09×, the same 106 of 134. (Sampled use of the requested words
+  went down, 2.5% → 1.8%, but with 11 to 15 hits out of 600 that
+  difference is noise.) So the targets weren't the limit.
+- Only about a fifth of the adapters' stories ended by themselves within
+  200 tokens, against two thirds after full fine-tuning, with or without
+  the feed-forward matrices. Neither adapter touches the token embeddings,
+  which here double as the output layer (they're tied), so the end
+  marker's own vector stays frozen; that is a plausible reason, not a
+  tested one.
 
 This is the "learns less" side of Biderman et al., at small scale: a tiny
 model has no spare capacity for a small subspace to steer, and the chat
 data teaches it new material (the turn markers, the new task) rather than
 only a new format. The larger the pretrained model, the less this should
-hold (Aghajanyan et al., above). Adding the feed-forward matrices to
-`lora_targets`, or raising the rank, are the obvious next experiments.
+hold (Aghajanyan et al., above). Untested here: a higher rank, and other
+learning rates (0.003 was chosen once, not tuned), each a single run of
+one seed.
 
 ## The limits of this model
 
