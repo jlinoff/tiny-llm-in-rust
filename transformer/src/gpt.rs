@@ -62,7 +62,8 @@ impl<T: Float> Params<T> {
 pub struct Forward<T: Float> {
     pub tape: Tape<T>,
     pub leaves: Vec<Var>,
-    /// With an adapter: A, B, A, B, … in the adapter's `to_params` order.
+    /// With an adapter: A, B, A, B, … (then D, if any), in the adapter's
+    /// `to_params` order.
     pub lora_leaves: Vec<Var>,
     pub logits: Var,
     pub loss: Var,
@@ -81,7 +82,8 @@ pub fn forward<T: Float>(
 }
 
 /// The forward pass, optionally with a LoRA adapter: each adapted weight W
-/// is replaced by W + (α/r)·A·B, computed on the tape so that A and B get
+/// is replaced by W + (α/r)·A·B, and the token embedding E by E + D in the
+/// adapter's rows if it has D, computed on the tape so that A, B and D get
 /// gradients.
 pub fn forward_with<T: Float>(
     p: &Params<T>,
@@ -110,6 +112,20 @@ pub fn forward_with<T: Float>(
             let i = p.index(name);
             used[i] = t.add(leaves[i], ab);
             lora_leaves.extend([a, b]);
+        }
+        // The embedding change, if any: E + D spread over E's rows.
+        if let Some(d) = &l.emb_delta {
+            let i = p.index("token_embedding");
+            let d = t.leaf(d.clone());
+            let full = match l.selector(p.mats[i].rows) {
+                None => d,
+                Some(sel) => {
+                    let sel = t.leaf(sel); // a constant: its gradient is never read
+                    t.matmul(sel, d)
+                }
+            };
+            used[i] = t.add(leaves[i], full);
+            lora_leaves.push(d);
         }
     }
     let w = |name: &str| used[p.index(name)];

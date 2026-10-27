@@ -1911,14 +1911,19 @@ first three are required; the defaults are those in `config.toml`.
 keys as `[training]`, with fine-tuning's own values: a lower learning rate
 (0.0005), fewer steps, and here `batch_size` counts conversations, each one
 row padded to the context length. `validation_fraction` holds out the last
-conversations. Three more keys, all optional, choose LoRA instead of
+conversations. Four more keys, all optional, choose LoRA instead of
 fine-tuning every weight (see [LoRA](#lora-fine-tuning-a-low-rank-adapter));
-`finetune`'s `--lora-rank` and `--lora-alpha` override them:
+`finetune`'s `--lora-rank`, `--lora-alpha` and `--lora-embeddings` override
+them:
 
 - `lora_rank` (0): the adapter's rank r; 0 fine-tunes every weight.
 - `lora_alpha` (2r): the adapter's update is scaled by α/r.
 - `lora_targets` (attention's four): which matrices of each block to adapt,
   from `attn.w_q`, `attn.w_k`, `attn.w_v`, `attn.w_o`, `ffn.w1`, `ffn.w2`.
+- `lora_embeddings` (`"none"`): which rows of the token embedding the
+  adapter also changes, with a full (not low-rank) change: `"none"`,
+  `"markers"` (the four special tokens': `<|endoftext|>` and the chat
+  markers) or `"all"`.
 
 **The `[generate]` hyperparameters** (read by step 6, generate). All are
 optional, and each can be overridden on the command line (`--max-tokens`,
@@ -2050,14 +2055,24 @@ make lora lora-evaluate        # the same two steps, then the evaluation
   Adam's state, so it resumes with `--adapter`), plus the base model's
   SHA-256 (a cryptographic checksum: any change to the file changes it), so
   it can't be applied to the wrong model.
-- `merge` folds it in: W + (α/r)·A·B, with the same operations in the same
-  order as the forward pass, so the merged model's predictions equal the
-  base-plus-adapter's bit for bit (a test checks this, in f32).
+- `lora_embeddings` (or `--lora-embeddings`) adds a change D to some rows
+  of the token embedding E, which the adapter otherwise leaves frozen:
+  E'[i] = E[i] + D[k] for the k-th chosen row i, D starting at zero.
+  `markers` changes the four special tokens' rows (4 × d numbers: 512 for
+  the small model), `all` every row (V × d: 524,288, 39% of the small
+  model). Since E is also the output layer (it's tied), a changed row
+  changes both how the token is read and how likely it is to be
+  predicted. Trainings that add special tokens commonly do this.
+- `merge` folds it in: W + (α/r)·A·B, and E + D in D's rows, with the same
+  operations in the same order as the forward pass, so the merged model's
+  predictions equal the base-plus-adapter's bit for bit (a test checks
+  this, in f32, with no rows, some rows and every row).
 - `generate` and `evaluate` take the merged model; given an adapter, they
   say to merge it first.
-- Tests: a fresh adapter (B = 0) leaves the model's predictions exactly
-  unchanged; every number of A and B against finite differences; training
-  changes only the adapter, lowers the loss, and resumes exactly.
+- Tests: a fresh adapter (B = 0, D = 0) leaves the model's predictions
+  exactly unchanged; every number of A, B and D against finite
+  differences; training changes only the adapter, lowers the loss, and
+  resumes exactly.
 - One honest limit: our tape still computes gradients for the frozen
   weights (they're simply unused), so a LoRA step costs about as much as a
   full fine-tuning step here, without the paper's 25% speedup. Skipping

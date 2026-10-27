@@ -246,13 +246,19 @@ PLAN.md, "LoRA").
   `attn.w_v`, `attn.w_o`, `ffn.w1`, `ffn.w2`.
 - **α** (`--lora-alpha`, `lora_alpha`) scales the update by α/R; it
   defaults to 2R.
-- **The output is an adapter**, not a model: A and B for each matrix, with
+- **Embedding rows** (`--lora-embeddings`, `lora_embeddings`): `none` (the
+  default), `markers` or `all`. With `markers` the adapter also trains a
+  full change D to the four special tokens' rows of the token embedding
+  (`<|endoftext|>` and the chat markers, which pretraining never taught);
+  with `all`, to every row. The rows are recorded in the adapter's
+  metadata (`lora_embedding_rows`), and resuming needs the same setting.
+- **The output is an adapter**, not a model: A and B for each matrix (and D), with
   Adam's state, `kind = lora` and the base model's SHA-256 in its metadata.
   `--adapter FILE` resumes one (with the same rank and α, on the same
   model). `inspect` shows what an adapter holds; `generate` and `evaluate`
   refuse one and say to merge it.
-- **`transformer merge`** folds the adapter into the base model, W + (α/R)·A·B,
-  writing an ordinary checkpoint (`kind = merged`) with the base model's
+- **`transformer merge`** folds the adapter into the base model, W + (α/R)·A·B
+  (and E + D in D's rows), writing an ordinary checkpoint (`kind = merged`) with the base model's
   names and shapes. It uses the same operations, in the same order, as the
   forward pass with the adapter, so the predictions are identical.
 - **LoRA usually wants a higher learning rate** than full fine-tuning, since

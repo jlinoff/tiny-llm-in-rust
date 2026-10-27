@@ -108,7 +108,8 @@ $(OUT)/chat.safetensors: $(OUT)/model.safetensors $(OUT)/chat.ids $(CONFIG) | $(
 # same conversations and [finetune] settings, but the model is frozen and
 # only a small adapter is trained (chat-lora.safetensors), then folded into
 # the model (chat-lora-merged.safetensors) for generate and evaluate.
-# LORA_ARGS: the rank, and a learning rate (LoRA usually wants a higher one).
+# LORA_ARGS: the rank, and a learning rate (LoRA usually wants a higher one);
+# add --lora-embeddings markers (or all) to train embedding rows too.
 LORA_ARGS ?= --lora-rank 8 --learning-rate 0.003
 
 $(OUT)/chat-lora.safetensors: $(OUT)/model.safetensors $(OUT)/chat.ids $(CONFIG) | $(OUT) $(TRANSFORMER)

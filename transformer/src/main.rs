@@ -111,6 +111,11 @@ enum Command {
         /// lora_alpha; default 2R)
         #[arg(long)]
         lora_alpha: Option<f64>,
+        /// LoRA: also train a change to these rows of the token embedding:
+        /// none, markers (the special tokens') or all (overrides [finetune]
+        /// lora_embeddings; default none)
+        #[arg(long)]
+        lora_embeddings: Option<String>,
         /// Override [finetune] learning_rate
         #[arg(long)]
         learning_rate: Option<f64>,
@@ -245,6 +250,7 @@ fn main() -> ExitCode {
             output,
             lora_rank,
             lora_alpha,
+            lora_embeddings,
             learning_rate,
             adapter,
         } => finetune_command(
@@ -256,6 +262,7 @@ fn main() -> ExitCode {
             FinetuneOptions {
                 lora_rank,
                 lora_alpha,
+                lora_embeddings,
                 learning_rate,
                 adapter,
             },
@@ -696,7 +703,17 @@ impl Loaded {
         match (self.ckpt.metadata.get("kind").map(String::as_str), step) {
             (Some("finetune"), Some(s)) => format!("fine-tuned for {s} steps"),
             (Some("merged"), Some(s)) => {
-                format!("fine-tuned with a rank-{rank} LoRA adapter for {s} steps, merged")
+                let emb = match self
+                    .ckpt
+                    .metadata
+                    .get("lora_embeddings")
+                    .map(String::as_str)
+                {
+                    Some("markers") => " (plus the special tokens' embeddings)",
+                    Some("all") => " (plus the token embedding)",
+                    _ => "",
+                };
+                format!("fine-tuned with a rank-{rank} LoRA adapter{emb} for {s} steps, merged")
             }
             (_, Some(s)) => format!("trained to step {s}"),
             _ => "untrained".into(),
@@ -939,6 +956,7 @@ fn generate_command(
 struct FinetuneOptions {
     lora_rank: Option<usize>,
     lora_alpha: Option<f64>,
+    lora_embeddings: Option<String>,
     learning_rate: Option<f64>,
     adapter: Option<PathBuf>,
 }
@@ -987,6 +1005,9 @@ fn finetune_command(
     if opts.lora_alpha.is_some() {
         tcfg.lora_alpha = opts.lora_alpha;
     }
+    if let Some(e) = opts.lora_embeddings {
+        tcfg.lora_embeddings = e;
+    }
     if let Some(lr) = opts.learning_rate {
         tcfg.learning_rate = lr;
     }
@@ -995,6 +1016,13 @@ fn finetune_command(
     if opts.adapter.is_some() && !lora {
         return Err("--adapter resumes a LoRA run: give --lora-rank too".into());
     }
+    if !lora && tcfg.lora_embeddings != "none" {
+        return Err(
+            "lora_embeddings is part of a LoRA adapter: give --lora-rank too (full fine-tuning trains every embedding row anyway)"
+                .into(),
+        );
+    }
+    let emb_rows = embedding_rows(&tcfg.lora_embeddings, &m, model.vocab);
     let config = model.config.clone();
     let seq = config.context;
     let convs = data::Conversations::parse(&corpus.ids, &m, seq)
@@ -1016,7 +1044,13 @@ fn finetune_command(
     let parent_kind = model.ckpt.metadata.get("kind").cloned().unwrap_or_default();
     let model_sha = sha256_file(model_path)?;
     let mut state = if lora {
-        lora_state(&model, &model_sha, &tcfg, opts.adapter.as_deref())?
+        lora_state(
+            &model,
+            &model_sha,
+            &tcfg,
+            &emb_rows,
+            opts.adapter.as_deref(),
+        )?
     } else {
         train::State::from_checkpoint(&model.ckpt)?
     };
@@ -1064,6 +1098,19 @@ fn finetune_command(
             tcfg.targets().join(", "),
             config.layers
         );
+        if !emb_rows.is_empty() {
+            println!(
+                "  and a change to {} of the token embedding's {} rows ({}), {} numbers",
+                emb_rows.len(),
+                model.vocab,
+                if tcfg.lora_embeddings == "markers" {
+                    "the special tokens'"
+                } else {
+                    "all"
+                },
+                emb_rows.len() * config.d_model
+            );
+        }
         println!(
             "  {n} trained numbers ({:.2}% of the model's); the model's own weights are frozen",
             100.0 * n as f64 / n_model as f64
@@ -1131,6 +1178,8 @@ fn finetune_command(
         base.insert("lora_rank".into(), tcfg.lora_rank.to_string());
         base.insert("lora_alpha".into(), tcfg.alpha().to_string());
         base.insert("lora_targets".into(), tcfg.targets().join(","));
+        base.insert("lora_embeddings".into(), tcfg.lora_embeddings.clone());
+        base.insert("lora_embedding_rows".into(), rows_text(&emb_rows));
         base.insert("base_file".into(), model_path.display().to_string());
         base.insert("base_sha256".into(), model_sha.clone());
     }
@@ -1195,10 +1244,57 @@ fn finetune_command(
 
 /// The training state for a LoRA run: a fresh adapter on the model, or the
 /// adapter given to resume (which must have been made from this very model).
+/// The token embedding rows `lora_embeddings` chooses: none, the special
+/// tokens' (end of text and the three chat markers), or all of them.
+fn embedding_rows(mode: &str, m: &data::Markers, vocab: usize) -> Vec<usize> {
+    match mode {
+        "markers" => [m.eos, m.user, m.assistant, m.end]
+            .iter()
+            .map(|&i| i as usize)
+            .collect(),
+        "all" => (0..vocab).collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// Rows as recorded in an adapter's metadata: "4092,4093,4094,4095", or
+/// "0-4095" for every row in order.
+fn rows_text(rows: &[usize]) -> String {
+    if !rows.is_empty() && rows.iter().enumerate().all(|(k, &i)| k == i) {
+        format!("0-{}", rows.len() - 1)
+    } else {
+        rows.iter()
+            .map(|i| i.to_string())
+            .collect::<Vec<_>>()
+            .join(",")
+    }
+}
+
+/// The embedding rows recorded in an adapter's metadata (none if absent:
+/// adapters made before lora_embeddings existed).
+fn adapter_rows(md: &std::collections::BTreeMap<String, String>) -> Result<Vec<usize>, String> {
+    let text = md
+        .get("lora_embedding_rows")
+        .map(String::as_str)
+        .unwrap_or("");
+    if text.is_empty() {
+        return Ok(Vec::new());
+    }
+    let bad = || format!("bad lora_embedding_rows {text:?}");
+    if let Some((a, b)) = text.split_once('-') {
+        let (a, b): (usize, usize) = (a.parse().map_err(|_| bad())?, b.parse().map_err(|_| bad())?);
+        return Ok((a..=b).collect());
+    }
+    text.split(',')
+        .map(|x| x.parse().map_err(|_| bad()))
+        .collect()
+}
+
 fn lora_state(
     model: &Loaded,
     model_sha: &str,
     tcfg: &train::TrainingConfig,
+    emb_rows: &[usize],
     adapter: Option<&Path>,
 ) -> Result<train::State, String> {
     let base = model.params();
@@ -1211,6 +1307,7 @@ fn lora_state(
                 rank,
                 alpha,
                 &tcfg.targets(),
+                emb_rows,
                 tcfg.seed,
             );
             let zeros = || {
@@ -1250,12 +1347,27 @@ fn lora_state(
                     meta("lora_alpha")
                 ));
             }
+            if adapter_rows(&f.metadata)? != emb_rows {
+                return Err(format!(
+                    "{} has lora_embeddings = {:?}; give the same setting to resume it",
+                    path.display(),
+                    f.metadata
+                        .get("lora_embeddings")
+                        .map(String::as_str)
+                        .unwrap_or("none")
+                ));
+            }
             train::State::from_checkpoint(&f)?
         }
     };
-    lora::Lora::from_params(&state.params, rank, alpha)?.check(&base)?;
+    lora::Lora::from_params(&state.params, rank, alpha, emb_rows)?.check(&base)?;
     Ok(train::State {
-        frozen: Some(train::Frozen { base, rank, alpha }),
+        frozen: Some(train::Frozen {
+            base,
+            rank,
+            alpha,
+            emb_rows: emb_rows.to_vec(),
+        }),
         ..state
     })
 }
@@ -1297,6 +1409,7 @@ fn merge_command(model_path: &Path, adapter_path: &Path, output: &Path) -> Resul
         &gpt::Params::<f32>::from_tensors(&adapter_tensors),
         rank,
         alpha,
+        &adapter_rows(&f.metadata)?,
     )?;
     let base = model.params();
     l.check(&base)?;
@@ -1601,9 +1714,19 @@ fn inspect(path: &Path, verbose: bool) -> Result<(), String> {
             .filter(|t| !t.name.starts_with("adam."))
             .cloned()
             .collect();
-        let l = lora::Lora::from_params(&gpt::Params::<f32>::from_tensors(&weights), rank, alpha)?;
+        let l = lora::Lora::from_params(
+            &gpt::Params::<f32>::from_tensors(&weights),
+            rank,
+            alpha,
+            &adapter_rows(&f.metadata)?,
+        )?;
+        let emb = if l.emb_rows.is_empty() {
+            String::new()
+        } else {
+            format!(" and {} embedding rows", l.emb_rows.len())
+        };
         println!(
-            "\nA LoRA adapter: rank {rank}, α {alpha}, {} numbers on {} matrices; fold it into its base model with transformer merge.",
+            "\nA LoRA adapter: rank {rank}, α {alpha}, {} numbers on {} matrices{emb}; fold it into its base model with transformer merge.",
             l.size(),
             l.targets.len()
         );

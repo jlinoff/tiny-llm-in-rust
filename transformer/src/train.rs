@@ -76,6 +76,19 @@ pub struct TrainingConfig {
     /// (empty): attention's four, attn.w_q, attn.w_k, attn.w_v, attn.w_o.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub lora_targets: Vec<String>,
+    /// Which rows of the token embedding the adapter also changes (with a
+    /// full, not low-rank, change D): "none" (the default), "markers" (the
+    /// special tokens', <|endoftext|> and the chat markers) or "all".
+    #[serde(default = "d_embeddings", skip_serializing_if = "is_none_mode")]
+    pub lora_embeddings: String,
+}
+
+fn d_embeddings() -> String {
+    "none".into()
+}
+
+fn is_none_mode(s: &str) -> bool {
+    s == "none"
 }
 
 fn is_zero(n: &usize) -> bool {
@@ -139,9 +152,9 @@ impl TrainingConfig {
             .map_err(|e| format!("config {} [{section}]: {e}", path.display()))?;
         t.check()
             .map_err(|e| e.replace("[training]", &format!("[{section}]")))?;
-        if section == "training" && t.lora_rank > 0 {
+        if section == "training" && (t.lora_rank > 0 || t.lora_embeddings != "none") {
             return Err(format!(
-                "config {} [training]: lora_rank is for fine-tuning only",
+                "config {} [training]: lora_rank and lora_embeddings are for fine-tuning only",
                 path.display()
             ));
         }
@@ -179,6 +192,13 @@ impl TrainingConfig {
             return Err(format!(
                 "[training] lora_targets: unknown matrix {t:?} (choose from {})",
                 crate::lora::TARGETS.join(", ")
+            ));
+        }
+        if !crate::lora::EMBEDDING_MODES.contains(&self.lora_embeddings.as_str()) {
+            return Err(format!(
+                "[training] lora_embeddings: {:?} isn't one of {}",
+                self.lora_embeddings,
+                crate::lora::EMBEDDING_MODES.join(", ")
             ));
         }
         Ok(())
@@ -233,6 +253,8 @@ pub struct Frozen {
     pub base: Params<f32>,
     pub rank: usize,
     pub alpha: f64,
+    /// The token embedding's rows the adapter changes (empty: none).
+    pub emb_rows: Vec<usize>,
 }
 
 impl State {
@@ -251,7 +273,7 @@ impl State {
                 (f, leaves)
             }
             Some(fr) => {
-                let l = Lora::from_params(&self.params, fr.rank, fr.alpha)
+                let l = Lora::from_params(&self.params, fr.rank, fr.alpha, &fr.emb_rows)
                     .expect("the adapter was checked when loaded");
                 let f = forward_with(&fr.base, Some(&l), c, &batch.inputs, &batch.targets, seq);
                 let leaves = f.lora_leaves.clone();
@@ -744,7 +766,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// LoRA training changes only the adapter, lowers the loss, and resumes
+    /// LoRA training (with an embedding change) changes only the adapter,
+    /// lowers the loss, and resumes
     /// exactly: 10 steps + checkpoint + 10 steps = 20 steps, bit for bit.
     #[test]
     fn lora_trains_the_adapter_only_and_resumes_exactly() {
@@ -771,6 +794,7 @@ mod tests {
                 2,
                 4.0,
                 &["attn.w_q".into(), "attn.w_v".into()],
+                &[29, 3], // and two embedding rows, out of order
                 1,
             );
             let p = l.to_params();
@@ -783,6 +807,7 @@ mod tests {
                     base: base.clone(),
                     rank: 2,
                     alpha: 4.0,
+                    emb_rows: vec![29, 3],
                 }),
                 step: 0,
                 tokens: 0,
@@ -813,6 +838,12 @@ mod tests {
             validation_loss(&straight, &c, &[data::train_batch(&ids, 8, 16, 9, 1)], 16).unwrap();
         assert!(after < before, "loss {before} -> {after}");
         assert_eq!(straight.frozen.as_ref().unwrap().base.mats, base.mats); // untouched
+        let d = straight.params.mats.last().unwrap(); // the embedding change trained too
+        assert_eq!(
+            straight.params.names.last().unwrap(),
+            crate::lora::EMBEDDING_DELTA
+        );
+        assert!(d.data.iter().any(|&x| x != 0.0));
 
         let half = dir.join("b");
         run(lora_state(), &c, &training(10), &ids, &half, &prov, |_| {}).unwrap();
