@@ -2080,71 +2080,70 @@ make lora lora-evaluate        # the same two steps, then the evaluation
   are in the trained numbers, the optimizer's state and the file.
 
 **Measured: LoRA against full fine-tuning.** The small model (1.35M
-parameters, context 256), the same chat data and 3,000 steps each; full
-fine-tuning at learning rate 0.001, LoRA at rank 8 (α = 16) on attention's
-four matrices at 0.003. The adapter trains 32,768 numbers, 2.4% of the
-model (131 kB; 393 kB with Adam's state). Evaluated on 134 held-out
-requests with `evaluate --paired` and 600 sampled stories:
+parameters, context 256), the same chat data and 3,000 steps for every run;
+full fine-tuning at learning rate 0.001, every adapter at 0.003 with
+α = 2r (so the updates' scale, α/r = 2, never changed). Evaluated on 134
+held-out requests with `evaluate --paired` and 600 sampled stories. Six
+runs, each made to test an explanation left open by the one before:
 
-| | Pretrained | LoRA r 8, attention | LoRA r 8, attention + FFN | LoRA r 32, attention | Full fine-tuning |
-|---|---|---|---|---|---|
-| Trained numbers | — | 32,768 (2.4%) | 73,728 (5.5%) | 131,072 (9.7%) | 1.35M (100%) |
-| Validation loss on replies | 3.509 | 3.317 | 3.286 | 3.278 | 3.044 |
-| Requested words: drop in loss from the own request | 0.039 | 0.076 | 0.086 | 0.123 | 0.248 |
-| … as an advantage | 1.04× | 1.08× | 1.09× | 1.13× | 1.28× |
-| Stories where the own request was better | 94 of 135 | 106 of 134 | 106 of 134 | 116 of 134 | 123 of 134 |
-| Loss on all story tokens | 3.42 | 3.35 | 3.32 | 3.31 | 3.10 |
-| Requested words in sampled stories (control) | 1.8% (0.8%) | 2.5% (0.7%) | 1.8% (0.8%) | 1.8% (0.8%) | 3.8% (0.7%) |
-| Stories that ended by themselves | — | 20% | 18% | 16% | 66% |
+| Run | Trained numbers | Validation loss on replies | Requested words: drop in loss (advantage) | Own request better | Loss on all story tokens | Requested words in samples (control) | Ended by themselves |
+|---|---|---|---|---|---|---|---|
+| Pretrained | — | 3.509 | 0.039 (1.04×) | 94 of 135 | 3.42 | 1.8% (0.8%) | — |
+| r 8, attention | 32,768 (2.4%) | 3.317 | 0.076 (1.08×) | 106 of 134 | 3.35 | 2.5% (0.7%) | 20% |
+| r 8, attention + FFN | 73,728 (5.5%) | 3.286 | 0.086 (1.09×) | 106 of 134 | 3.32 | 1.8% (0.8%) | 18% |
+| r 32, attention | 131,072 (9.7%) | 3.278 | 0.123 (1.13×) | 116 of 134 | 3.31 | 1.8% (0.8%) | 16% |
+| r 8, attention + marker rows | 33,280 (2.5%) | 3.288 | 0.076 (1.08×) | 106 of 134 | 3.35 | 1.3% (0.8%) | **76%** |
+| r 8, attention + all rows | 557,056 (41%) | 3.229 | 0.180 (1.20×) | 112 of 134 | 3.27 | 2.5% (1.2%) | 74% |
+| Full fine-tuning | 1.35M (100%) | 3.044 | 0.248 (1.28×) | 123 of 134 | 3.10 | 3.8% (0.7%) | 66% |
 
-"r" is the adapter's rank, and "attention + FFN" adds the feed-forward
-network's two matrices in each block (`lora_targets`). The second and third
-LoRA runs were made to test two explanations for the first one's gap: the
-targets, and the rank. α was 2r each time, so the updates' scale (α/r = 2)
-didn't change.
+"r" is the adapter's rank; "attention" is attention's four matrices in
+each block, "+ FFN" adds the feed-forward network's two (`lora_targets`);
+"marker rows" and "all rows" add a change to the token embedding's rows
+(`lora_embeddings`: the four special tokens', or every one). The sampled
+percentages rest on 8 to 23 hits out of 600, so differences of a point or
+so between them are noise; the paired losses are the reliable measures.
 
-- LoRA works: every measure moves the right way, and the request-following
+- **LoRA works.** Every measure moves the right way, and request-following
   is far beyond chance (rank 8 on attention: 106 of 134, sign test
-  p = 7 × 10⁻¹²).
-- But that first adapter gets about a third of full fine-tuning's request-following (a
-  0.076 drop in the requested words' loss against 0.248) and about a
-  quarter of its general improvement in story loss.
-- Its validation loss had flattened: 3.320 at step 2,500, 3.317 at 3,000.
-  More steps wouldn't close the gap; a rank-8 update to attention alone
-  can't move this model as far.
-- Adding the feed-forward matrices more than doubled the trained numbers
-  and barely moved anything: validation 3.317 → 3.286, request-following
-  1.08× → 1.09×, the same 106 of 134. (Sampled use of the requested words
-  went down, 2.5% → 1.8%, but with 11 to 15 hits out of 600 that
-  difference is noise.) So the targets weren't the limit.
-- Rank 32 on attention helped the request-following clearly: the drop in
-  the requested words' loss went from 0.076 to 0.123, half of full
-  fine-tuning's 0.248, and the own request won for 116 of 134 stories. But
-  the validation loss hardly moved (3.317 → 3.278, against full
-  fine-tuning's 3.044), and neither did stopping (16%).
-- Rank 32 is a quarter of the full rank of these 128 × 128 matrices, hardly
-  "low". That it still leaves most of the validation gap says that most of
-  what full fine-tuning gains isn't in attention's matrices at all, at any
-  rank.
-- So the gap has two parts. Following the request is partly a matter of
-  rank. The rest, the overall reply loss and stopping, likely lives in what
-  no adapter here touches; the token embeddings are the prime suspect.
-- Only about a fifth of the adapters' stories ended by themselves within
-  200 tokens, against two thirds after full fine-tuning, with or without
-  the feed-forward matrices. Neither adapter touches the token embeddings,
-  which here double as the output layer (they're tied), so the end
-  marker's own vector stays frozen; that is a plausible reason, not a
-  tested one.
+  p = 7 × 10⁻¹²). But that first adapter gets about a third of full
+  fine-tuning's request-following (a 0.076 drop in the requested words'
+  loss, against 0.248), and its validation loss had flattened by the end
+  (3.320 at step 2,500, 3.317 at 3,000): more steps wouldn't close the gap.
+- **The targets weren't the limit.** Adding the feed-forward matrices more
+  than doubled the trained numbers and barely moved anything.
+- **Rank helps request-following, and little else.** Rank 32 took the drop
+  from 0.076 to 0.123, half of full fine-tuning's, but barely changed the
+  validation loss or stopping. Rank 32 is a quarter of the full rank of
+  these 128 × 128 matrices, hardly "low".
+- **Stopping lived in the special tokens' embedding rows.** The adapters
+  rarely ended a story, about one in five, against two in three after full
+  fine-tuning. The token embedding is also the output layer (it's tied),
+  and the adapters left `<|end|>`'s row frozen: pretraining never saw the
+  token, so its vector was never trained. Training the four special rows,
+  512 numbers, took stopping from 20% to 76%, beyond full fine-tuning's
+  66%, and changed nothing else. One narrow cause, one narrow fix.
+- **Training every embedding row closes much of the rest,** but it isn't
+  LoRA any more: 41% of the model's numbers, since the 4,096 × 128 table
+  is the small model's largest part. Request-following rose to a 0.180
+  drop (the best of any adapter, about three quarters of full
+  fine-tuning's), and the validation and story losses improved the most.
+  Plausibly because changing a requested word's row changes how it's read
+  in the request and how likely it is to be written in the story, both at
+  once.
+- **So the gap had separate causes:** stopping (the frozen special rows),
+  request-following (rank, and the embedding table), and the remaining
+  reply loss, which only training most of the model recovers.
 
 This is the "learns less" side of Biderman et al., at small scale: a tiny
 model has no spare capacity for a small subspace to steer, and the chat
 data teaches it new material (the turn markers, the new task) rather than
 only a new format. The larger the pretrained model, the less this should
-hold (Aghajanyan et al., above). Untested here: other learning rates
-(0.003 was chosen once, not tuned), and fine-tuning the embeddings
-alongside an adapter (common in practice when new special tokens are
-added, as the chat format's markers are). Each result is a single run of
-one seed.
+hold (Aghajanyan et al., above). Two practical lessons that hold at any
+scale: give new special tokens trainable embeddings (as fine-tuning
+recipes that add tokens do), and check what an adapter leaves frozen when
+a behavior doesn't appear. Untested here: other learning rates for the
+adapters (0.003 was chosen once, not tuned). Each result is a single run
+of one seed.
 
 ## The limits of this model
 
