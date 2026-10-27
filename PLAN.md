@@ -2168,8 +2168,8 @@ context T = 256; 1.35M parameters with `config.toml`, 7.4M with
   tracking characters and following requests can be learned. Measured: the
   first small model (1.33M parameters, context 128) reached a validation
   loss of 3.09 on V1's validation file after 4M tokens; the 7.4M model
-  passed 2.0 on V2 after 20M (different text and tokenizers, so not
-  strictly comparable).
+  reached 1.52 on V2 after 147M, still falling (different text and
+  tokenizers, so not strictly comparable).
 - **Knowledge: hard, set by the corpus.** Only what TinyStories contains:
   simple English stories. No facts about the world, no adult vocabulary,
   no mathematics, no other languages, however large the model.
@@ -2433,7 +2433,7 @@ llm/
 | `chat/` | data for LLM 5 finetune | done (`make_chat.py`) |
 | `word2vec/` | word2vec 1 train, 2 explore | done |
 | `attention/` | none: a learning exercise before `transformer/` | all 6 items of [its list](#where-each-part-is-built) done (`example`, `random`, `train`, `heads`, `block`, `induction`) |
-| `transformer/` | LLM 3 build, 4 train, 5 finetune, 6 generate | all four done (`transformer build`, `train`, `finetune`, `generate`, plus `evaluate`, `inspect` and `bench`); the full TinyStories run next |
+| `transformer/` | LLM 3 build, 4 train, 5 finetune, 6 generate | all four done (`transformer build`, `train`, `finetune`, `generate`, plus `evaluate`, `inspect` and `bench`); the full TinyStories run pretrained (validation loss 1.52), its fine-tuning next |
 
 The Makefile in `llm/` drives the flow, with one target per step. Each target
 knows which files it needs, so `make train`, for example, first reruns any
@@ -2837,8 +2837,8 @@ What had to change for a 2.2 GB file:
   file makes the whole-file string 8.8 GB. The encoder and make_chat now
   split the file's raw bytes at the separator lines and decode one story
   at a time. Measured on a 194 MB file: peak memory from 1,355 MB to
-  349 MB; encoding output byte-for-byte identical. For V2: about 4 GB and
-  17 minutes.
+  349 MB; encoding output byte-for-byte identical. For V2, on the M4: 6¼
+  minutes for 554M tokens.
 - **A time-remaining column** in the training log, from the recent pace.
 - **`bench` times the model's full context**, since attention's share of
   the work grows with it.
@@ -2862,6 +2862,29 @@ place; at most 1,000 steps are lost, and resuming is exact:
 caffeinate -i transformer/target/release/transformer train --model out-full/model.safetensors --data out-full/corpus.ids --config config-full.toml -o out-full/model.safetensors
 ```
 
+**Result** (M4 Mac mini, Rust loops, no BLAS): 36,000 steps in 19 hours 17
+minutes, 2,125 tokens per second overall (1.93 s per step, against
+`bench`'s 1.89), about 107 GFLOP/s by the 6·N·D count. Encoding took 6¼
+minutes before that.
+
+| Step | 1,000 | 2,000 | 5,000 | 10,000 | 20,000 | 30,000 | 36,000 |
+|---|---|---|---|---|---|---|---|
+| Validation loss | 2.943 | 2.369 | 1.996 | 1.834 | 1.684 | 1.555 | 1.521 |
+
+- **Final validation loss 1.521** (training loss 1.501). My guess at step
+  7,900 was 1.75–1.85, too pessimistic: I extrapolated the early curve's
+  slowing and underestimated what the cosine decay of the learning rate
+  adds late in a run. From step 20,000 to 36,000 the loss fell by 0.16
+  while the learning rate fell from 4.9 × 10⁻⁴ to 1.0 × 10⁻⁴.
+- **No overfitting:** training and validation losses stay within 0.02 of
+  each other, as expected when the run sees only 0.27 of the training data
+  once.
+- **Not saturated:** the validation loss still fell by 0.034 over the last
+  6,000 steps, at the learning rate's floor. More tokens would lower it
+  further; this is the budget's limit, not the model's.
+- e^1.521 ≈ 4.6: on average the model is as uncertain about the next token
+  as a fair choice among about 4.6 tokens, out of 4,096.
+
 ## Order of work
 
 1. ~~Finish word2vec.~~ Done.
@@ -2875,7 +2898,8 @@ caffeinate -i transformer/target/release/transformer train --model out-full/mode
    hand-written gradients of items 3 and 4 and used by items 5 and 6.
 4. `transformer/`: ~~build~~, ~~train~~, ~~generate~~, ~~finetune~~ (done,
    with ~~LoRA~~ as an option), then
-   [the full TinyStories run](#the-full-tinystories-run) (running). This builds step 6 before step 5, on
+   [the full TinyStories run](#the-full-tinystories-run) (pretraining
+   done, validation loss 1.52; fine-tuning next). This builds step 6 before step 5, on
    purpose: the step numbers follow the data through the flow, not the
    order of building. Generate works on any checkpoint, and it's the only
    way to judge either model: fine-tuning's effect (answering in turns)
