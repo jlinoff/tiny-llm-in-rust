@@ -2900,6 +2900,48 @@ minutes before that.
 - e^1.521 ≈ 4.6: on average the model is as uncertain about the next token
   as a fair choice among about 4.6 tokens, out of 4,096.
 
+**Fine-tuning result** (`make full-finetune full-evaluate`): 199,643
+conversations from the first 200,000 stories, 166,704 of them fitting the
+context; 10,000 steps at 0.001, about half a pass, in 2 hours 41 minutes
+(1.0 s per step). Evaluated on 200 held-out requests (167 stories for the
+paired test), with the small model's numbers for comparison:
+
+| | Small, pretrained | Small, fine-tuned | Full, pretrained | Full, fine-tuned |
+|---|---|---|---|---|
+| Requested words: own request's advantage | 1.04× | 1.60× | 1.45× | **3.76×** |
+| Stories where the own request was better | 94 of 135 | 130 of 134 | 157 of 167 | **167 of 167** |
+| Requested words in sampled stories (control) | 1.8% (0.8%) | 5.7% (0.3%) | 13.2% (1.0%) | **34.7% (0.2%)** |
+| All three words in one story | — | — | 0.5% | 3.5% |
+| Stories that ended by themselves | — | — | 74% | 81% |
+
+(The small model's fine-tuned column is its 6,000-step run on the Mac.
+"Pretrained" means the request is given as plain text to continue.)
+
+- **Request-following scales with the model.** The fine-tuned 7.4M model
+  makes the requested words 3.76 times as likely, its own request wins for
+  every one of the 167 stories, and a third of the requested words appear
+  in sampled stories, against 6% for the small model.
+- **The bigger model already half-follows requests before fine-tuning:**
+  given the request as plain text, it uses the requested words in 13% of
+  cases (1.45×), where the small model barely reacts (1.04×). A larger
+  model copies more from its context unprompted; fine-tuning makes it
+  treat the request as an instruction rather than as the story's opening
+  (the pretrained model's samples start "One day, Tell asked his mom…",
+  turning "Tell me a story" into a character's name).
+- **But fine-tuning cost some story quality.** The validation loss on the
+  replies started at 1.557 (the pretrained model, given the markers it had
+  never seen) and jumped to about 1.97 within 500 steps, then took the
+  whole run to come back down, ending at 1.574, slightly *worse* than where
+  it began. In the paired test, the loss on all story tokens rose from 1.40
+  (pretrained) to 1.49. The learning rate, 0.001, was carried over from the
+  small model and equals pretraining's peak; for a model that already
+  writes stories well, that is a shock: the gradient's length sat at the
+  clipping limit (2) throughout, and the first steps undid part of
+  pretraining before the model relearned it in the new format. This is
+  catastrophic forgetting, in a mild form. A learning rate of a few times
+  10⁻⁴ is the obvious next try; it should keep the reply loss below its
+  starting point while learning the format.
+
 ## Order of work
 
 1. ~~Finish word2vec.~~ Done.
