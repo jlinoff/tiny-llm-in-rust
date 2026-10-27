@@ -58,9 +58,11 @@ $(OUT)/model-init.safetensors: $(OUT)/tok.bpe $(CONFIG) | $(OUT) $(TRANSFORMER)
 	$(TRANSFORMER) build --tokenizer $(OUT)/tok.bpe --config $(CONFIG) -o $@
 
 # CARGO_FEATURES=blas builds with Apple's Accelerate library for the large
-# matrix products (PLAN.md, open decision 8). Make doesn't notice a change of
-# features: rebuild on purpose with make -B $(TRANSFORMER) CARGO_FEATURES=blas.
-CARGO_FEATURES ?=
+# matrix products (PLAN.md, decision 8): the default on macOS, where it made
+# a training step 2.68 times as fast; CARGO_FEATURES= builds the plain Rust
+# loops. Make doesn't notice a change of features: rebuild on purpose with
+# make -B $(TRANSFORMER) CARGO_FEATURES=...
+CARGO_FEATURES ?= $(if $(filter Darwin,$(shell uname -s)),blas,)
 
 $(TRANSFORMER): $(TRANSFORMER_SRC)
 	$(call hdr,build transformer)

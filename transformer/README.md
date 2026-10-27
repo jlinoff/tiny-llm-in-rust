@@ -36,7 +36,8 @@ cargo build --release --features blas
 builds with a BLAS library (Basic Linear Algebra Subprograms, the standard
 interface for matrix products) for the large f32 products: Apple's
 Accelerate on macOS, which uses the chip's matrix hardware (`src/blas.rs`;
-PLAN.md, open decision 8). Only products of at least 2¹⁸ multiply-adds,
+PLAN.md, decision 8; on the M4 it made a training step 2.68 times as fast,
+and the Makefile turns it on by default on macOS). Only products of at least 2¹⁸ multiply-adds,
 called from outside the thread pool, go to it; everything else, and every
 build without the feature, uses the Rust loops. Results equal the Rust
 loops' to rounding, not bit for bit. `bench` times both, side by side;

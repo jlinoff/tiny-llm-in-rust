@@ -2448,7 +2448,7 @@ llm/
 | `chat/` | data for LLM 5 finetune | done (`make_chat.py`) |
 | `word2vec/` | word2vec 1 train, 2 explore | done |
 | `attention/` | none: a learning exercise before `transformer/` | all 6 items of [its list](#where-each-part-is-built) done (`example`, `random`, `train`, `heads`, `block`, `induction`) |
-| `transformer/` | LLM 3 build, 4 train, 5 finetune, 6 generate | all four done (`transformer build`, `train`, `finetune`, `generate`, plus `evaluate`, `inspect` and `bench`); the full TinyStories run pretrained (validation loss 1.52), its fine-tuning next |
+| `transformer/` | LLM 3 build, 4 train, 5 finetune, 6 generate | all four done (`transformer build`, `train`, `finetune`, `generate`, plus `evaluate`, `inspect` and `bench`); the full TinyStories run done: pretrained to validation loss 1.52, fine-tuned (requested words 3.76 times as likely) |
 
 The Makefile in `llm/` drives the flow, with one target per step. Each target
 knows which files it needs, so `make train`, for example, first reruns any
@@ -2713,7 +2713,8 @@ text8, matching gensim (a widely used Python library with its own word2vec) at
    9 and 9, trained on a single GPU in up to 30 hours. With the measured
    speed, an 8M-class model (grammatical, partly coherent stories) is within
    reach of our own Rust on the CPU. (Faster matrix products on Apple's
-   matrix hardware or GPU are open decision 8.) The plan:
+   matrix hardware or GPU are decision 8; Accelerate made a step 2.68 times
+   as fast.) The plan:
    - develop and debug on the validation file (a few million tokens, minutes
      to train)
    - then train on a subset of the training file, 20–100M tokens (decided
@@ -2769,8 +2770,9 @@ text8, matching gensim (a widely used Python library with its own word2vec) at
    tape from its parts lets a test compare the derived gradient with the
    closed-form formula.
 
-8. **Faster matrix products on Apple hardware.** *Open: (b) built as an
-   option, to be measured on the M4.* Nearly
+8. **Faster matrix products on Apple hardware.** *Decided: (b), on by
+   default on macOS, measured 2.68 times as fast per training step; the
+   Rust loops stay as the reference and the default elsewhere.* Nearly
    all training time is matrix products, which `transformer/` computes with
    plain Rust loops on the CPU cores (`src/tensor.rs`), spread over all
    cores with rayon (a Rust library for spreading work over threads).
@@ -2809,9 +2811,33 @@ text8, matching gensim (a widely used Python library with its own word2vec) at
    binary. The calling code was tested off a Mac against Linux's reference
    CBLAS library (the same interface; all tests pass), which is
    unoptimized and slower than our loops, so it says nothing about
-   Accelerate's speed. The decision waits on `make full-bench` with the
-   feature on the M4. Since resuming doesn't need identical arithmetic, a
+   Accelerate's speed. Since resuming doesn't need identical arithmetic, a
    run can switch to it at any checkpoint.
+
+   Measured with `make full-bench CARGO_FEATURES=blas` on the M4:
+
+   | | Rust, 1 thread | Rust, 10 threads | Accelerate |
+   |---|---|---|---|
+   | Matrix products (the model's shapes) | 31–36 GFLOP/s | 168–189 GFLOP/s | 1,290–1,470 GFLOP/s |
+   | Training step, 7.4M model, 4,096 tokens | | 1,853 ms | 693 ms |
+
+   - The products themselves are about 8 times as fast; a whole step is
+     2.68 times as fast (5,914 tokens per second). The full run's 19 hours
+     of pretraining would have taken about 7, its fine-tuning about 1 hour
+     instead of 2¾.
+   - The step doesn't speed up 8 times because the products were never
+     the whole step. At 1,466 GFLOP/s the large products take roughly
+     0.13 s of the 0.69; the rest is work still on the Rust loops:
+     attention's per-head products and softmax, layer norm, GELU, the
+     cross-entropy over 4,096 logits per token, and the tape's bookkeeping.
+     This is Amdahl's law: speeding up one part of a job can't speed the
+     whole beyond the share that part had. Attention is now the next
+     target, if speed ever matters more.
+   - So: Accelerate is on by default on macOS (the Makefile sets
+     `CARGO_FEATURES=blas` there; `make -B transformer/target/release/transformer
+     CARGO_FEATURES=` builds without it). Every log's header names which
+     one computed the products. Two runs compared bit for bit need the
+     same build; results agree only to rounding across the two.
 
 ## The full TinyStories run
 
@@ -2937,8 +2963,9 @@ paired test), with the small model's numbers for comparison:
   small model and equals pretraining's peak; for a model that already
   writes stories well, that is a shock: the gradient's length sat at the
   clipping limit (2) throughout, and the first steps undid part of
-  pretraining before the model relearned it in the new format. This is
-  catastrophic forgetting, in a mild form. A learning rate of a few times
+  pretraining before the model relearned it in the new format. This is a
+  mild form of **catastrophic forgetting**: new training overwriting what
+  a network learned before. A learning rate of a few times
   10⁻⁴ is the obvious next try; it should keep the reply loss below its
   starting point while learning the format.
 
@@ -2955,8 +2982,9 @@ paired test), with the small model's numbers for comparison:
    hand-written gradients of items 3 and 4 and used by items 5 and 6.
 4. `transformer/`: ~~build~~, ~~train~~, ~~generate~~, ~~finetune~~ (done,
    with ~~LoRA~~ as an option), then
-   [the full TinyStories run](#the-full-tinystories-run) (pretraining
-   done, validation loss 1.52; fine-tuning next). This builds step 6 before step 5, on
+   [the full TinyStories run](#the-full-tinystories-run) (done:
+   validation loss 1.52; fine-tuned, the requested words 3.76 times as
+   likely). This builds step 6 before step 5, on
    purpose: the step numbers follow the data through the flow, not the
    order of building. Generate works on any checkpoint, and it's the only
    way to judge either model: fine-tuning's effect (answering in turns)
