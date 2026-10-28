@@ -189,12 +189,22 @@ generate: $(TRANSFORMER) ## Step 6: write text from PROMPT with the trained mode
 # alone): make full-bench, full-train, full-finetune, full-evaluate,
 # full-chat, full-lora, full-lora-evaluate. For a day-long run:
 # caffeinate -i make full-train
-FULL_VARS = OUT=out-full CORPUS=data/TinyStoriesV2-GPT4-train.txt \
-	TOK_CORPUS=data/TinyStoriesV2-GPT4-valid.txt CONFIG=config-full.toml \
+FULL_DATA = CORPUS=data/TinyStoriesV2-GPT4-train.txt \
+	TOK_CORPUS=data/TinyStoriesV2-GPT4-valid.txt \
 	CHAT_ARGS='--max-stories 200000 --eval-fraction 0.004'
+FULL_VARS = OUT=out-full CONFIG=config-full.toml $(FULL_DATA)
 
 full-%: data/TinyStoriesV2-GPT4-train.txt data/TinyStoriesV2-GPT4-valid.txt ## The full run (PLAN.md): full-bench, full-train, full-finetune, full-evaluate, full-chat, full-lora
 	$(MAKE) $* $(FULL_VARS)
+
+# The full run's flow end to end, with very few steps (config-full-check.toml):
+# the same data, tokenizer and model shape, in about half an hour, into
+# out-check/. Checks that the flow works, not its results; the tokenizer
+# fingerprint, the token counts and the initial model's weights fingerprint
+# should match out-full/'s exactly. (An explicit rule, so it wins over full-%.)
+.PHONY: full-check
+full-check: data/TinyStoriesV2-GPT4-train.txt data/TinyStoriesV2-GPT4-valid.txt ## Check the full run's flow end to end in about half an hour (out-check/).
+	$(MAKE) finetune evaluate OUT=out-check CONFIG=config-full-check.toml $(FULL_DATA)
 
 # attention (the learning step before transformer/)
 ATTN       := attention/target/release/mini_attention
@@ -272,7 +282,7 @@ clean: ## Remove generated files (keeps data/ and out-full/; see FORCE).
 		echo "to really delete it: make full-clean FORCE=1"; exit 1; fi
 	cd word2vec && cargo clean
 	cd attention && cargo clean
-	rm -rf $(OUT) project.zip
+	rm -rf $(OUT) out-check project.zip
 	rm -f *~
 
 .PHONY: zip

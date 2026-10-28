@@ -603,8 +603,8 @@ fn train_command(
         tcfg.batch_size
     );
     println!(
-        "  {remaining} tokens to go, about {:.1} passes over the training data",
-        remaining as f64 / n_train.max(1) as f64
+        "  {remaining} tokens to go, about {} passes over the training data",
+        train::passes(remaining as f64 / n_train.max(1) as f64)
     );
     println!(
         "  AdamW: peak learning rate {} after {} warm-up steps, cosine down to {} of it;",
@@ -1129,11 +1129,11 @@ fn finetune_command(
         evaluate::percent(reply_tokens, all_tokens)
     );
     println!(
-        "Fine-tuning: steps {} to {}, {} conversations per step (each padded to {seq} tokens), about {:.1} passes",
+        "Fine-tuning: steps {} to {}, {} conversations per step (each padded to {seq} tokens), about {} passes",
         state.step + 1,
         tcfg.steps,
         tcfg.batch_size,
-        ((tcfg.steps - state.step) as usize * tcfg.batch_size) as f64 / n_train as f64
+        train::passes(((tcfg.steps - state.step) as usize * tcfg.batch_size) as f64 / n_train as f64)
     );
     println!(
         "  AdamW: peak learning rate {} after {} warm-up steps, cosine down to {} of it;",

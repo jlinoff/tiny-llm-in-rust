@@ -2430,7 +2430,8 @@ directories would mean copying that code or reaching across directories for it.
 llm/
 ├── PLAN.md        # this file
 ├── Makefile       # one target per step: make tokenize, make encode, ...
-├── config.toml    # settings for steps 3-6; config-full.toml for the full run
+├── config.toml    # settings for steps 3-6; config-full.toml for the full run,
+│                  # config-full-check.toml for checking its flow (make full-check)
 ├── out/           # generated files: tok.bpe, *.ids, *.safetensors (git-ignored; make clean removes it)
 ├── data/          # downloaded corpora, e.g. text8, TinyStories (git-ignored)
 ├── tokenizer/     # text <-> token IDs: tokenize, encode, decode
@@ -2903,10 +2904,22 @@ How to run it (all files in `out-full/`, which `make clean` leaves alone;
 
 ```
 make full-bench                  # downloads V2, learns the tokenizer, builds, times a step
+caffeinate -i make full-check    # optional: the whole flow with very few steps, about half an hour
 caffeinate -i make full-train    # about a day; caffeinate keeps the Mac awake
 make full-finetune full-evaluate
 make full-chat PROMPT='Write a story with the words frog, bell and egg.'
 ```
+
+`make full-check` runs every step of the full flow (tokenizer, encoding all
+2.2 GB, the 7.4M model, chat data, fine-tuning, evaluation) with 500
+training and 300 fine-tuning steps (`config-full-check.toml`), into
+`out-check/`: a test that the flow works, not of its results. Run after the
+full run, it reproduced it exactly where it should: the same tokenizer
+fingerprint, the same 553,988,867 corpus IDs and 44,378,999 chat IDs, the
+same 166,704 conversations, and the same initial model, weights fingerprint
+for weights fingerprint. (The trained models can't match: far fewer steps,
+and Accelerate rounds differently from the Rust loops.) It took about
+25 minutes, most of it encoding.
 
 If the run stops (a restart, a crash), resume from the last checkpoint, in
 place; at most 1,000 steps are lost, and resuming is exact:

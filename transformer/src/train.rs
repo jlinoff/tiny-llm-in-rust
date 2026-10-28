@@ -523,6 +523,16 @@ pub fn duration(secs: f64) -> String {
     }
 }
 
+/// A number of passes over the data, for the log: one decimal from 0.1 up,
+/// two significant digits below ("0.0037", where one decimal would say 0.0).
+pub fn passes(x: f64) -> String {
+    if x >= 0.1 || x <= 0.0 || !x.is_finite() {
+        return format!("{x:.1}");
+    }
+    let decimals = (-x.log10()).floor() as usize + 2;
+    format!("{x:.decimals$}")
+}
+
 /// Report progress after a window of steps.
 pub struct Window {
     pub loss_sum: f64,
@@ -659,6 +669,15 @@ mod tests {
         assert_eq!(duration(14.0 * 60.0 + 10.0), "14m");
         assert_eq!(duration(2.0 * 3600.0 + 5.0 * 60.0), "2h05m");
         assert_eq!(duration(23.0 * 3600.0 + 59.0 * 60.0 + 50.0), "24h00m");
+    }
+
+    #[test]
+    fn passes_show_small_fractions() {
+        assert_eq!(passes(0.27), "0.3");
+        assert_eq!(passes(1.6), "1.6");
+        assert_eq!(passes(0.0037), "0.0037");
+        assert_eq!(passes(0.05), "0.050");
+        assert_eq!(passes(0.0), "0.0");
     }
 
     #[test]
