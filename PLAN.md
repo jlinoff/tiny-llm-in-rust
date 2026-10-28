@@ -282,29 +282,35 @@ Grouped so that each definition uses only terms defined above it.
 
 #### Generation (inference)
 
-- **temperature**: a text-generation setting τ (often written T, but here T
-  is the context length): the output scores are divided by τ before the
-  softmax, exactly as temperature enters the Boltzmann
-  distribution. Low values make the most likely next token dominate; higher
-  values flatten the probabilities, so sampling picks more varied tokens.
-  Temperature 0 means **greedy** decoding: always the single likeliest token.
-  **Top-k**: sample only from the k likeliest tokens, so a long tail of
-  unlikely tokens can't be picked by chance. (Sampling here means drawing
-  the next token; training's `sampling` setting, choosing which windows
-  to train on, is unrelated.)
 - **inference**: running a trained model to get its output, with the
-  weights fixed: no backward pass, no optimizer. For a language model,
-  inference is **generation**, one token at a time (step 6): the logits
-  for the next token become probabilities, one token is chosen, its text
-  is printed, and it's appended to the input for the next pass. A **KV
-  cache** keeps each earlier token's keys and values rather than
-  recomputing them for every new token. "Decode" has three meanings
-  here: the tokenizer's **decoding** (IDs to text), the **decode phase**
-  of generation (one new token per pass, after the prompt's **prefill**),
-  and a **decoding strategy** (how the next token is chosen: greedy,
-  temperature, top-k). The term contrasts
-  with **training**; in statistics "inference" means something different
-  (drawing conclusions from data).
+  weights fixed: no backward pass, no optimizer. The term contrasts with
+  training; in statistics "inference" means something different (drawing
+  conclusions from data).
+- **generation**: inference for a language model (step 6): repeatedly
+  predict the next token, choose one, print its text, and append it to
+  the input for the next pass (**autoregressive** generation: each token
+  depends on the ones before it). The steps from the model's last vector
+  to text are in [Step 6: generate](#step-6-generate).
+- **prefill**, **decode phase**: generation's two phases. Prefill puts the
+  whole prompt through the model at once, like a training step's forward
+  pass; then each pass of the decode phase handles one new token.
+- **KV cache**: each earlier token's keys and values, kept during
+  generation so that a new token computes only its own rather than
+  recomputing the whole context.
+- **logits**: the output layer's V scores for the next token, before they
+  become probabilities (softmax).
+- **decoding strategy**: how the next token is chosen from the logits.
+  **Greedy**: always the likeliest. **Temperature**, τ (often written T,
+  but here T is the context length): the logits are divided by τ before
+  the softmax, exactly as temperature enters the Boltzmann distribution;
+  below 1 the likeliest tokens dominate, above 1 the probabilities
+  flatten, and τ = 0 is greedy. **Top-k**: draw only from the k likeliest
+  tokens, so a long tail of unlikely ones can't be picked by chance.
+  Drawing a token by its probability is **sampling**, unrelated to
+  training's `sampling` setting (which windows to train on).
+- **decode**: three meanings here. The tokenizer's **decoding**, token IDs
+  back to text (see tokenizer, above); the decode phase; and a decoding
+  strategy.
 
 #### word2vec
 
@@ -2075,8 +2081,8 @@ optional, and each can be overridden on the command line (`--max-tokens`,
 
 - `max_tokens` (200): stop after this many new tokens, if the model hasn't
   ended the text with `<|endoftext|>` first.
-- `temperature` (0.8): see [temperature](#terms). 0 is greedy decoding.
-- `top_k` (40): see [top-k](#terms). 0 turns the cutoff off.
+- `temperature` (0.8): see [temperature](#generation-inference). 0 is greedy decoding.
+- `top_k` (40): see [top-k](#generation-inference). 0 turns the cutoff off.
 - `seed` (1): for the sampling. The same seed and prompt give the same text.
 
 **Guaranteeing consistency.** d and the other `[model]` values must be the
