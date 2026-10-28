@@ -18,6 +18,7 @@ mod generate;
 mod gpt;
 mod lora;
 mod model;
+mod probe;
 mod rng;
 mod safetensors;
 mod tape;
@@ -169,6 +170,33 @@ enum Command {
         #[arg(long)]
         seed: Option<u64>,
     },
+    /// Look inside a model: each head's previous-token and induction
+    /// scores, one head's attention on a prompt, and the logit lens (what
+    /// each block would predict).
+    Probe {
+        /// The checkpoint (any: model-init, a training checkpoint, model)
+        #[arg(long)]
+        model: PathBuf,
+        /// The tokenizer the model was built with (tok.bpe)
+        #[arg(long)]
+        tokenizer: PathBuf,
+        /// The text for the logit lens and the head's pattern
+        #[arg(
+            long,
+            default_value = "Once upon a time, there was a little girl named Lily. She liked to play with her red ball in the park. One day, Lily lost her ball. She looked and looked, but she could not find it. Then her friend Tom came. Tom said, \"Lily, I can help you find your"
+        )]
+        prompt: String,
+        /// The head to show on the prompt, as BLOCK.HEAD counting from 0
+        /// (default: the strongest induction head)
+        #[arg(long)]
+        head: Option<String>,
+        /// Random sequences for the head scores
+        #[arg(long, default_value_t = 8)]
+        sequences: usize,
+        /// Seed for the random sequences
+        #[arg(long, default_value_t = 1)]
+        seed: u64,
+    },
     /// Measure how often generated stories use the words their requests ask
     /// for (chat-eval.tsv, made by chat/make_chat.py), against a control.
     Evaluate {
@@ -300,6 +328,21 @@ fn main() -> ExitCode {
                 top_k,
                 seed,
             },
+        ),
+        Command::Probe {
+            model,
+            tokenizer,
+            prompt,
+            head,
+            sequences,
+            seed,
+        } => probe_command(
+            &model,
+            &tokenizer,
+            &prompt,
+            head.as_deref(),
+            sequences,
+            seed,
         ),
         Command::Generate {
             model,
@@ -888,6 +931,206 @@ fn prompt_ids(
         return Err("an empty prompt needs a tokenizer with <|endoftext|>".into());
     }
     Ok((ids, eos.into_iter().collect()))
+}
+
+/// A token for display: its text with a leading space as ␣ and a newline
+/// as ↵, special tokens by name.
+fn token_text(enc: &tokenizer::Encoder, id: usize) -> String {
+    String::from_utf8_lossy(enc.token_bytes(id))
+        .replace(' ', "␣")
+        .replace('\n', "↵")
+}
+
+fn probe_command(
+    model_path: &Path,
+    tok_path: &Path,
+    prompt: &str,
+    head: Option<&str>,
+    sequences: usize,
+    seed: u64,
+) -> Result<(), String> {
+    check_readable(model_path, "checkpoint")?;
+    check_readable(tok_path, "tokenizer")?;
+    if sequences == 0 {
+        return Err("--sequences must be at least 1".into());
+    }
+    let model = load_checkpoint(model_path)?;
+    let tok = load_tokenizer(tok_path, &model)?;
+    let enc = tok.encoder()?;
+    let m = markers(&tok)?;
+    let (mut ids, _) = prompt_ids(&tok, &enc, prompt, false)?;
+    let params = model.params();
+    let c = &model.config;
+    if ids.len() > c.context {
+        ids.drain(..ids.len() - c.context);
+    }
+    let (layers, heads) = (c.layers, c.heads);
+    let pick = match head {
+        None => None,
+        Some(h) => {
+            let (b, hd) = h
+                .split_once('.')
+                .and_then(|(b, hd)| Some((b.parse::<usize>().ok()?, hd.parse::<usize>().ok()?)))
+                .ok_or(format!("--head {h}: write BLOCK.HEAD, such as 1.3"))?;
+            if b >= layers || hd >= heads {
+                return Err(format!(
+                    "--head {h}: the model has blocks 0–{} and heads 0–{}",
+                    layers - 1,
+                    heads - 1
+                ));
+            }
+            Some((b, hd))
+        }
+    };
+
+    println!("=== transformer probe ===");
+    println!(
+        "Model {}: {} parameters, {} blocks × {} heads, V = {}, {}",
+        model_path.display(),
+        model::formula(c, model.vocab),
+        layers,
+        heads,
+        model.vocab,
+        model.describe()
+    );
+
+    // 1. Head scores on repeated random words: the tokens that are a space
+    // and a whole lowercase word of three letters or more ("␣ball"), the
+    // kind of token a story model has seen most; random fragments
+    // ("getable") would test it on input unlike anything it learned.
+    let pool: Vec<usize> = (256..256 + tok.merges)
+        .filter(|&t| {
+            let b = enc.token_bytes(t);
+            b.len() >= 4 && b[0] == b' ' && b[1..].iter().all(|c| c.is_ascii_lowercase())
+        })
+        .collect();
+    if pool.len() < 10 {
+        return Err("the tokenizer has too few whole-word tokens for the head test".into());
+    }
+    let hs = probe::head_scores(&params, c, m.eos as usize, &pool, sequences, seed);
+    println!(
+        "\nHeads, on {} sequences of {} random words repeated twice (from the tokenizer's {} whole-word tokens; PLAN.md, \"Looking inside the model\"):",
+        hs.sequences,
+        hs.length,
+        pool.len()
+    );
+    println!(
+        "  loss on the first copy:  {:.3}   (nothing to copy yet; chance is ln {} = {:.3})",
+        hs.loss_first,
+        model.vocab,
+        (model.vocab as f64).ln()
+    );
+    println!(
+        "  loss on the second copy: {:.3}   (lower: the model copies from its context)",
+        hs.loss_second
+    );
+    let table = |title: &str, v: &[Vec<f64>]| {
+        println!("\n  {title}");
+        print!("  {:>9}", "");
+        for h in 0..heads {
+            print!(" {:>6}", format!("head {h}"));
+        }
+        println!();
+        for (b, row) in v.iter().enumerate() {
+            print!("  {:>9}", format!("block {b}"));
+            for x in row {
+                print!(" {x:>6.2}");
+            }
+            println!();
+        }
+    };
+    table(
+        "previous-token score: attention to the token just before",
+        &hs.prev,
+    );
+    table(
+        "induction score: in the second copy, attention to the token after the current token's earlier occurrence",
+        &hs.induction,
+    );
+    let best = |v: &[Vec<f64>]| {
+        let mut b = (0, 0, f64::NEG_INFINITY);
+        for (i, row) in v.iter().enumerate() {
+            for (h, &x) in row.iter().enumerate() {
+                if x > b.2 {
+                    b = (i, h, x);
+                }
+            }
+        }
+        b
+    };
+    let (pb, ph, pv) = best(&hs.prev);
+    let (ib, ih, iv) = best(&hs.induction);
+    println!(
+        "\n  strongest previous-token head: {pb}.{ph} ({pv:.2}); strongest induction head: {ib}.{ih} ({iv:.2})"
+    );
+    println!(
+        "  (a head attending evenly to all t + 1 positions would score about 1/(t + 1): {:.3} on average here)",
+        (1..=2 * hs.length).map(|t| 1.0 / (t + 1) as f64).sum::<f64>() / (2 * hs.length) as f64
+    );
+
+    // 2. The logit lens on the prompt.
+    let tr = probe::trace(&params, c, &ids);
+    let lens = probe::logit_lens(&params, &tr, &ids);
+    println!(
+        "\nLogit lens on the prompt ({} tokens): the residual stream after each stage, read through the final layer norm and output layer",
+        ids.len()
+    );
+    println!(
+        "  {:<22} {:>6} {:>9}   top 3 next tokens after the prompt",
+        "after", "loss", "top-1"
+    );
+    for (k, row) in lens.iter().enumerate() {
+        let name = if k == 0 {
+            "the embeddings".to_string()
+        } else if k == layers {
+            format!("block {} (the output)", k - 1)
+        } else {
+            format!("block {}", k - 1)
+        };
+        let mut order: Vec<usize> = (0..row.last.len()).collect();
+        order.sort_by(|&a, &b| row.last[b].total_cmp(&row.last[a]));
+        let max = row.last[order[0]];
+        let total: f64 = row.last.iter().map(|s| (s - max).exp()).sum();
+        let top: Vec<String> = order[..3]
+            .iter()
+            .map(|&t| {
+                format!(
+                    "{} {:.0}%",
+                    token_text(&enc, t),
+                    100.0 * (row.last[t] - max).exp() / total
+                )
+            })
+            .collect();
+        println!(
+            "  {name:<22} {:>6.3} {:>8.1}%   {}",
+            row.loss,
+            100.0 * row.accuracy,
+            top.join(", ")
+        );
+    }
+
+    // 3. One head's pattern on the prompt.
+    let (b, h) = pick.unwrap_or((ib, ih));
+    let a = &tr.attention[b][h];
+    println!(
+        "\nHead {b}.{h}{} on the prompt: where each position looks most (weight), from position 1",
+        if pick.is_none() {
+            " (the strongest induction head)"
+        } else {
+            ""
+        }
+    );
+    for t in 1..ids.len() {
+        let row = &a.row(t)[..=t];
+        let j = probe::argmax(row);
+        println!(
+            "  [{t:>3}] {:<14} → [{j:>3}] {:<14} {:.2}",
+            token_text(&enc, ids[t]),
+            token_text(&enc, ids[j]),
+            row[j]
+        );
+    }
+    Ok(())
 }
 
 fn generate_command(

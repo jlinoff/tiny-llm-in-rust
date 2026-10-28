@@ -393,6 +393,28 @@ against the layout that config implies: every expected name present, with
 the right shape, and nothing unexpected. It ends with the weights
 fingerprint. `-v` lists every tensor.
 
+## `transformer probe`
+
+```
+transformer probe --model model.safetensors --tokenizer tok.bpe [--prompt TEXT] [--head 1.3] [--sequences 8] [--seed 1]
+```
+
+Looks inside a model (PLAN.md, "Looking inside the model"), any checkpoint
+from `model-init` on:
+
+- **Head scores** on random whole words repeated twice: each head's
+  previous-token score and induction score, and the model's loss on each
+  copy (lower on the second if it copies from its context).
+- **The logit lens** on the prompt: the residual stream after the
+  embeddings and after each block, read through the final layer norm and
+  output layer: loss, top-1 accuracy, and the top 3 next tokens.
+- **One head's pattern** on the prompt (`--head BLOCK.HEAD`, by default the
+  strongest induction head): where each position looks most.
+
+`src/probe.rs` does one plain forward pass per sequence that keeps every
+head's attention weights and every block's output; a test checks its
+predictions against training's forward pass.
+
 ## The forward and backward passes (step 4)
 
 `src/gpt.rs` writes the model's forward pass for a batch of B sequences of T
@@ -564,6 +586,7 @@ newer Unicode version could still be classed differently.
   and the generation loop
 - `src/evaluate.rs`: word matching and the tally for `evaluate`
 - `src/lora.rs`: LoRA adapters: creating, merging, checking
+- `src/probe.rs`: looking inside a model: head scores, the logit lens, attention patterns
 - `src/bench.rs`: the matrix-multiply benchmark and the training-step timing
 - `src/rng.rs`: the seeded random number generator (from attention/)
 

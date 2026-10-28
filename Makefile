@@ -166,6 +166,19 @@ chat: $(TRANSFORMER) ## Step 6 with the fine-tuned model: PROMPT is the request.
 	@test -f $(CHAT_MODEL) || { echo "no $(CHAT_MODEL): run make finetune first"; exit 1; }
 	$(TRANSFORMER) generate --model $(CHAT_MODEL) --tokenizer $(OUT)/tok.bpe --config $(CONFIG) --chat --prompt '$(PROMPT)' $(GEN_ARGS)
 
+# Look inside a model (PLAN.md, "Looking inside the model"): head scores,
+# the logit lens, one head's attention. PROBE_MODEL picks the checkpoint,
+# such as a copy of one taken during training; PROBE_ARGS passes options,
+# such as '--head 1.3'. Like generate, the model isn't a prerequisite.
+PROBE_MODEL ?= $(OUT)/model.safetensors
+PROBE_ARGS ?=
+
+.PHONY: probe
+probe: $(TRANSFORMER) ## Look inside the trained model: head scores, logit lens, attention.
+	$(call hdr,$@)
+	@test -f $(PROBE_MODEL) || { echo "no $(PROBE_MODEL): run make train first"; exit 1; }
+	$(TRANSFORMER) probe --model $(PROBE_MODEL) --tokenizer $(OUT)/tok.bpe $(PROBE_ARGS)
+
 # Step 6. generate (inference)
 # Always runs (nothing is written). Override the prompt or the sampling:
 #   make generate PROMPT='Once upon a time' GEN_ARGS='--temperature 0.5 --seed 7'
@@ -314,6 +327,8 @@ help:  ## This help message.
 	@printf "   %-18s  %s\n" "LORA_ARGS" "$(LORA_ARGS)"
 	@printf "   %-18s  %s\n" "MERGES" "$(MERGES)"
 	@printf "   %-18s  %s\n" "OUT" "$(OUT)"
+	@printf "   %-18s  %s\n" "PROBE_ARGS" "$(PROBE_ARGS)"
+	@printf "   %-18s  %s\n" "PROBE_MODEL" "$(PROBE_MODEL)"
 	@printf "   %-18s  %s\n" "PROMPT" "$(PROMPT)"
 	@printf "   %-18s  %s\n" "SPLIT_ON" "$(SPLIT_ON)"
 	@printf "   %-18s  %s\n" "TOK_CORPUS" "$(TOK_CORPUS)"

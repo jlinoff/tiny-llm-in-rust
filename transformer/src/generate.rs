@@ -254,7 +254,7 @@ impl<'a, T: Float> Generator<'a, T> {
 }
 
 /// Layer norm of every row.
-fn norm<T: Float>(x: &Mat<T>, g: &Mat<T>, b: &Mat<T>) -> Mat<T> {
+pub(crate) fn norm<T: Float>(x: &Mat<T>, g: &Mat<T>, b: &Mat<T>) -> Mat<T> {
     let mut xhat = vec![T::zero(); x.cols];
     let mut out = Mat::zeros(x.rows, x.cols);
     for r in 0..x.rows {
@@ -264,7 +264,7 @@ fn norm<T: Float>(x: &Mat<T>, g: &Mat<T>, b: &Mat<T>) -> Mat<T> {
 }
 
 /// x·W + b.
-fn affine<T: Float>(x: &Mat<T>, w: &Mat<T>, b: &Mat<T>) -> Mat<T> {
+pub(crate) fn affine<T: Float>(x: &Mat<T>, w: &Mat<T>, b: &Mat<T>) -> Mat<T> {
     let mut y = x.matmul(w);
     for r in 0..y.rows {
         for (v, &c) in y.row_mut(r).iter_mut().zip(&b.data) {

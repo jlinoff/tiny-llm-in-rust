@@ -41,6 +41,7 @@ names are explained where they first appear.
 - [Post-training](#post-training)
 - [LoRA: fine-tuning a low-rank adapter](#lora-fine-tuning-a-low-rank-adapter)
 - [The limits of this model](#the-limits-of-this-model)
+- [Looking inside the model](#looking-inside-the-model)
 - [What production models add, and why it's left out](#what-production-models-add-and-why-its-left-out)
   - [Tokenization and encoding](#tokenization-and-encoding)
   - [Architecture](#architecture)
@@ -2294,6 +2295,73 @@ context T = 256; 1.35M parameters with `config.toml`, 7.4M with
 - **Speed: not a limit in practice.** The small model generates about 2,300
   tokens per second on the M4, much faster than anyone reads; the 7.4M
   model needs about 5 times the arithmetic per token.
+
+## Looking inside the model
+
+Training produces 7.4M numbers that write stories; `transformer probe`
+looks at what they compute. One plain forward pass keeps what training and
+generation throw away (every head's attention weights, the residual stream
+after every block), and three views read it:
+
+```
+transformer probe --model model.safetensors --tokenizer tok.bpe
+transformer probe --model model.safetensors --tokenizer tok.bpe --head 1.3 --prompt "…"
+```
+
+- **Head scores**, on the standard test for copying: random words, then
+  the same words again (the words drawn from the tokenizer's whole-word
+  tokens, such as "␣ball": random fragments would test a story model on
+  input unlike anything it saw). For each head: a **previous-token
+  score**, its average attention to the token just before; and an
+  **induction score**, its average attention, in the second copy, to the
+  token that followed the current token's earlier occurrence, which is
+  the token to predict. Alongside, the model's loss on each copy: the
+  first can't be predicted; if the model copies from its context, the
+  second costs far less. That loss is computed from the model's output,
+  independently of the attention scores, so the two check each other.
+- **The logit lens**: the residual stream after each stage, read through
+  the final layer norm and output layer as if the model stopped there.
+  Its loss and accuracy on a prompt show how the prediction forms, block
+  by block, and the top predictions after the prompt show it sharpening.
+- **One head's pattern** on the prompt: where each position looks most.
+
+A test checks that the probe's predictions equal training's forward pass,
+so what it shows is what the model computes.
+
+**The small model (1.35M parameters, 4M tokens of training):**
+
+- The logit lens on a story prompt: loss 17.9 from the embeddings alone,
+  then 3.66, 3.25, 2.43 and 1.80 after blocks 0 to 3. Read straight from
+  the embeddings, the top prediction is the current word itself ("␣your"
+  after "your"): the output layer is the embedding table (tied), and a
+  token's vector scores highest against its own row. Each block then
+  moves the vector toward the next word ("␣ball", "␣toy", "␣car" after
+  "…help you find your").
+- No induction heads: every induction score 0.00, and the loss on the
+  second copy hardly lower than on the first (11.02 against 11.16), so
+  the model doesn't copy from its context at all. Its previous-token
+  heads are weak too (0.12 at most, against about 0.02 for attention
+  spread evenly). Both losses are above chance (ln 4,096 = 8.3): random
+  words are far from any story, and the model is confidently wrong.
+
+**Controls.** To show the probe would detect an induction head, I trained
+tiny models (2 blocks, 2 heads) on text that can only be predicted by
+copying: random sequences, each repeated once, at random offsets. None
+learned to copy: with 2,479 words, the loss sat at 5.1 for 6,000 steps
+(6M tokens); with 20 letters, at 2.76 for 20,000 steps (20M tokens),
+against 3.00 for guessing (copying would give about 1.6). Their attention
+went mostly to the first position (the end-of-text token, a common
+"attention sink"), and no head preferred the token before. This fits published work, in
+direction if not in scale: induction heads form abruptly after a long
+plateau (in Olsson et al. 2022's small models, a few billion tokens into
+training; toy tasks are faster, but how much faster depends on the
+vocabulary and the model). Twenty million tokens without a dent is long
+even so, so a fault of ours can't be ruled out yet; but the gradients pass
+their finite-difference checks and the full model writes coherent
+stories, so if it's a fault, it's subtle. The second full run's
+checkpoints are the next test: if its loss on the second copy drops, the
+model copies, and the probe's induction scores can be checked against
+that.
 
 ## What production models add, and why it's left out
 
