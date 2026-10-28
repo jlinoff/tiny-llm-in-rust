@@ -2689,6 +2689,23 @@ run. The alternatives, and why Rust over each:
   one call into Apple's Accelerate library (`src/blas.rs`). The full text8
   word2vec run takes about 8½ minutes on 2 processor cores.
 
+**Rust's own loops, and BLAS where speed matters.** Plain Rust loops reach
+about 180 GFLOP/s on the M4's 10 cores for the model's matrix products,
+spread over threads with rayon, and they remain the reference: readable,
+and identical for any number of threads. **BLAS** (Basic Linear Algebra
+Subprograms) is the standard interface for matrix products, and Apple's
+implementation, Accelerate, uses the chip's matrix hardware: about 1,400
+GFLOP/s for the same products, 8 times as fast, making a whole training
+step 2.68 times as fast (the rest of a step is still Rust; see open
+decision 8). Calling a C library from Rust takes a few lines (a
+declaration and one `unsafe` block, `src/blas.rs`), and the library is
+used only for large f32 products, so every exactness test still runs on
+the Rust loops, and a test compares the two within rounding. This is
+also why NumPy and PyTorch are fast: they too hand the products to a BLAS
+library or GPU kernels. The difference here is that the library is an
+option, switched on for speed, with every operation also written out by
+hand.
+
 ### What is built by hand, and what isn't
 
 - **By hand:** the tokenizer; the tensors and matrix products
@@ -2702,9 +2719,9 @@ run. The alternatives, and why Rust over each:
   the field read too; settings are **TOML** files; token IDs are a small
   binary format of our own (`.ids`: a header with the tokenizer's
   fingerprint, then 2 bytes per ID).
-- **Optional:** Apple's Accelerate library for the large matrix products,
-  on by default on macOS, measured 2.68 times as fast per training step
-  (open decision 8); the Rust loops remain the reference.
+- **Optional:** Apple's Accelerate library (BLAS, above) for the large
+  matrix products, on by default on macOS; the Rust loops remain the
+  reference.
 - **The driver:** a Makefile, one target per step, each model file
   depending only on its own config section (open decision 5; see
   [Where the stages live](#where-the-stages-live)).
