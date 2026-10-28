@@ -299,15 +299,21 @@ Grouped so that each definition uses only terms defined above it.
   recomputing the whole context.
 - **logits**: the output layer's V scores for the next token, before they
   become probabilities (softmax).
-- **decoding strategy**: how the next token is chosen from the logits.
-  **Greedy**: always the likeliest. **Temperature**, τ (often written T,
-  but here T is the context length): the logits are divided by τ before
-  the softmax, exactly as temperature enters the Boltzmann distribution;
-  below 1 the likeliest tokens dominate, above 1 the probabilities
-  flatten, and τ = 0 is greedy. **Top-k**: draw only from the k likeliest
-  tokens, so a long tail of unlikely ones can't be picked by chance.
-  Drawing a token by its probability is **sampling**, unrelated to
-  training's `sampling` setting (which windows to train on).
+- **temperature**, τ (often written T, but here T is the context
+  length): a generation setting that divides the logits before the
+  softmax, exactly as temperature enters the Boltzmann distribution.
+  Below 1, the likeliest tokens dominate; above 1, the probabilities
+  flatten and choices get more varied. τ = 0 means **greedy**: always the
+  single likeliest token.
+- **top-k**: a generation setting that keeps only the k likeliest tokens
+  before drawing, so the long tail of unlikely ones can't be picked by
+  chance.
+- **sampling**: drawing the next token at random, by its probability
+  (after temperature and top-k). Unrelated to training's `sampling`
+  setting, which chooses the windows to train on.
+- **decoding strategy**: the rule for choosing the next token from the
+  logits: greedy, or sampling with a temperature and top-k (production
+  engines add others, such as top-p).
 - **decode**: three meanings here. The tokenizer's **decoding**, token IDs
   back to text (see tokenizer, above); the decode phase; and a decoding
   strategy.
