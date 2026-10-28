@@ -3462,26 +3462,46 @@ training and what follows it rerun.
    fine-tuning at 0.0005. Then its evaluation, and a probe of the finished
    model (does the induction head in block 5 mature?).
 
-**Next, if wanted** (in the order they'd teach the most):
+**The endpoint:**
 
-8. **Reward-based post-training.** Learning from preferences rather than
+8. **A real open-weight model in our inference code.** Download a small
+   published model and generate from it with `transformer`, the final
+   test of everything built here: given the same weights and prompt, our
+   next-token probabilities must match the reference implementation's to
+   within rounding, which validates attention, the KV cache, the tokenizer
+   and sampling against the outside world rather than only against our own
+   tests. A small model keeps it practical: SmolLM-135M, for example, is a
+   Llama-style model of 135M parameters (30 blocks, width 576, 9 query
+   heads sharing 3 key/value heads, a vocabulary of 49,152, a context of
+   2,048, its output layer tied to its embeddings as ours is), about
+   540 MB in f32. What it takes, each piece with its own test:
+   - the architecture pieces (see
+     [What production models add](#what-production-models-add-and-why-its-left-out)):
+     RMSNorm, RoPE, SwiGLU, grouped-query attention;
+   - loading Hugging Face's safetensors files (their names and layout),
+     converting bf16, a 16-bit float format, to f32;
+   - its tokenizer, a byte-level BPE much like ours, read from Hugging
+     Face's `tokenizer.json`, with its byte mapping and special tokens;
+   - the check: our probabilities against a reference on a few prompts
+     (Hugging Face's `transformers` library, run once, or llama.cpp's
+     greedy output), then coherent text, then a comparison with an
+     established engine's stories at matched settings.
+
+**Optional, after it:**
+
+9. **Reward-based post-training.** Learning from preferences rather than
    imitation, the stage that makes modern assistants (see
    [Post-training](#post-training)): DPO (direct preference optimization)
    on pairs of replies, the preferred one using the requested words. It
    uses the existing tape and training loop.
-9. **An open-weight model in our inference code**, to compare its stories
-   with an established engine's at matched settings. Prerequisites, from
-   [What production models add](#what-production-models-add-and-why-its-left-out):
-   RMSNorm, RoPE, SwiGLU, grouped-query attention, an untied output
-   matrix, the model's own tokenizer and chat template; and memory
-   enough to hold its weights in f32 (or a 16-bit format to add).
 10. **Smaller items:** top-p sampling; folding this plan into
     `llm/README.md` at the end.
 
-None of the architecture refinements (RoPE and the rest) is planned on
-its own: at our scale each would change the loss by little, and [What
-production models add](#what-production-models-add-and-why-its-left-out)
-explains each in a paragraph. They become necessary only for item 9.
+None of the architecture refinements (RoPE and the rest) is planned for
+our own models: at our scale each would change the loss by little, and
+[What production models add](#what-production-models-add-and-why-its-left-out)
+explains each in a paragraph. They're built for item 8, where a real
+model needs them.
 
 ## Bibliography
 
@@ -3727,3 +3747,6 @@ for language research.
   his nanoGPT code on GitHub. The closest existing match to this project.
 - Alammar, J. "The Illustrated Transformer" (2018), a blog post. The standard
   visual introduction to attention.
+- Hugging Face, SmolLM-135M (2024), a small open-weight Llama-style model;
+  its configuration: https://huggingface.co/HuggingFaceTB/SmolLM-135M. The
+  candidate for the endpoint (Order of work, item 8).
