@@ -2953,20 +2953,95 @@ paired test), with the small model's numbers for comparison:
   treat the request as an instruction rather than as the story's opening
   (the pretrained model's samples start "One day, Tell asked his mom…",
   turning "Tell me a story" into a character's name).
-- **But fine-tuning cost some story quality.** The validation loss on the
-  replies started at 1.557 (the pretrained model, given the markers it had
-  never seen) and jumped to about 1.97 within 500 steps, then took the
-  whole run to come back down, ending at 1.574, slightly *worse* than where
-  it began. In the paired test, the loss on all story tokens rose from 1.40
-  (pretrained) to 1.49. The learning rate, 0.001, was carried over from the
-  small model and equals pretraining's peak; for a model that already
-  writes stories well, that is a shock: the gradient's length sat at the
-  clipping limit (2) throughout, and the first steps undid part of
-  pretraining before the model relearned it in the new format. This is a
-  mild form of **catastrophic forgetting**: new training overwriting what
-  a network learned before. A learning rate of a few times
-  10⁻⁴ is the obvious next try; it should keep the reply loss below its
-  starting point while learning the format.
+- **But fine-tuning at 0.001 cost some story quality.** The validation
+  loss on the replies started at 1.557 (the pretrained model, given the
+  markers it had never seen) and jumped to about 1.97 within 500 steps,
+  then took the whole run to come back down, ending at 1.574, slightly
+  *worse* than where it began. In the paired test, the loss on all story
+  tokens rose from 1.40 (pretrained) to 1.49. The learning rate, 0.001,
+  was carried over from the small model and equals pretraining's peak;
+  pretraining had ended at a tenth of it.
+
+**A second fine-tuning, at 0.0003** (`--learning-rate 0.0003`, with
+Accelerate: 54 minutes):
+
+| | Pretrained | Fine-tuned at 0.001 | Fine-tuned at 0.0003 |
+|---|---|---|---|
+| Validation loss on replies (start 1.557) | — | 1.574 | **1.485** |
+| Loss on all story tokens, own request | 1.401 | 1.494 | **1.419** |
+| Requested words: own request's advantage | 1.45× | **3.76×** | 3.30× |
+| Stories where the own request was better | 157 of 167 | 167 of 167 | 167 of 167 |
+| Requested words in sampled stories (control) | 13.2% (1.0%) | **34.7%** (0.2%) | 28.8% (0.5%) |
+| All three words in one story | 0.5% | 3.5% | 2.5% |
+| Stories that ended by themselves | 74% | 81% | 78% |
+
+- **A trade-off, not a free improvement.** The lower rate kept the story
+  quality (story loss 1.42, against the pretrained 1.40) and ended below
+  its starting reply loss, but learned less of the new behavior: 3.30×
+  against 3.76×, a fifth fewer requested words in samples. The higher rate
+  moved the model further, both toward following requests and away from
+  what pretraining had taught. This is the same trade-off as LoRA's
+  "learns less, forgets less" (above), set here by the step size instead
+  of the adapter's size.
+- **Its validation loss followed the learning rate, with a lag.** It
+  dipped to 1.532 by step 500, rose to 1.598 by step 2,500 while the rate
+  stayed near 0.0003, then fell as the cosine schedule lowered the rate,
+  crossing below the start near step 5,000 (rate about 1.6 × 10⁻⁴) and
+  ending at 1.485 (rate 3 × 10⁻⁵):
+
+  | Step | 500 | 1,000 | 2,500 | 4,000 | 5,000 | 6,000 | 8,000 | 10,000 |
+  |---|---|---|---|---|---|---|---|---|
+  | Learning rate (10⁻⁴) | 3.0 | 2.95 | 2.6 | 2.1 | 1.7 | 1.25 | 0.56 | 0.30 |
+  | Validation loss | 1.532 | 1.565 | 1.598 | 1.578 | 1.548 | 1.524 | 1.503 | 1.485 |
+
+  The explanation proposed: at a fixed learning rate, training doesn't
+  settle at a minimum's bottom; each step pulls toward it and each batch's
+  noise kicks it back out, and the two balance at a height above the
+  bottom that grows with the rate. Pretraining ended at 1 × 10⁻⁴; starting
+  again at three times that rate, the model drifts outward over a few
+  thousand steps, and settles back as the rate falls. Two experiments test
+  this against the alternatives (a real oscillation; an effect of gradient
+  clipping, since the gradient's length sat above the limit of 2 the whole
+  run).
+
+**Testing it: two runs at a constant learning rate.** 4,000 steps from the
+pretrained model at a constant 0.0003 (after 100 warm-up steps), validation
+on 20 batches every 250 steps; same seed, so the same batches. Run a clips
+the gradient at 2, as before; run b at 100, which with the gradient's length
+near 2.5 turns clipping off:
+
+| Step | 0 | 250 | 500 | 1,000 | 1,500 | 2,000 | 2,500 | 3,000 | 3,500 | 4,000 |
+|---|---|---|---|---|---|---|---|---|---|---|
+| a: clipped at 2 | 1.555 | 1.496 | 1.534 | 1.566 | 1.581 | 1.605 | 1.617 | 1.611 | 1.619 | 1.622 |
+| b: clipping off | 1.555 | 1.497 | 1.534 | 1.564 | 1.582 | 1.604 | 1.616 | 1.612 | 1.617 | 1.623 |
+
+- **Clipping plays no part.** The two curves differ by at most 0.003, the
+  training losses by about 0.001. The reason is Adam: each weight's step is
+  its gradient's running average divided by the square root of its squared
+  gradient's running average, times the learning rate. Scale every gradient
+  by the same factor c and both averages scale by c, so the step doesn't
+  change. Here the clip factor (2 divided by a length of 2.2 to 2.6) moves
+  only slowly, and Adam cancels it almost exactly. Clipping matters for
+  Adam only when one gradient spikes far above the others, which is what
+  it's there for.
+- **No oscillation: a lagged rise to a plateau.** After a quick dip (the
+  chat format learned in the first few hundred steps), the loss rises
+  steadily, slowing down, and levels off near 1.62 from about step 2,500.
+  A saturating curve, L(t) = 1.622 − 0.156·e^(−t/980), fits every point
+  within 0.005, about the validation measurement's own noise: a single
+  approach to equilibrium with a time constant near 1,000 steps, no swing
+  back. (A slow drift of the plateau itself can't be ruled out at this
+  length: the last 1,000 steps rose by 0.01, within noise.)
+- **So the equilibrium explanation holds.** At a constant rate the loss
+  settles at a level set by the rate: 1.62 at 0.0003, above where
+  pretraining left the model (1.555, after ending at 0.0001). The cosine
+  run's loss followed its falling rate down to 1.485 with this kind of
+  lag. It's the noise of stochastic gradient descent: with batches of 8
+  conversations, each step is a noisy estimate of the true direction, and
+  the larger the step, the farther that noise keeps the weights from the
+  bottom. This is why learning-rate schedules end low, and why fine-tuning
+  should start no higher than where pretraining ended unless the new
+  behavior is worth some of the old.
 
 ## Order of work
 
