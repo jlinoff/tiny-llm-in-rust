@@ -15,6 +15,7 @@
 
 use crate::rng::Rng;
 use std::path::Path;
+use std::sync::Mutex;
 
 pub struct Corpus {
     pub ids: Vec<u32>,
@@ -117,14 +118,95 @@ fn batch_at(data: &[u32], starts: &[usize], seq: usize) -> Batch {
     Batch { inputs, targets }
 }
 
-/// The training batch for a given step: `batch` windows of `seq` + 1 tokens
-/// at random starting points. The random numbers depend only on the seed
-/// and the step, so a resumed run trains on exactly the same batches.
-pub fn train_batch(data: &[u32], batch: usize, seq: usize, seed: u64, step: u64) -> Batch {
-    let mut rng = Rng::stream(seed, step);
-    let span = data.len() - seq; // valid starts: 0 … len − seq − 1
-    let starts: Vec<usize> = (0..batch).map(|_| rng.below(span)).collect();
+/// The training batch for a given step: `batch` windows of `seq` + 1 tokens.
+/// With no `order` (`sampling = "random"`), at random starting points,
+/// drawn independently: some stretches are picked twice, others never.
+/// With an `order` (`sampling = "epochs"`), the stream is cut into
+/// non-overlapping windows (starting at 0, seq, 2·seq, …) taken in a
+/// shuffled order, every window once per epoch. Either way the choice
+/// depends only on the seed and the step, so a resumed run trains on
+/// exactly the same batches.
+pub fn train_batch(
+    data: &[u32],
+    batch: usize,
+    seq: usize,
+    seed: u64,
+    step: u64,
+    order: Option<&EpochOrder>,
+) -> Batch {
+    let starts: Vec<usize> = match order {
+        None => {
+            let mut rng = Rng::stream(seed, step);
+            let span = data.len() - seq; // valid starts: 0 … len − seq − 1
+            (0..batch).map(|_| rng.below(span)).collect()
+        }
+        Some(o) => o.picks(batch, step).iter().map(|&w| w * seq).collect(),
+    };
     batch_at(data, &starts, seq)
+}
+
+/// The number of non-overlapping windows of `seq` + 1 tokens (one token
+/// shared between neighbours, as each window's last target is the next
+/// one's first input) in `len` tokens: the items of an epoch.
+pub fn epoch_windows(len: usize, seq: usize) -> usize {
+    len.saturating_sub(1) / seq
+}
+
+/// Epochs: `items` things (windows, or conversations) taken in a shuffled
+/// order, every one once per epoch, a new order each epoch. The order of
+/// epoch e is a fixed function of the seed and e, so any step's items can
+/// be found without replaying the steps before it (resuming is exact). The
+/// current epoch's order is kept, so finding it costs one shuffle per epoch.
+pub struct EpochOrder {
+    items: usize,
+    seed: u64,
+    current: Mutex<Option<(u64, Vec<u32>)>>,
+}
+
+impl EpochOrder {
+    pub fn new(items: usize, seed: u64) -> EpochOrder {
+        assert!(
+            items > 0 && items <= u32::MAX as usize,
+            "an epoch needs 1 to 2³² − 1 items"
+        );
+        EpochOrder {
+            items,
+            seed,
+            current: Mutex::new(None),
+        }
+    }
+
+    /// The `batch` items for a step (counting from 1): positions
+    /// (step − 1)·batch onward in the sequence of epochs.
+    pub fn picks(&self, batch: usize, step: u64) -> Vec<usize> {
+        let first = (step - 1) * batch as u64;
+        (0..batch as u64).map(|k| self.item(first + k)).collect()
+    }
+
+    /// The item at position g, counting from 0 across all epochs.
+    pub fn item(&self, g: u64) -> usize {
+        let (epoch, i) = (g / self.items as u64, (g % self.items as u64) as usize);
+        let mut cur = self
+            .current
+            .lock()
+            .expect("no other thread panics holding it");
+        if cur.as_ref().map(|(e, _)| *e) != Some(epoch) {
+            *cur = Some((epoch, self.shuffled(epoch)));
+        }
+        cur.as_ref().expect("just set").1[i] as usize
+    }
+
+    /// 0 … items − 1 in a random order (Fisher-Yates), from the seed and
+    /// the epoch; its own stream of random numbers, apart from the ones
+    /// random sampling uses for each step.
+    fn shuffled(&self, epoch: u64) -> Vec<u32> {
+        let mut rng = Rng::stream(self.seed ^ 0x6570_6f63_6873, epoch); // "epochs"
+        let mut v: Vec<u32> = (0..self.items as u32).collect();
+        for i in (1..v.len()).rev() {
+            v.swap(i, rng.below(i + 1));
+        }
+        v
+    }
 }
 
 /// Fixed validation batches: windows spread evenly over the held-out part,
@@ -225,8 +307,11 @@ impl Conversations {
         Batch { inputs, targets }
     }
 
-    /// The training batch for a step: `batch` conversations drawn at random
-    /// from rows 0…n_train − 1, depending only on the seed and the step.
+    /// The training batch for a step: `batch` conversations from rows
+    /// 0…n_train − 1, drawn at random, or with an `order` (epochs) each once
+    /// per epoch in a shuffled order; depending only on the seed and the
+    /// step.
+    #[allow(clippy::too_many_arguments)]
     pub fn train_batch(
         &self,
         n_train: usize,
@@ -235,9 +320,15 @@ impl Conversations {
         seed: u64,
         step: u64,
         pad: u32,
+        order: Option<&EpochOrder>,
     ) -> Batch {
-        let mut rng = Rng::stream(seed, step);
-        let which: Vec<usize> = (0..batch).map(|_| rng.below(n_train)).collect();
+        let which: Vec<usize> = match order {
+            None => {
+                let mut rng = Rng::stream(seed, step);
+                (0..batch).map(|_| rng.below(n_train)).collect()
+            }
+            Some(o) => o.picks(batch, step),
+        };
         self.batch(&which, seq, pad)
     }
 }
@@ -245,6 +336,44 @@ impl Conversations {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every item exactly once per epoch, a different order each epoch, the
+    /// same order whatever step it's asked from (so resuming is exact).
+    #[test]
+    fn epochs_take_every_item_once() {
+        let o = EpochOrder::new(10, 3);
+        let mut seen = Vec::new();
+        for step in 1..=5 {
+            seen.extend(o.picks(4, step)); // 20 items: two epochs
+        }
+        for epoch in seen.chunks(10) {
+            let mut e = epoch.to_vec();
+            e.sort();
+            assert_eq!(e, (0..10).collect::<Vec<_>>());
+        }
+        assert_ne!(seen[..10], seen[10..]); // a new order each epoch
+        assert_ne!(seen[..10], (0..10).collect::<Vec<_>>()[..]); // shuffled
+        let fresh = EpochOrder::new(10, 3);
+        assert_eq!(fresh.picks(4, 4), seen[12..16]); // straight to step 4
+        assert_eq!(fresh.picks(4, 1), seen[..4]); // and back
+    }
+
+    #[test]
+    fn epoch_windows_tile_the_stream() {
+        let data: Vec<u32> = (0..23).collect();
+        assert_eq!(epoch_windows(data.len(), 5), 4); // 0–5, 5–10, 10–15, 15–20
+        let o = EpochOrder::new(4, 1);
+        let mut firsts: Vec<usize> = Vec::new();
+        for step in 1..=2 {
+            let b = train_batch(&data, 2, 5, 1, step, Some(&o));
+            firsts.extend(b.inputs.chunks(5).map(|w| w[0]));
+            for (w, t) in b.inputs.chunks(5).zip(b.targets.chunks(5)) {
+                assert_eq!(t[0], Some(w[0] + 1)); // targets shifted by one
+            }
+        }
+        firsts.sort();
+        assert_eq!(firsts, vec![0, 5, 10, 15]);
+    }
 
     /// tests/data/tiny.ids was written by mini_bpe.py --encode with
     /// tiny.bpe; tiny.ids.expected holds what Python reads back.
@@ -279,19 +408,19 @@ mod tests {
     #[test]
     fn batches_are_shifted_by_one_and_reproducible() {
         let data: Vec<u32> = (0..100).collect();
-        let b = train_batch(&data, 3, 8, 7, 42);
+        let b = train_batch(&data, 3, 8, 7, 42, None);
         for s in 0..3 {
             for t in 0..8 {
                 assert_eq!(b.targets[s * 8 + t], Some(b.inputs[s * 8 + t] + 1));
             }
         }
-        let again = train_batch(&data, 3, 8, 7, 42);
+        let again = train_batch(&data, 3, 8, 7, 42, None);
         assert_eq!(b.inputs, again.inputs);
-        let other = train_batch(&data, 3, 8, 7, 43);
+        let other = train_batch(&data, 3, 8, 7, 43, None);
         assert_ne!(b.inputs, other.inputs);
         // The last window may end exactly at the last token, never past it.
         for _ in 0..1000 {
-            let b = train_batch(&data[..10], 1, 9, 1, 5);
+            let b = train_batch(&data[..10], 1, 9, 1, 5, None);
             assert_eq!(b.inputs[0], 0);
         }
     }
@@ -304,7 +433,7 @@ mod tests {
         let data: Vec<u32> = (0..720_000).collect(); // a window's first token is its start
         let mut starts = std::collections::HashSet::new();
         for step in 1..=600u64 {
-            let b = train_batch(&data, 16, 128, 1, step);
+            let b = train_batch(&data, 16, 128, 1, step, None);
             for w in 0..16 {
                 starts.insert(b.inputs[w * 128]);
             }

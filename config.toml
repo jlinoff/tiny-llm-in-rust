@@ -31,6 +31,8 @@ log_every     = 50      # print a progress line every this many steps
 eval_every    = 250     # measure the validation loss every this many steps
 eval_batches  = 10      # validation batches per measurement
 checkpoint_every = 500  # write a checkpoint every this many steps
+# sampling = "random"   # or "epochs": every window once per epoch (PLAN.md,
+                        # "Where the windows come from"); also in [finetune]
 
 # [generate] is read by step 6, generate. Every key is optional (these are
 # the defaults), and each can be overridden on the command line, such as

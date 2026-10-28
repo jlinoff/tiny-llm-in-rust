@@ -530,7 +530,48 @@ the same position in its window.)
   suggests. The 1.35M model's run took 2,000 steps × 2,048 tokens = 4.1M
   input positions from 4.65M training tokens: each token was in about 0.9
   windows on average, some in none, some in two or three. That's the
-  "passes over the training data" the log reports.
+  "passes over the training data" the log reports: an amount of training,
+  not a promise that every token was seen.
+- **How many are never seen.** With independent random starts, the number
+  of windows a given token lands in follows a Poisson distribution whose
+  mean λ is the number of passes, so a share e^(−λ) of the tokens is never
+  in any window:
+
+  | Passes λ | Never in a window | In two or more |
+  |---|---|---|
+  | 0.27 (the full run's pretraining) | 76% | 3% |
+  | 0.9 (the small model's run) | 41% | 23% |
+  | 1 | 37% | 26% |
+  | 3 | 5% | 80% |
+
+  The full run saw only about a quarter of V2 at all, yet its validation
+  loss on unseen stories matched its training loss: the unseen stories are
+  statistically like the seen ones, so what was learned carries over.
+- **Epochs, the alternative** (`sampling = "epochs"`): one epoch strictly
+  means every example used once. Here the stream is cut into
+  non-overlapping windows (tokens 0–256, 256–512, …; each window's last
+  target is the next one's first input), taken in a shuffled order, every
+  window once per epoch and a new order each epoch. At the same budget it
+  sees more distinct text and nothing twice before everything once; random
+  starts, in exchange, put each token at varying positions in its windows.
+  Production pretraining uses shuffled non-overlapping chunks like these,
+  and usually sees most tokens once or a few times. The order of each epoch
+  depends only on the seed and the epoch, so resuming stays exact.
+- **Measured on the small model** (2,000 steps, 0.9 passes, the same
+  initial weights; two sampling seeds per mode):
+
+  | Sampling | Stream seen | Seed 1 | Seed 2 | Mean |
+  |---|---|---|---|---|
+  | random | about 59% | 3.235 | 3.219 | 3.227 |
+  | epochs | 90%, each window once | 3.227 | 3.195 | 3.211 |
+
+  Epochs came out lower with both seeds, by 0.016 on average, the
+  direction expected from seeing more distinct text. But the two seeds of
+  one mode differ by 0.016 to 0.032, as much as the gap, so two pairs only
+  suggest it (both pairs agreeing by chance has probability 1 in 4). If
+  real, it's a small effect at this scale, and it should shrink as data
+  grows relative to the training budget: at the full run's 0.27 passes,
+  random sampling repeats only 3% of its windows.
 - **A long text's end can't see its beginning.** At most T − 1 earlier
   tokens are in view, so a story's 300th token never sees its first 44.
   That's the context limit.
@@ -1896,6 +1937,12 @@ first three are required; the defaults are those in `config.toml`.
 - `seed` (1): for choosing the training windows. Each step's windows
   depend only on the seed and the step number, so a resumed run trains on
   exactly the same batches.
+- `sampling` (`"random"`): how each step picks its windows. `"random"`:
+  independent random starting points, so some stretches are picked twice
+  and others never. `"epochs"`: the stream cut into non-overlapping
+  windows, every one taken once per epoch, in a new shuffled order each
+  epoch. In `[finetune]` the same choice applies to conversations. See
+  "Where the windows come from" in [Step 4: train](#step-4-train).
 - `validation_fraction` (0.05): the last 5% of `corpus.ids`, held out and
   never trained on. Its loss, the **validation loss**, measures how well
   the model predicts text it hasn't seen; a training loss falling while the

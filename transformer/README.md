@@ -141,9 +141,15 @@ not be the data or the config.
 
 **What it does each step.**
 
-- Takes a batch of `batch_size` windows of `context` + 1 tokens, at random
-  places in the training data. The last `validation_fraction` of the data
-  (5%) is held out and never trained on.
+- Takes a batch of `batch_size` windows of `context` + 1 tokens from the
+  training data. With `sampling = "random"` (the default) they start at
+  random places, drawn independently, so some stretches are picked twice
+  and others never (the log says what share a run leaves unseen); with
+  `sampling = "epochs"` the data is cut into non-overlapping windows, taken
+  in a shuffled order, every one once per epoch (PLAN.md, "Where the
+  windows come from"). Fine-tuning applies the same choice to
+  conversations. The last `validation_fraction` of the data (5%) is held
+  out and never trained on.
 - Runs the model forward and backward (the tape works out every gradient).
 - Measures the gradient's overall length. If it's over `grad_clip`, scales
   the gradient down to that length, a guard against one unusual batch

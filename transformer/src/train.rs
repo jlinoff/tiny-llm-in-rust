@@ -81,6 +81,20 @@ pub struct TrainingConfig {
     /// special tokens', <|endoftext|> and the chat markers) or "all".
     #[serde(default = "d_embeddings", skip_serializing_if = "is_none_mode")]
     pub lora_embeddings: String,
+    /// How each step picks its training items (windows of the corpus, or
+    /// conversations): "random" (the default), independently at random,
+    /// so some are picked twice and others never; or "epochs", every item
+    /// once per epoch in a shuffled order (windows then don't overlap).
+    #[serde(default = "d_sampling", skip_serializing_if = "is_random")]
+    pub sampling: String,
+}
+
+fn d_sampling() -> String {
+    "random".into()
+}
+
+fn is_random(s: &str) -> bool {
+    s == "random"
 }
 
 fn d_embeddings() -> String {
@@ -192,6 +206,12 @@ impl TrainingConfig {
             return Err(format!(
                 "[training] lora_targets: unknown matrix {t:?} (choose from {})",
                 crate::lora::TARGETS.join(", ")
+            ));
+        }
+        if self.sampling != "random" && self.sampling != "epochs" {
+            return Err(format!(
+                "[training] sampling: {:?} isn't random or epochs",
+                self.sampling
             ));
         }
         if !crate::lora::EMBEDDING_MODES.contains(&self.lora_embeddings.as_str()) {
@@ -566,7 +586,10 @@ pub fn run(
     let seq = c.context;
     let split = data::split(corpus_ids, t.validation_fraction, seq)?;
     let valid = data::valid_batches(split.valid, t.eval_batches, t.batch_size, seq);
-    let batches = |step: u64| data::train_batch(split.train, t.batch_size, seq, t.seed, step);
+    let order = (t.sampling == "epochs")
+        .then(|| data::EpochOrder::new(data::epoch_windows(split.train.len(), seq), t.seed));
+    let batches =
+        |step: u64| data::train_batch(split.train, t.batch_size, seq, t.seed, step, order.as_ref());
     run_with(state, c, t, batches, &valid, output, prov, report)
 }
 
@@ -705,7 +728,7 @@ mod tests {
         let mut s = fresh(&c, vocab);
         let mut losses = Vec::new();
         for step_no in 1..=t.steps {
-            let b = data::train_batch(&ids, 8, 16, t.seed, step_no);
+            let b = data::train_batch(&ids, 8, 16, t.seed, step_no, None);
             losses.push(step(&mut s, &c, &t, &b, 16).0);
         }
         assert!(
@@ -839,7 +862,7 @@ mod tests {
         let before = validation_loss(
             &lora_state(),
             &c,
-            &[data::train_batch(&ids, 8, 16, 9, 1)],
+            &[data::train_batch(&ids, 8, 16, 9, 1, None)],
             16,
         )
         .unwrap();
@@ -853,8 +876,13 @@ mod tests {
             |_| {},
         )
         .unwrap();
-        let after =
-            validation_loss(&straight, &c, &[data::train_batch(&ids, 8, 16, 9, 1)], 16).unwrap();
+        let after = validation_loss(
+            &straight,
+            &c,
+            &[data::train_batch(&ids, 8, 16, 9, 1, None)],
+            16,
+        )
+        .unwrap();
         assert!(after < before, "loss {before} -> {after}");
         assert_eq!(straight.frozen.as_ref().unwrap().base.mats, base.mats); // untouched
         let d = straight.params.mats.last().unwrap(); // the embedding change trained too

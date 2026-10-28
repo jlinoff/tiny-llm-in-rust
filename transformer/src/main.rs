@@ -385,6 +385,29 @@ fn weights_fingerprint(tensors: &[safetensors::Tensor]) -> String {
     hex(&h.finalize())
 }
 
+/// The sampling line of a training log. `passes`: the whole run's items
+/// divided by the training set. With random sampling, how many items a run
+/// of that many passes never sees: each item is picked a Poisson-distributed
+/// number of times with mean `passes`, so none at all with chance e^−passes.
+fn sampling_text(
+    t: &train::TrainingConfig,
+    passes: f64,
+    items: &str,
+    random: &str,
+    what: &str,
+) -> String {
+    if t.sampling == "epochs" {
+        format!(
+            "sampling = epochs: {items}, each once per epoch, in a new shuffled order each epoch"
+        )
+    } else {
+        format!(
+            "sampling = random: {random}; by the end about {:.0}% of the {what} in none",
+            100.0 * (-passes).exp()
+        )
+    }
+}
+
 /// A byte count for people: "512 bytes", "37 kB", "1.4 MB".
 fn size_text(bytes: usize) -> String {
     match bytes {
@@ -605,6 +628,19 @@ fn train_command(
     println!(
         "  {remaining} tokens to go, about {} passes over the training data",
         train::passes(remaining as f64 / n_train.max(1) as f64)
+    );
+    println!(
+        "  {}",
+        sampling_text(
+            &tcfg,
+            (tcfg.steps as usize * tcfg.batch_size * seq) as f64 / n_train.max(1) as f64,
+            &format!(
+                "{} non-overlapping windows",
+                data::epoch_windows(n_train, seq)
+            ),
+            "windows at random starting points",
+            "training tokens"
+        )
     );
     println!(
         "  AdamW: peak learning rate {} after {} warm-up steps, cosine down to {} of it;",
@@ -1136,6 +1172,16 @@ fn finetune_command(
         train::passes(((tcfg.steps - state.step) as usize * tcfg.batch_size) as f64 / n_train as f64)
     );
     println!(
+        "  {}",
+        sampling_text(
+            &tcfg,
+            (tcfg.steps as usize * tcfg.batch_size) as f64 / n_train as f64,
+            &format!("{n_train} conversations"),
+            "conversations drawn at random",
+            "conversations"
+        )
+    );
+    println!(
         "  AdamW: peak learning rate {} after {} warm-up steps, cosine down to {} of it;",
         tcfg.learning_rate, tcfg.warmup_steps, tcfg.min_lr_fraction
     );
@@ -1193,8 +1239,18 @@ fn finetune_command(
         parent_sha256: model_sha,
     };
     let start = std::time::Instant::now();
-    let batches =
-        |step: u64| convs.train_batch(n_train, tcfg.batch_size, seq, tcfg.seed, step, m.eos);
+    let order = (tcfg.sampling == "epochs").then(|| data::EpochOrder::new(n_train, tcfg.seed));
+    let batches = |step: u64| {
+        convs.train_batch(
+            n_train,
+            tcfg.batch_size,
+            seq,
+            tcfg.seed,
+            step,
+            m.eos,
+            order.as_ref(),
+        )
+    };
     let first = state.step;
     let state = train::run_with(
         state,
