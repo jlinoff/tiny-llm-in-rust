@@ -18,7 +18,6 @@ names are explained where they first appear.
   - [Training](#training)
   - [Generation (inference)](#generation-inference)
   - [word2vec](#word2vec)
-- [Why Rust](#why-rust)
 - [The flows](#the-flows)
   - [1. The LLM flow](#1-the-llm-flow)
     - [What each stage does](#what-each-stage-does)
@@ -54,7 +53,10 @@ names are explained where they first appear.
   - [Pretraining](#pretraining)
   - [Post-training](#post-training-1)
   - [Inference](#inference)
-- [Conventions for all code](#conventions-for-all-code)
+- [Implementation notes](#implementation-notes)
+  - [Languages: Python for text, Rust for arithmetic](#languages-python-for-text-rust-for-arithmetic)
+  - [What is built by hand, and what isn't](#what-is-built-by-hand-and-what-isnt)
+  - [Conventions for all code](#conventions-for-all-code)
 - [Where the stages live](#where-the-stages-live)
 - [word2vec: the historical side branch](#word2vec-the-historical-side-branch)
 - [Open decisions](#open-decisions)
@@ -330,29 +332,6 @@ Grouped so that each definition uses only terms defined above it.
   wrong ones.
 - **Hogwild**: training with many threads that update the shared weights
   without locks, accepting the rare collision.
-
-## Why Rust
-
-Training is slow even for small models, because it's billions of tiny
-arithmetic updates. word2vec on text8 (a standard benchmark corpus: 17 million
-words of Wikipedia text) makes about 375
-million predictions over 5 epochs, each updating 7 vectors of 100 numbers:
-over 2.5 billion vector updates per run. In plain Python, the interpreter's
-overhead on every one of those operations dominates, likely making it 50–100×
-slower (an estimate, not a measurement). NumPy (Python's numerical array
-library) only helps if the updates are
-batched into large array operations, which hides the algorithm behind array
-manipulation. In Rust, the inner loops are written as plain loops that read
-like the math and run at native speed: the full text8 run takes about 8½
-minutes on 2 processor cores, and less on a machine with more cores.
-
-The tokenizer stays in Python because it's fast enough at this scale. Its
-first trainer recounted every pair after every merge and would have needed
-about half an hour for 4,000 merges on 20 MB; the current one updates only
-what each merge changes and takes 17 seconds, with identical results. Fixing
-the algorithm gained more than a Rust port of the old one would have (an
-estimated 30 to 100 times), without the risk of two pre-tokenizers
-disagreeing. It can still move to Rust if there's a compelling reason.
 
 ## The flows
 
@@ -1716,7 +1695,7 @@ turns vectors into token scores. It has nothing to do with attention heads.
 All of these are optimizations: in exact arithmetic, computing the heads
 together or one at a time, or the tokens at once or one by one, gives the same
 result. In floating-point arithmetic the results are equal only to rounding
-(see [Conventions for all code](#conventions-for-all-code)), unless the two
+(see [Conventions for all code](#conventions-for-all-code), in Implementation notes), unless the two
 ways do the same operations in the same order: `transformer generate`'s
 one-token-at-a-time path does, and a test requires its predictions to equal
 the all-at-once training pass bit for bit.
@@ -2654,7 +2633,83 @@ card (2025) describes several of these elements for that model, marked
   outputs, for cheaper serving. Not here: there's no larger model of ours
   to imitate.
 
-## Conventions for all code
+## Implementation notes
+
+How the project is built, and why: the languages, what is written by hand
+and what is borrowed, and the rules every program follows.
+
+### Languages: Python for text, Rust for arithmetic
+
+**Python** (Python 3, standard library only) for the text tools: the
+tokenizer (`tokenizer/mini_bpe.py`), the chat data (`chat/make_chat.py`)
+and the helpers in `tools/`. Text processing is what Python is good at,
+its regular expressions run GPT-2's pre-tokenizer pattern as written, and
+it is fast enough at this scale: the tokenizer learns 3,836 merges from
+22 MB in about 12 seconds, and encodes TinyStories V2's 2.2 GB in about
+6 minutes. Its first trainer recounted every pair after every merge and
+would have needed about half an hour for 4,000 merges on 20 MB; the
+current one updates only what each merge changes and takes 17 seconds,
+with identical results. Fixing the algorithm gained more than a Rust port
+of the old one would have (an estimated 30 to 100 times), without the risk
+of two implementations disagreeing.
+
+**Rust** for everything that trains or runs a model: `word2vec/`,
+`attention/` and `transformer/`. Training is billions of tiny arithmetic
+updates. word2vec on text8 (a standard benchmark corpus: 17 million words
+of Wikipedia text) makes about 375 million predictions over 5 epochs, each
+updating 7 vectors of 100 numbers: over 2.5 billion vector updates per
+run. The alternatives, and why Rust over each:
+
+- **Plain Python**: the interpreter's overhead on every operation
+  dominates, likely 50–100 times slower (an estimate, not a measurement).
+- **Python with NumPy** (its numerical array library): fast only when the
+  work is batched into large array operations, which hides the algorithm
+  behind array manipulation; a loop over tokens, the natural way to write
+  attention or a training step, falls back to Python's speed.
+- **PyTorch, JAX or similar frameworks**: fast, but they supply exactly
+  what this project exists to build and understand, automatic
+  differentiation and the numerical kernels. (The same reason rules out a
+  Rust framework such as candle; open decision 8.)
+- **C**: as fast, but with no bounds checks (an index off by one in an
+  attention loop reads someone else's memory silently, where Rust stops
+  with a clear message), threads by hand, and no package manager.
+- **C++**: as fast, with templates for writing code once for f32 and f64,
+  but a large language with undefined behaviour in many corners, and build
+  tools to choose and maintain.
+- **Rust**: the speed of C, with the inner loops written as plain loops
+  that read like the maths; memory safety and bounds checks; generic code
+  over f32 and f64 through traits, so the same model code runs in f64 for
+  the gradient checks; and Cargo, its build tool and package manager, for
+  the few libraries used: rayon (work-stealing threads), serde, serde_json
+  and toml (the configuration and the checkpoints' JSON header), clap
+  (command-line options), sha2 (checksums), fancy-regex (the tokenizer's
+  pattern, for encoding prompts); `word2vec/` and `attention/` need only
+  clap. The costs:
+  compile times, a stricter compiler to satisfy, and `unsafe` code for the
+  one call into Apple's Accelerate library (`src/blas.rs`). The full text8
+  word2vec run takes about 8½ minutes on 2 processor cores.
+
+### What is built by hand, and what isn't
+
+- **By hand:** the tokenizer; the tensors and matrix products
+  (`src/tensor.rs`); automatic differentiation, a tape (open decision 7);
+  the model, the optimizer (AdamW) and the training loop; generation with
+  a KV cache; LoRA; the probe. Every gradient is checked against finite
+  differences, and generation against training's forward pass, bit for
+  bit.
+- **Borrowed:** the file formats. Checkpoints are **safetensors**, a
+  simple format (a JSON header, then raw numbers) that the Python tools of
+  the field read too; settings are **TOML** files; token IDs are a small
+  binary format of our own (`.ids`: a header with the tokenizer's
+  fingerprint, then 2 bytes per ID).
+- **Optional:** Apple's Accelerate library for the large matrix products,
+  on by default on macOS, measured 2.68 times as fast per training step
+  (open decision 8); the Rust loops remain the reference.
+- **The driver:** a Makefile, one target per step, each model file
+  depending only on its own config section (open decision 5; see
+  [Where the stages live](#where-the-stages-live)).
+
+### Conventions for all code
 
 Rules every program in the project follows:
 
