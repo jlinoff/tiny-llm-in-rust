@@ -2,9 +2,10 @@
 # Compare sampling = "random" and "epochs" on the small model: the same
 # initial weights (out/model-init.safetensors) and data (out/corpus.ids),
 # trained with [training] from config.toml, varying only the sampling and
-# its seed. Run from ~/work/llm after `make train` (so out/ exists):
-#   bash sampling-test.sh            # seeds 1-5, about 30 minutes
-#   SEEDS="1 2 3" bash sampling-test.sh
+# its seed (PLAN.md, "Where the windows come from"). Run from the top of the
+# repository after `make train` (so out/ exists):
+#   tools/sampling-test.sh                   # seeds 1-5, about 30 minutes on an M4
+#   SEEDS="1 2 3" tools/sampling-test.sh
 # Everything goes in out/sampling/ (make clean removes it). Ends with a
 # table of the final validation losses.
 set -euo pipefail

@@ -601,7 +601,7 @@ the same position in its window.)
   depends only on the seed and the epoch, so resuming stays exact.
 - **Measured on the small model** (2,000 steps, 0.9 passes, the same
   initial weights, five sampling seeds per mode; on the M4 with
-  Accelerate, 3.4 minutes a run):
+  Accelerate, 3.4 minutes a run; `tools/sampling-test.sh` reruns it):
 
   | Seed | 1 | 2 | 3 | 4 | 5 | Mean |
   |---|---|---|---|---|---|---|
@@ -2538,7 +2538,8 @@ llm/
 ├── tokenizer/     # text <-> token IDs: tokenize, encode, decode
 ├── chat/          # make_chat.py: fine-tuning conversations from the stories
 ├── tools/         # toc.py: this file's table of contents and link check (make toc);
-│                  # config_section.py: one config section per file, for make
+│                  # config_section.py: one config section per file, for make;
+│                  # sampling-test.sh: random against epoch sampling, five seeds
 ├── word2vec/      # word vectors, the historical precursor
 ├── attention/     # self-attention on its own, then a look at one full block
 └── transformer/   # the model: build, train, finetune, generate
