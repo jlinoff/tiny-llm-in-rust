@@ -13,6 +13,11 @@ names are explained where they first appear.
 
 <!-- toc -->
 - [Terms](#terms)
+  - [Text and tokens](#text-and-tokens)
+  - [The model](#the-model)
+  - [Training](#training)
+  - [Generation (inference)](#generation-inference)
+  - [word2vec](#word2vec)
 - [Why Rust](#why-rust)
 - [The flows](#the-flows)
   - [1. The LLM flow](#1-the-llm-flow)
@@ -68,7 +73,7 @@ names are explained where they first appear.
 
 Grouped so that each definition uses only terms defined above it.
 
-**Text and tokens**
+#### Text and tokens
 
 - **corpus**: the body of text a model is trained on.
 - **token**: a unit of text the model works with: a word, part of a word, a
@@ -89,7 +94,7 @@ Grouped so that each definition uses only terms defined above it.
   [Special tokens](#special-tokens)).
 - **vocabulary**, **V**: the set of all tokens, and its size.
 
-**The model**
+#### The model
 
 - **vector**: a list of numbers; here, the numbers that represent a token.
 - **d (model width)**: the length of every token's vector (more in
@@ -199,7 +204,7 @@ Grouped so that each definition uses only terms defined above it.
 - **GPT (generative pre-trained transformer)**: a transformer trained to
   predict the next token. "GPT-style" means this design, which most LLMs use.
 
-**Training**
+#### Training
 
 - **training**: repeatedly make a prediction, measure the error (the loss,
   next), and adjust the weights slightly to reduce it (gradient descent).
@@ -226,19 +231,6 @@ Grouped so that each definition uses only terms defined above it.
 - **self-supervised learning**: training where the correct answers come from
   the data itself, such as the next token of a text, so nothing has to be
   labelled by hand. Pretraining a language model is self-supervised.
-- **inference**: running a trained model to get its output, with the
-  weights fixed: no backward pass, no optimizer. For a language model,
-  inference is **generation**, one token at a time (step 6): the logits
-  for the next token become probabilities, one token is chosen, its text
-  is printed, and it's appended to the input for the next pass. A **KV
-  cache** keeps each earlier token's keys and values rather than
-  recomputing them for every new token. "Decode" has three meanings
-  here: the tokenizer's **decoding** (IDs to text), the **decode phase**
-  of generation (one new token per pass, after the prompt's **prefill**),
-  and a **decoding strategy** (how the next token is chosen: greedy,
-  temperature, top-k). The term contrasts
-  with **training**; in statistics "inference" means something different
-  (drawing conclusions from data).
 - **gradient check**: testing hand-written gradients against **finite
   differences**: nudge one weight by ±ε, measure how much the loss changes,
   and compare with the computed gradient.
@@ -286,6 +278,10 @@ Grouped so that each definition uses only terms defined above it.
   weights and trains, for each chosen weight matrix W, only a small update
   of low rank r, W + (α/r)·A·B; the result is a small **adapter** file (see
   [LoRA](#lora-fine-tuning-a-low-rank-adapter)).
+- **checkpoint**: a saved file of a model's weights (more in open decision 3).
+
+#### Generation (inference)
+
 - **temperature**: a text-generation setting τ (often written T, but here T
   is the context length): the output scores are divided by τ before the
   softmax, exactly as temperature enters the Boltzmann
@@ -296,9 +292,21 @@ Grouped so that each definition uses only terms defined above it.
   unlikely tokens can't be picked by chance. (Sampling here means drawing
   the next token; training's `sampling` setting, choosing which windows
   to train on, is unrelated.)
-- **checkpoint**: a saved file of a model's weights (more in open decision 3).
+- **inference**: running a trained model to get its output, with the
+  weights fixed: no backward pass, no optimizer. For a language model,
+  inference is **generation**, one token at a time (step 6): the logits
+  for the next token become probabilities, one token is chosen, its text
+  is printed, and it's appended to the input for the next pass. A **KV
+  cache** keeps each earlier token's keys and values rather than
+  recomputing them for every new token. "Decode" has three meanings
+  here: the tokenizer's **decoding** (IDs to text), the **decode phase**
+  of generation (one new token per pass, after the prompt's **prefill**),
+  and a **decoding strategy** (how the next token is chosen: greedy,
+  temperature, top-k). The term contrasts
+  with **training**; in statistics "inference" means something different
+  (drawing conclusions from data).
 
-**word2vec**
+#### word2vec
 
 - **word2vec**: a 2013 method that learns one vector per word, the historical
   precursor covered by this project's second flow.
