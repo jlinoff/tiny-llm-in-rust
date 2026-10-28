@@ -175,8 +175,9 @@ Grouped so that each definition uses only terms defined above it.
   **transformer** is a model built from a stack of these blocks (more in
   [The transformer block](#the-transformer-block)).
 - **output layer** (or **unembedding**, or **LM head** for "language-model
-  head"): the final layer, which turns a vector into V scores, one for each
-  possible next token. This "head" is unrelated to attention heads.
+  head"): the final layer, which turns a vector into V scores, the
+  **logits**, one for each possible next token. This "head" is unrelated
+  to attention heads.
 - **softmax**: turns a list of scores z₁ … zₙ into positive weights that sum
   to 1: weightᵢ = e^zᵢ / (e^z₁ + … + e^zₙ). Higher scores get exponentially
   more weight. It's the Boltzmann distribution, with the scores playing the
@@ -227,9 +228,15 @@ Grouped so that each definition uses only terms defined above it.
   labelled by hand. Pretraining a language model is self-supervised.
 - **inference**: running a trained model to get its output, with the
   weights fixed: no backward pass, no optimizer. For a language model,
-  inference is generation, one token at a time (step 6), with a **KV
-  cache**: each earlier token's keys and values are kept rather than
-  recomputed for every new token. The term contrasts
+  inference is **generation**, one token at a time (step 6): the logits
+  for the next token become probabilities, one token is chosen, its text
+  is printed, and it's appended to the input for the next pass. A **KV
+  cache** keeps each earlier token's keys and values rather than
+  recomputing them for every new token. "Decode" has three meanings
+  here: the tokenizer's **decoding** (IDs to text), the **decode phase**
+  of generation (one new token per pass, after the prompt's **prefill**),
+  and a **decoding strategy** (how the next token is chosen: greedy,
+  temperature, top-k). The term contrasts
   with **training**; in statistics "inference" means something different
   (drawing conclusions from data).
 - **gradient check**: testing hand-written gradients against **finite
@@ -826,6 +833,33 @@ and the bigger model of the full TinyStories run.
 **What it does:** encodes the prompt, predicts a token ID, appends it, and
 repeats; then decodes the IDs back to text. With `model.safetensors` it continues the
 prompt; with `chat.safetensors` it answers as the assistant.
+
+**From the last vector to text.** Each pass ends with one vector of d
+numbers, the residual stream at the last position. Turning it into text
+takes four steps:
+
+1. **Scores.** The final layer norm, then the output layer: a dot product
+   of the vector with every row of the embedding table (ours is tied, so
+   the same table that turned token IDs into vectors at the start). That
+   gives V numbers, one per possible next token, the **logits**: a token
+   whose embedding points the same way as the vector scores high.
+2. **Probabilities.** Divide the logits by the temperature, keep the top-k,
+   and apply softmax: the probabilities of the next token.
+3. **A choice.** Draw one token ID at random by those probabilities (or,
+   at temperature 0, take the likeliest): this is the only random step
+   of generation, and the seed fixes it.
+4. **Text.** The tokenizer's vocabulary maps the ID to its bytes (such as
+   " ball"), the bytes are printed, and the ID is appended
+   to the input for the next pass. A token can be part of a UTF-8
+   character, so bytes are held back until they complete one
+   (`Utf8Stream` in `src/generate.rs`).
+
+Steps 1 and 2 are the model's; step 3 is the **decoding strategy**
+(greedy, temperature, top-k; production engines add top-p and others);
+step 4 is the tokenizer's decoding, a table lookup. An open-weight model
+ships everything needed for all four: the output matrix among its weights,
+and the tokenizer's files (vocabulary, merges, special tokens, usually a
+chat template and default sampling settings) alongside them.
 
 **This is inference.** [Inference](#terms) means running a trained model to
 get its output, as opposed to training it: the weights are fixed, and
