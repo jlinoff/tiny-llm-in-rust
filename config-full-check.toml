@@ -24,6 +24,7 @@ seed    = 1
 # compute-optimal ratio): about a day on the M4, to be checked with
 # make full-bench before starting.
 [training]
+sampling      = "epochs"
 learning_rate = 0.001   # a bigger model trains best with a smaller peak rate
 steps         = 500     # (check run)
 batch_size    = 16      # 16 × 256 = 4,096 tokens per step
@@ -49,6 +50,7 @@ seed        = 1
 # Conversations from the first 200,000 training stories (CHAT_ARGS in the
 # Makefile); 10,000 steps of 8 draw 80,000 of them, under half a pass.
 [finetune]
+sampling      = "epochs"
 learning_rate = 0.0003  # (check run)
 steps         = 300     # (check run)
 batch_size    = 8

@@ -3171,6 +3171,16 @@ near 2.5 turns clipping off:
   should start no higher than where pretraining ended unless the new
   behavior is worth some of the old.
 
+**A second full run** (running): `config-full.toml` now asks for 100,000
+steps, 410M tokens (about 55 per parameter, past the compute-optimal 20;
+a small model still improves beyond it, if less per token), with
+`sampling = "epochs"` (74% of V2's windows, each once, where random starts
+would leave about 48% unseen), and fine-tuning at 0.0005, between the two
+rates tried above, also with epochs. About 20 hours with Accelerate. The
+first run's files are kept in `out-full-36k/` for comparison; the second
+reuses its tokenizer, encoded corpus, initial model and chat data, so only
+training and what follows it rerun.
+
 ## Order of work
 
 1. ~~Finish word2vec.~~ Done.
