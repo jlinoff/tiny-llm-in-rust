@@ -41,7 +41,17 @@ $(OUT)/corpus.ids: $(OUT)/tok.bpe $(CORPUS) tokenizer/mini_bpe.py | $(OUT)
 $(OUT):
 	mkdir -p $@
 
-# Step 3: build. Rebuilt when the tokenizer or the config changes.
+# Each step depends only on its own section of the config file: build on
+# [model], train on [training], finetune on [finetune] (copied to
+# $(OUT)/config/ by tools/config_section.py, rewritten only when a value in
+# that section changes). So editing [finetune] reruns only fine-tuning, and
+# editing [generate] or a comment reruns nothing. The recipe runs whenever
+# the config file is newer, which is cheap and leaves unchanged sections'
+# files, and so the models, alone.
+$(OUT)/config/%.toml: $(CONFIG) tools/config_section.py | $(OUT)
+	@python3 tools/config_section.py $(CONFIG) $* $@
+
+# Step 3: build. Rebuilt when the tokenizer or [model] changes.
 # The transformer binary is an order-only prerequisite (after the |) of every
 # model file: make builds it if it's out of date, but a rebuilt binary doesn't
 # make existing models out of date, so new code never retrains a model by
@@ -53,7 +63,7 @@ TRANSFORMER_SRC := transformer/Cargo.toml $(wildcard transformer/src/*.rs)
 .PHONY: build
 build: $(OUT)/model-init.safetensors ## Step 3: create the model with random weights.
 
-$(OUT)/model-init.safetensors: $(OUT)/tok.bpe $(CONFIG) | $(OUT) $(TRANSFORMER)
+$(OUT)/model-init.safetensors: $(OUT)/tok.bpe $(OUT)/config/model.toml | $(OUT) $(TRANSFORMER)
 	$(call hdr,build)
 	$(TRANSFORMER) build --tokenizer $(OUT)/tok.bpe --config $(CONFIG) -o $@
 
@@ -78,7 +88,7 @@ bench: $(TRANSFORMER) $(OUT)/model-init.safetensors ## Measure matrix-multiply s
 .PHONY: train
 train: $(OUT)/model.safetensors ## Step 4: train the model on corpus.ids.
 
-$(OUT)/model.safetensors: $(OUT)/model-init.safetensors $(OUT)/corpus.ids $(CONFIG) | $(OUT) $(TRANSFORMER)
+$(OUT)/model.safetensors: $(OUT)/model-init.safetensors $(OUT)/corpus.ids $(OUT)/config/training.toml | $(OUT) $(TRANSFORMER)
 	$(call hdr,train)
 	time $(TRANSFORMER) train --model $(OUT)/model-init.safetensors --data $(OUT)/corpus.ids --config $(CONFIG) -o $@
 
@@ -102,7 +112,7 @@ $(OUT)/chat.ids: $(OUT)/chat.txt $(OUT)/tok.bpe tokenizer/mini_bpe.py | $(OUT)
 .PHONY: finetune
 finetune: $(OUT)/chat.safetensors ## Step 5: fine-tune the trained model on conversations.
 
-$(OUT)/chat.safetensors: $(OUT)/model.safetensors $(OUT)/chat.ids $(CONFIG) | $(OUT) $(TRANSFORMER)
+$(OUT)/chat.safetensors: $(OUT)/model.safetensors $(OUT)/chat.ids $(OUT)/config/finetune.toml | $(OUT) $(TRANSFORMER)
 	$(call hdr,finetune)
 	time $(TRANSFORMER) finetune --model $(OUT)/model.safetensors --data $(OUT)/chat.ids --tokenizer $(OUT)/tok.bpe --config $(CONFIG) -o $@
 
@@ -114,7 +124,7 @@ $(OUT)/chat.safetensors: $(OUT)/model.safetensors $(OUT)/chat.ids $(CONFIG) | $(
 # add --lora-embeddings markers (or all) to train embedding rows too.
 LORA_ARGS ?= --lora-rank 8 --learning-rate 0.003
 
-$(OUT)/chat-lora.safetensors: $(OUT)/model.safetensors $(OUT)/chat.ids $(CONFIG) | $(OUT) $(TRANSFORMER)
+$(OUT)/chat-lora.safetensors: $(OUT)/model.safetensors $(OUT)/chat.ids $(OUT)/config/finetune.toml | $(OUT) $(TRANSFORMER)
 	$(call hdr,finetune with LoRA)
 	time $(TRANSFORMER) finetune --model $(OUT)/model.safetensors --data $(OUT)/chat.ids --tokenizer $(OUT)/tok.bpe --config $(CONFIG) $(LORA_ARGS) -o $@
 
@@ -159,9 +169,9 @@ chat: $(TRANSFORMER) ## Step 6 with the fine-tuned model: PROMPT is the request.
 # Step 6. generate (inference)
 # Always runs (nothing is written). Override the prompt or the sampling:
 #   make generate PROMPT='Once upon a time' GEN_ARGS='--temperature 0.5 --seed 7'
-# The model is required but deliberately not a prerequisite: it depends on
-# config.toml and the binary, so editing [generate] or rebuilding would
-# otherwise retrain it first.
+# The model is required but deliberately not a prerequisite, so generating
+# never starts a training run (say, after editing [training] to try
+# something later).
 PROMPT ?= Once upon a time
 GEN_ARGS ?=
 

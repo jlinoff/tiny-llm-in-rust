@@ -2435,7 +2435,8 @@ llm/
 ├── data/          # downloaded corpora, e.g. text8, TinyStories (git-ignored)
 ├── tokenizer/     # text <-> token IDs: tokenize, encode, decode
 ├── chat/          # make_chat.py: fine-tuning conversations from the stories
-├── tools/         # toc.py: this file's table of contents and link check (make toc)
+├── tools/         # toc.py: this file's table of contents and link check (make toc);
+│                  # config_section.py: one config section per file, for make
 ├── word2vec/      # word vectors, the historical precursor
 ├── attention/     # self-attention on its own, then a look at one full block
 └── transformer/   # the model: build, train, finetune, generate
@@ -2463,7 +2464,19 @@ evaluate` (fine-tuning measured), and `make bench`.
 
 Generated files go in `out/` (so `make clean` is simply `rm -rf out`), and
 corpora stay in `data/`. Make tracks files, not variables: after changing a
-setting such as `MERGES`, force a rebuild with `make -B <target>`. The commands
+setting such as `MERGES`, force a rebuild with `make -B <target>`.
+
+Each model file depends only on its own section of the config file: the
+initial model on `[model]`, the trained model on `[training]`, the
+fine-tuned one on `[finetune]`. `tools/config_section.py` copies each
+section to `out/config/<section>.toml`, without comments or spacing, and
+rewrites the copy only when one of its values changes. So editing
+`[finetune]` reruns only fine-tuning (without this, any edit to the file,
+even a comment or `[generate]`, would retrain everything: for the full run, a
+day). Two other choices keep make from retraining by surprise: the program
+is an order-only prerequisite of the model files, so a rebuilt program
+doesn't make them out of date, and `generate`, `chat` and `evaluate` use the
+models without depending on them. The commands
 the targets run, one per step:
 
 ```
