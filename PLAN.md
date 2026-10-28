@@ -101,7 +101,8 @@ Grouped so that each definition uses only terms defined above it.
 - **embedding table**: a V × d table with one row (one vector) per token. It is
   the model's first layer: a token ID selects its row.
 - **weights**, **parameters**: the numbers inside the model that are adjusted
-  as it learns. **Hyperparameters** are the settings we choose (more in
+  as it learns: the matrices, and the **biases**, vectors added to a matrix
+  product's result. **Hyperparameters** are the settings we choose (more in
   [Configuration](#configuration)).
 - **self-attention**: a sublayer in which each token's vector takes in
   information from the other tokens of the same sequence ("self", as opposed
@@ -185,15 +186,32 @@ Grouped so that each definition uses only terms defined above it.
   subtract the largest score before exponentiating, which keeps e^z from
   overflowing.
 - **context length**, **T**: the most tokens the model can take in at
-  once (256 in `config.toml`). Training cuts the text into windows of T
-  tokens, and the position table has T rows.
+  once (256 in `config.toml`). Training reads the text in windows of T
+  tokens, and the position embedding (next) has T rows.
+- **position embedding**: a T × d table of learned vectors, one per place
+  in the window (first, second, …), added to each token's vector before
+  the first block. Attention by itself ignores order, treating its input
+  as a set; this is what tells the model where each token stands. Our
+  positions are learned, and only relative to the window, never to the
+  document (more in [Step 3: build](#step-3-build)).
 - **GPT (generative pre-trained transformer)**: a transformer trained to
   predict the next token. "GPT-style" means this design, which most LLMs use.
 
 **Training**
 
-- **training**: repeatedly make a prediction, measure the error, and adjust the
-  weights slightly to reduce it (gradient descent).
+- **training**: repeatedly make a prediction, measure the error (the loss,
+  next), and adjust the weights slightly to reduce it (gradient descent).
+- **loss**: the number training minimizes, the error averaged over
+  predictions. For a language model, the **cross-entropy**: the average of
+  −ln(the probability the model gave the token that actually came next).
+  0 would be perfect certainty, always right; guessing uniformly among V
+  tokens gives ln V (8.318 for V = 4,096). e^loss, the **perplexity**, is
+  the number of equally likely choices the model is as uncertain as: our
+  full run's 1.52 means about 4.6.
+- **validation loss**: the loss on held-out text the model never trains on,
+  the honest measure of what it learned. A training loss that keeps
+  falling while the validation loss rises is **overfitting**: memorizing
+  the training text rather than learning rules that carry over.
 - **backpropagation**: the algorithm that computes, for every weight, how much
   the error would change if the weight moved slightly (its **gradient**), by
   applying the chain rule backward through the network. **Gradient descent**
@@ -208,13 +226,31 @@ Grouped so that each definition uses only terms defined above it.
   labelled by hand. Pretraining a language model is self-supervised.
 - **inference**: running a trained model to get its output, with the
   weights fixed: no backward pass, no optimizer. For a language model,
-  inference is generation, one token at a time (step 6). The term contrasts
+  inference is generation, one token at a time (step 6), with a **KV
+  cache**: each earlier token's keys and values are kept rather than
+  recomputed for every new token. The term contrasts
   with **training**; in statistics "inference" means something different
   (drawing conclusions from data).
 - **gradient check**: testing hand-written gradients against **finite
   differences**: nudge one weight by ±ε, measure how much the loss changes,
   and compare with the computed gradient.
-- **learning rate**: how large each adjustment is.
+- **window**: T consecutive tokens of the corpus, the unit pretraining
+  reads (T + 1 counting the token after the last, the last prediction's
+  answer). Each position predicts the next token, so one window gives T
+  predictions.
+- **step**, **batch size**, **B**: one adjustment; the number of examples
+  (for pretraining, windows of T tokens) used to compute it.
+- **learning rate**: how large each adjustment is. A **schedule** varies
+  it: a **warm-up** (rising from 0 over the first steps), then a decay
+  (ours a cosine curve down to a tenth). The gradient is computed on a
+  random batch rather than all the data, so it's a noisy estimate
+  (**stochastic gradient descent**), and the noise keeps the weights
+  slightly above the bottom of a minimum, the more so the larger the rate;
+  that's why schedules end low (see the full run's fine-tuning, in
+  [The full TinyStories run](#the-full-tinystories-run)). Two guards go
+  with it: **weight decay** shrinks every weight slightly each step, and
+  **gradient clipping** scales an unusually long gradient down (more in
+  [Configuration](#configuration)).
 - **N, D**: in training-cost and scaling formulas, N is the number of
   parameters and D the number of tokens trained on (D = steps × B × T),
   as in "training costs about 6·N·D operations". D counts tokens
@@ -222,9 +258,13 @@ Grouped so that each definition uses only terms defined above it.
   with no symbol of its own here, and D ÷ (its length) is the number of
   passes over it, which can be less than or more than 1. (Its distinct
   tokens are at most V.)
-- **step**, **batch size**, **B**: one adjustment; the number of examples
-  (for pretraining, windows of T tokens) used to compute it.
-- **epoch**: one full pass over the training data.
+- **epoch**: one full pass over the training data, every example used
+  exactly once. Not the same as the **passes** in `transformer`'s training
+  log, which count the same amount of data (tokens trained on ÷ training
+  tokens) without that guarantee: with random sampling, the default, some
+  tokens are seen twice and others never (at one pass, 37% never). With
+  `sampling = "epochs"`, passes are true epochs. See "Where the windows
+  come from" in [Step 4: train](#step-4-train).
 - **seed**: the starting value of a pseudo-random number generator; the same
   seed reproduces the same "random" numbers.
 - **pretraining**: training on a large corpus to predict the next token.
@@ -245,7 +285,9 @@ Grouped so that each definition uses only terms defined above it.
   values flatten the probabilities, so sampling picks more varied tokens.
   Temperature 0 means **greedy** decoding: always the single likeliest token.
   **Top-k**: sample only from the k likeliest tokens, so a long tail of
-  unlikely tokens can't be picked by chance.
+  unlikely tokens can't be picked by chance. (Sampling here means drawing
+  the next token; training's `sampling` setting, choosing which windows
+  to train on, is unrelated.)
 - **checkpoint**: a saved file of a model's weights (more in open decision 3).
 
 **word2vec**
@@ -558,20 +600,32 @@ the same position in its window.)
   and usually sees most tokens once or a few times. The order of each epoch
   depends only on the seed and the epoch, so resuming stays exact.
 - **Measured on the small model** (2,000 steps, 0.9 passes, the same
-  initial weights; two sampling seeds per mode):
+  initial weights, five sampling seeds per mode; on the M4 with
+  Accelerate, 3.4 minutes a run):
 
-  | Sampling | Stream seen | Seed 1 | Seed 2 | Mean |
-  |---|---|---|---|---|
-  | random | about 59% | 3.235 | 3.219 | 3.227 |
-  | epochs | 90%, each window once | 3.227 | 3.195 | 3.211 |
+  | Seed | 1 | 2 | 3 | 4 | 5 | Mean |
+  |---|---|---|---|---|---|---|
+  | random (about 59% of the stream seen) | 3.235 | 3.218 | 3.207 | 3.233 | 3.221 | 3.223 |
+  | epochs (90%, each window once) | 3.227 | 3.196 | 3.200 | 3.214 | 3.218 | 3.211 |
+  | epochs − random | −0.008 | −0.022 | −0.007 | −0.019 | −0.003 | −0.012 |
 
-  Epochs came out lower with both seeds, by 0.016 on average, the
-  direction expected from seeing more distinct text. But the two seeds of
-  one mode differ by 0.016 to 0.032, as much as the gap, so two pairs only
-  suggest it (both pairs agreeing by chance has probability 1 in 4). If
-  real, it's a small effect at this scale, and it should shrink as data
-  grows relative to the training budget: at the full run's 0.27 passes,
-  random sampling repeats only 3% of its windows.
+  - Epochs came out lower for every seed, by 0.012 on average: the
+    direction expected from training on more distinct text.
+  - But the effect is about the size of the noise: the five seeds of one
+    mode spread with a standard deviation of about 0.012. How convincing
+    the result is depends on the test. Five wins out of five, with the
+    pairs fixed by seed number in advance, would happen by chance once in
+    32 (the sign test, one-sided). A test using all ten losses instead,
+    with no pairing (the seeds of the two modes share no random numbers,
+    so pairing them by number is arbitrary), gives about 1 in 12 one-sided
+    (Mann-Whitney) or 1 in 6 two-sided (Welch's t-test).
+  - So: very likely a small real benefit, about 0.01 in loss at 0.9
+    passes, too small to see in any single run. It should shrink as the
+    data grows relative to the budget: at the full run's 0.27 passes,
+    random sampling repeats only 3% of its windows.
+  - The two machines reproduced each other to the last digit or so: my
+    runs here (on the Rust loops) gave 3.235 and 3.227 for seed 1, and
+    3.219 and 3.195 for seed 2.
 - **A long text's end can't see its beginning.** At most T − 1 earlier
   tokens are in view, so a story's 300th token never sees its first 44.
   That's the context limit.
