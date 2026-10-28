@@ -314,8 +314,10 @@ Grouped so that each definition uses only terms defined above it.
   (after temperature and top-k). Unrelated to training's `sampling`
   setting, which chooses the windows to train on.
 - **decoding strategy**: the rule for choosing the next token from the
-  logits: greedy, or sampling with a temperature and top-k (production
-  engines add others, such as top-p).
+  logits: greedy, or sampling with a temperature and top-k. Production
+  engines add others, such as **top-p** (draw only from the smallest set
+  of likeliest tokens whose probabilities add up to p, so the cut adapts
+  to how sure the model is).
 - **decode**: three meanings here. The tokenizer's **decoding**, token IDs
   back to text (see tokenizer, above); the decode phase; and a decoding
   strategy.
@@ -3431,28 +3433,55 @@ training and what follows it rerun.
 
 ## Order of work
 
-1. ~~Finish word2vec.~~ Done.
-2. Tokenizer: ~~step 2 (`--encode` writing `corpus.ids`)~~ and ~~EOS after
-   each document~~ done. Turn markers when post-training needs them.
-3. `attention/`: self-attention alone, on toy inputs, ending with one
-   complete block and then two blocks forming an induction head (see
-   [The transformer block](#the-transformer-block)). Done: all 6 items,
-   from hand-set weights to two blocks forming an induction head, and the
-   automatic differentiation tape (decision 7), checked against the
-   hand-written gradients of items 3 and 4 and used by items 5 and 6.
-4. `transformer/`: ~~build~~, ~~train~~, ~~generate~~, ~~finetune~~ (done,
-   with ~~LoRA~~ as an option), then
-   [the full TinyStories run](#the-full-tinystories-run) (done:
-   validation loss 1.52; fine-tuned, the requested words 3.76 times as
-   likely). This builds step 6 before step 5, on
-   purpose: the step numbers follow the data through the flow, not the
-   order of building. Generate works on any checkpoint, and it's the only
-   way to judge either model: fine-tuning's effect (answering in turns)
-   shows up only in generated text, so generate comes first, used on the
-   pretrained model now and to compare it with the fine-tuned one later.
-   (Fine-tuning followed, once its data was decided: decision 6.)
-5. Throughout: add each step's Makefile target as the step is built
-   (`tokenize` exists). At the end, fold this plan into `llm/README.md`.
+**Done:**
+
+1. ~~word2vec~~, the historical side branch.
+2. ~~The tokenizer~~: learning, encoding (`corpus.ids`), EOS after each
+   document, and the chat turn markers.
+3. ~~`attention/`~~: self-attention alone on toy inputs, ending with one
+   complete block and two blocks forming a hand-built induction head (see
+   [The transformer block](#the-transformer-block)), and the automatic
+   differentiation tape (decision 7), checked against the hand-written
+   gradients.
+4. ~~`transformer/`~~: build, train, generate, finetune, evaluate; step 6
+   was built before step 5 on purpose (generate is the only way to judge
+   either model, so it came first).
+5. ~~The first full TinyStories run~~: 7.4M parameters, 147M tokens,
+   validation loss 1.521; fine-tuned, the requested words 3.76 times as
+   likely ([The full TinyStories run](#the-full-tinystories-run)).
+6. ~~Additions measured along the way~~: LoRA, with embedding rows
+   ([LoRA](#lora-fine-tuning-a-low-rank-adapter)); fine-tuning's learning
+   rate and the noise equilibrium; Accelerate for the large products
+   (decision 8); epoch sampling (in [Step 4: train](#step-4-train)); the
+   Makefile's per-section dependencies and `make full-check`; `transformer
+   probe` ([Looking inside the model](#looking-inside-the-model)).
+
+**Now:**
+
+7. The second full run: 100,000 steps, 410M tokens, epoch sampling,
+   fine-tuning at 0.0005. Then its evaluation, and a probe of the finished
+   model (does the induction head in block 5 mature?).
+
+**Next, if wanted** (in the order they'd teach the most):
+
+8. **Reward-based post-training.** Learning from preferences rather than
+   imitation, the stage that makes modern assistants (see
+   [Post-training](#post-training)): DPO (direct preference optimization)
+   on pairs of replies, the preferred one using the requested words. It
+   uses the existing tape and training loop.
+9. **An open-weight model in our inference code**, to compare its stories
+   with an established engine's at matched settings. Prerequisites, from
+   [What production models add](#what-production-models-add-and-why-its-left-out):
+   RMSNorm, RoPE, SwiGLU, grouped-query attention, an untied output
+   matrix, the model's own tokenizer and chat template; and memory
+   enough to hold its weights in f32 (or a 16-bit format to add).
+10. **Smaller items:** top-p sampling; folding this plan into
+    `llm/README.md` at the end.
+
+None of the architecture refinements (RoPE and the rest) is planned on
+its own: at our scale each would change the loss by little, and [What
+production models add](#what-production-models-add-and-why-its-left-out)
+explains each in a paragraph. They become necessary only for item 9.
 
 ## Bibliography
 
