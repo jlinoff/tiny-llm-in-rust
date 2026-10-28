@@ -2308,6 +2308,30 @@ transformer probe --model model.safetensors --tokenizer tok.bpe
 transformer probe --model model.safetensors --tokenizer tok.bpe --head 1.3 --prompt "…"
 ```
 
+Or through the Makefile, which fills in the files (`make probe` for the
+small model in `out/`, `make full-probe` for the full run's):
+
+```
+make full-probe                                          # the trained model
+make full-probe PROBE_ARGS='--head 2.4'                  # another head's pattern
+make full-probe PROBE_MODEL=out-full/ckpt.safetensors    # a saved checkpoint
+make full-probe PROBE_ARGS="--prompt 'Tom and Sue went to the park. Tom and'"
+```
+
+**Probing during training.** A run's checkpoints show what it learns as it
+goes, but two things need care while it's running. Training rewrites its
+checkpoint file every `checkpoint_every` steps, so copy it right after a
+log line with a validation loss (when it has just been written) and probe
+the copy. And `make` would rebuild the program first if the sources are
+newer, replacing the file the running training uses; build a separate copy
+instead:
+
+```
+cargo build --release --features blas --manifest-path transformer/Cargo.toml --target-dir /tmp/probe-build
+cp out-full/model.safetensors out-full/ckpt.safetensors
+/tmp/probe-build/release/transformer probe --model out-full/ckpt.safetensors --tokenizer out-full/tok.bpe
+```
+
 - **Head scores**, on the standard test for copying: random words, then
   the same words again (the words drawn from the tokenizer's whole-word
   tokens, such as "␣ball": random fragments would test a story model on
@@ -2359,9 +2383,39 @@ vocabulary and the model). Twenty million tokens without a dent is long
 even so, so a fault of ours can't be ruled out yet; but the gradients pass
 their finite-difference checks and the full model writes coherent
 stories, so if it's a fault, it's subtle. The second full run's
-checkpoints are the next test: if its loss on the second copy drops, the
-model copies, and the probe's induction scores can be checked against
-that.
+checkpoints settled it (below): our training does learn induction heads;
+the tiny controls needed more scale or patience.
+
+**The second full run at step 22,000** (7.4M parameters, 90M tokens):
+
+- **Previous-token heads have formed in block 2**: heads 2.4 and 2.6
+  score 0.32, head 2.3 0.27 (attention spread evenly: about 0.02); block
+  3 has weaker ones (0.20, 0.21).
+- **An induction head is forming in block 5**, after them, as the
+  mechanism requires (it reads what the previous-token heads wrote). On
+  random words head 5.4 scores only 0.09, 4.5 times the even level, and
+  the loss on the second copy has fallen 0.6 below the first (10.68
+  against 11.27). On a real story it's unmistakable:
+
+  | Position | Current token | Its earlier occurrence, and what followed | Head 5.4 looks at | Weight |
+  |---|---|---|---|---|
+  | 37 | ␣looked | [35] ␣looked, then [36] ␣and | [36] ␣and | 0.91 |
+  | 52 | ␣Tom | [49] ␣Tom, then [50] ␣came | [50] ␣came | 0.37 |
+  | 62 | ␣find | [43] ␣find, then [44] ␣it | [44] ␣it | 0.90 |
+  | 63 | ␣your | (fuzzy: [31] ␣her, then [32] ␣ball) | [32] ␣ball | 0.70 |
+
+  Each time it finds the current word's earlier occurrence and attends to
+  the word after it, the token to predict. The young head copies well in
+  natural text but weakly in random word lists, so while a circuit forms,
+  the real-text pattern is the more telling view.
+- **The logit lens puts the answer at the same block.** After "…I can help
+  you find your", the predictions through block 4 are generic ("␣big",
+  "␣own", "␣lost"); "␣ball" appears after block 5 (28%), the block with
+  the induction head, then rises to 53% after block 6 and 100% at the
+  output (loss on the prompt 0.99, from 27.4 read straight off the
+  embeddings). Two independent views locate the same mechanism in the
+  same place: block 5 retrieves "ball" from the context, the blocks after
+  it commit to it.
 
 ## What production models add, and why it's left out
 

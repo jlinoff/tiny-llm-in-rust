@@ -411,6 +411,11 @@ from `model-init` on:
 - **One head's pattern** on the prompt (`--head BLOCK.HEAD`, by default the
   strongest induction head): where each position looks most.
 
+`make probe` and `make full-probe` run it on the trained model
+(`PROBE_MODEL` picks another checkpoint, `PROBE_ARGS` passes options).
+To probe a run while it trains, copy its checkpoint first and use a
+separately built program (PLAN.md, "Probing during training").
+
 `src/probe.rs` does one plain forward pass per sequence that keeps every
 head's attention weights and every block's output; a test checks its
 predictions against training's forward pass.
