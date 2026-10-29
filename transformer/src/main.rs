@@ -16,6 +16,8 @@ mod data;
 mod evaluate;
 mod generate;
 mod gpt;
+mod hf_tokenizer;
+mod llama;
 mod lora;
 mod model;
 mod probe;
@@ -169,6 +171,32 @@ enum Command {
         /// Override [generate] seed
         #[arg(long)]
         seed: Option<u64>,
+    },
+    /// Generate with a Llama-style open-weight model downloaded from
+    /// Hugging Face (SmolLM, for example), or check our implementation
+    /// against reference numbers from Hugging Face's own code
+    Llama {
+        /// The model's folder: config.json, model.safetensors, tokenizer.json
+        #[arg(long)]
+        model_dir: PathBuf,
+        /// The text to continue
+        #[arg(long, default_value = "")]
+        prompt: String,
+        /// Compare with tools/llama_reference.py's output instead of generating
+        #[arg(long)]
+        check: Option<PathBuf>,
+        /// Stop after this many new tokens
+        #[arg(long, default_value_t = 100)]
+        max_tokens: usize,
+        /// Sampling temperature (0: always the likeliest token)
+        #[arg(long, default_value_t = 0.8)]
+        temperature: f64,
+        /// Sample only from the k likeliest tokens (0: no cutoff)
+        #[arg(long, default_value_t = 40)]
+        top_k: usize,
+        /// Seed for the sampling
+        #[arg(long, default_value_t = 1)]
+        seed: u64,
     },
     /// Look inside a model: each head's previous-token and induction
     /// scores, one head's attention on a prompt, and the logit lens (what
@@ -329,6 +357,18 @@ fn main() -> ExitCode {
                 seed,
             },
         ),
+        Command::Llama {
+            model_dir,
+            prompt,
+            check,
+            max_tokens,
+            temperature,
+            top_k,
+            seed,
+        } => match check {
+            Some(r) => llama_check(&model_dir, &r),
+            None => llama_generate(&model_dir, &prompt, max_tokens, temperature, top_k, seed),
+        },
         Command::Probe {
             model,
             tokenizer,
@@ -931,6 +971,236 @@ fn prompt_ids(
         return Err("an empty prompt needs a tokenizer with <|endoftext|>".into());
     }
     Ok((ids, eos.into_iter().collect()))
+}
+
+fn llama_load(dir: &Path) -> Result<(llama::Llama, hf_tokenizer::HfTokenizer), String> {
+    for f in ["config.json", "model.safetensors", "tokenizer.json"] {
+        check_readable(&dir.join(f), f)?;
+    }
+    let tok = hf_tokenizer::HfTokenizer::load(&dir.join("tokenizer.json"))?;
+    let start = std::time::Instant::now();
+    let m = llama::Llama::load(dir)?;
+    if tok.vocab_size() != m.c.vocab {
+        return Err(format!(
+            "the tokenizer has {} tokens, the model {}",
+            tok.vocab_size(),
+            m.c.vocab
+        ));
+    }
+    let c = &m.c;
+    println!(
+        "Model {}: {} parameters; {} blocks, width {}, {} query heads sharing {} key/value heads (head size {}), FFN {}, V = {}, context {}",
+        dir.display(),
+        c.parameters(),
+        c.layers,
+        c.d,
+        c.heads,
+        c.kv_heads,
+        c.head_dim,
+        c.d_ff,
+        c.vocab,
+        c.context
+    );
+    println!(
+        "  loaded in {:.1} s; large matrix products: {}",
+        start.elapsed().as_secs_f64(),
+        blas::backend()
+    );
+    Ok((m, tok))
+}
+
+fn llama_generate(
+    dir: &Path,
+    prompt: &str,
+    max_tokens: usize,
+    temperature: f64,
+    top_k: usize,
+    seed: u64,
+) -> Result<(), String> {
+    use std::io::Write;
+    println!("=== transformer llama ===");
+    let (m, tok) = llama_load(dir)?;
+    let eos = tok.special("<|endoftext|>");
+    let mut ids = tok.encode(prompt)?;
+    if ids.is_empty() {
+        ids.push(eos.ok_or("an empty prompt needs <|endoftext|> to start from")?);
+    }
+    if ids.len() >= m.c.context {
+        return Err(format!(
+            "the prompt is {} tokens; the context is {}",
+            ids.len(),
+            m.c.context
+        ));
+    }
+    println!(
+        "Sampling: temperature {temperature}, top-k {top_k}, seed {seed}, at most {max_tokens} tokens; prompt {} tokens\n",
+        ids.len()
+    );
+    print!("{prompt}");
+    let mut g = llama::LlamaGenerator::new(&m);
+    let mut rng = rng::Rng::new(seed);
+    let mut out = generate::Utf8Stream::default();
+    let t0 = std::time::Instant::now();
+    let mut logits = g.feed(&ids, false);
+    let prefill = t0.elapsed().as_secs_f64();
+    let t1 = std::time::Instant::now();
+    let mut made = 0;
+    let mut stopped = false;
+    while made < max_tokens && g.len() < m.c.context {
+        let scores: Vec<f64> = logits.row(0).iter().map(|&v| v as f64).collect();
+        let next = generate::sample(&scores, temperature, top_k, &mut rng);
+        made += 1;
+        if Some(next) == eos {
+            stopped = true;
+            break;
+        }
+        print!("{}", out.push(&tok.token_bytes(next)));
+        std::io::stdout().flush().ok();
+        if g.len() >= m.c.context {
+            break;
+        }
+        logits = g.feed(&[next], false);
+    }
+    print!("{}", out.finish());
+    let decode = t1.elapsed().as_secs_f64();
+    println!(
+        "\n\n{}",
+        if stopped {
+            format!("Stopped at <|endoftext|> after {made} tokens.")
+        } else {
+            format!("Stopped after {made} tokens.")
+        }
+    );
+    println!(
+        "  prefill: {} tokens in {:.0} ms; decode: {made} tokens in {:.1} s ({:.0} tokens/s)",
+        ids.len(),
+        prefill * 1e3,
+        decode,
+        made as f64 / decode.max(1e-9)
+    );
+    Ok(())
+}
+
+/// Compare with Hugging Face's numbers (tools/llama_reference.py): token
+/// IDs, every position's next-token log-probability, the last position's
+/// scores, and a greedy continuation.
+fn llama_check(dir: &Path, reference: &Path) -> Result<(), String> {
+    println!("=== transformer llama --check ===");
+    check_readable(reference, "reference")?;
+    let (m, tok) = llama_load(dir)?;
+    let text =
+        fs::read_to_string(reference).map_err(|e| format!("{}: {e}", reference.display()))?;
+    let r: serde_json::Value =
+        serde_json::from_str(&text).map_err(|e| format!("{}: {e}", reference.display()))?;
+    let ids_of = |v: &serde_json::Value| -> Vec<usize> {
+        v.as_array()
+            .map(|a| {
+                a.iter()
+                    .filter_map(|x| x.as_u64())
+                    .map(|x| x as usize)
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    let mut failures = 0;
+
+    // 1. The tokenizer.
+    let cases = r["tokenize"].as_array().ok_or("no tokenize cases")?;
+    let mut same = 0;
+    for c in cases {
+        let text = c["text"].as_str().unwrap_or_default();
+        let want = ids_of(&c["ids"]);
+        let got = tok.encode(text)?;
+        if got == want {
+            same += 1;
+        } else {
+            failures += 1;
+            println!("  tokenizer differs on {text:?}:\n    ours {got:?}\n    theirs {want:?}");
+        }
+        if tok.decode(&got) != text {
+            println!("  (decoding {text:?} doesn't give it back)");
+        }
+    }
+    println!(
+        "\nTokenizer: identical IDs for {same} of {} texts",
+        cases.len()
+    );
+
+    // 2. The model.
+    println!("\nModel, prompt by prompt:");
+    println!(
+        "  {:>6} {:>22} {:>22} {:>16}",
+        "tokens", "largest log-prob diff", "largest logit diff", "greedy same for"
+    );
+    let (mut worst_lp, mut worst_logit) = (0.0f64, 0.0f64);
+    for p in r["prompts"].as_array().ok_or("no prompts")? {
+        let text = p["text"].as_str().unwrap_or_default();
+        let ids = ids_of(&p["ids"]);
+        if tok.encode(text)? != ids {
+            failures += 1;
+            println!("  prompt {text:?}: our token IDs differ; skipped");
+            continue;
+        }
+        let mut g = llama::LlamaGenerator::new(&m);
+        let all = g.feed(&ids, true);
+        let mut lp_diff = 0.0f64;
+        for (t, want) in p["next_logprob"]
+            .as_array()
+            .ok_or("no next_logprob")?
+            .iter()
+            .enumerate()
+        {
+            let row = all.row(t);
+            let max = row.iter().fold(f32::NEG_INFINITY, |a, &b| a.max(b)) as f64;
+            let z: f64 = row.iter().map(|&v| (v as f64 - max).exp()).sum();
+            let ours = row[ids[t + 1]] as f64 - max - z.ln();
+            lp_diff = lp_diff.max((ours - want.as_f64().unwrap_or(f64::NAN)).abs());
+        }
+        let last = all.row(ids.len() - 1);
+        let logit_diff = p["last_logits"]
+            .as_array()
+            .ok_or("no last_logits")?
+            .iter()
+            .zip(last)
+            .map(|(w, &o)| (o as f64 - w.as_f64().unwrap_or(f64::NAN)).abs())
+            .fold(0.0, f64::max);
+        // Greedy continuation, through the KV cache, token by token.
+        let want = ids_of(&p["greedy"]);
+        let mut logits = tensor::Mat::from_vec(1, last.len(), last.to_vec());
+        let mut agree = 0;
+        for &w in &want {
+            let next = probe::argmax(logits.row(0));
+            if next != w {
+                break;
+            }
+            agree += 1;
+            logits = g.feed(&[next], false);
+        }
+        worst_lp = worst_lp.max(lp_diff);
+        worst_logit = worst_logit.max(logit_diff);
+        println!(
+            "  {:>6} {lp_diff:>22.2e} {logit_diff:>22.2e} {:>10} of {}",
+            ids.len(),
+            agree,
+            want.len()
+        );
+        if agree < want.len() {
+            println!(
+                "    greedy text diverges after {agree} tokens: {:?}",
+                tok.decode(&want[..agree])
+            );
+        }
+    }
+    let ok = failures == 0 && worst_lp < 1e-3 && worst_logit < 1e-2;
+    println!(
+        "\n{}: largest log-probability difference {worst_lp:.2e}, largest logit difference {worst_logit:.2e}",
+        if ok { "Matches the reference" } else { "Doesn't match the reference" }
+    );
+    if ok {
+        Ok(())
+    } else {
+        Err("see the differences above".into())
+    }
 }
 
 /// A token for display: its text with a leading space as ␣ and a newline

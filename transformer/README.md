@@ -393,6 +393,31 @@ against the layout that config implies: every expected name present, with
 the right shape, and nothing unexpected. It ends with the weights
 fingerprint. `-v` lists every tensor.
 
+## `transformer llama`
+
+```
+transformer llama --model-dir models/SmolLM-135M --prompt TEXT [--max-tokens 100] [--temperature 0.8] [--top-k 40] [--seed 1]
+transformer llama --model-dir models/SmolLM-135M --check reference.json
+make llama LLAMA_DIR=models/SmolLM-135M PROMPT='Once upon a time'
+make llama-check LLAMA_DIR=models/SmolLM-135M
+```
+
+Runs a Llama-style open-weight model downloaded from Hugging Face (PLAN.md,
+"The endpoint: an open-weight model"): its folder holds `config.json`,
+`model.safetensors` and `tokenizer.json`. `src/llama.rs` is a second,
+inference-only path with the modern pieces our model lacks (RMSNorm, RoPE,
+SwiGLU, grouped-query attention), and `src/hf_tokenizer.rs` reads Hugging
+Face's byte-level BPE. Only what SmolLM-style models need is supported, and
+anything else in the config (biases, RoPE scaling, an untied output layer,
+other tokenizer features) is refused with a message rather than guessed.
+
+`--check` compares with reference numbers written by
+`tools/llama_reference.py` from Hugging Face's own code (`pip install
+transformers torch`): token IDs, every position's next-token
+log-probability, the last position's scores and greedy continuations. For
+SmolLM-135M everything matches to f32 rounding (about 6 × 10⁻⁵ in the
+scores), and the greedy text is identical.
+
 ## `transformer probe`
 
 ```
@@ -592,6 +617,8 @@ newer Unicode version could still be classed differently.
 - `src/evaluate.rs`: word matching and the tally for `evaluate`
 - `src/lora.rs`: LoRA adapters: creating, merging, checking
 - `src/probe.rs`: looking inside a model: head scores, the logit lens, attention patterns
+- `src/llama.rs`: a Llama-style open-weight model, for inference (the endpoint)
+- `src/hf_tokenizer.rs`: Hugging Face's byte-level BPE tokenizer (`tokenizer.json`)
 - `src/bench.rs`: the matrix-multiply benchmark and the training-step timing
 - `src/rng.rs`: the seeded random number generator (from attention/)
 

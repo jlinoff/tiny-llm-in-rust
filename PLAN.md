@@ -61,6 +61,7 @@ names are explained where they first appear.
 - [word2vec: the historical side branch](#word2vec-the-historical-side-branch)
 - [Open decisions](#open-decisions)
 - [The full TinyStories run](#the-full-tinystories-run)
+- [The endpoint: an open-weight model](#the-endpoint-an-open-weight-model)
 - [Order of work](#order-of-work)
 - [Bibliography](#bibliography)
   - [Tokenization (tokenizer/)](#tokenization-tokenizer)
@@ -2789,7 +2790,8 @@ llm/
 ├── chat/          # make_chat.py: fine-tuning conversations from the stories
 ├── tools/         # toc.py: this file's table of contents and link check (make toc);
 │                  # config_section.py: one config section per file, for make;
-│                  # sampling-test.sh: random against epoch sampling, five seeds
+│                  # sampling-test.sh: random against epoch sampling, five seeds;
+│                  # llama_reference.py: Hugging Face's numbers for the endpoint
 ├── word2vec/      # word vectors, the historical precursor
 ├── attention/     # self-attention on its own, then a look at one full block
 └── transformer/   # the model: build, train, finetune, generate
@@ -3431,6 +3433,85 @@ first run's files are kept in `out-full-36k/` for comparison; the second
 reuses its tokenizer, encoded corpus, initial model and chat data, so only
 training and what follows it rerun.
 
+## The endpoint: an open-weight model
+
+The project's last test: a model someone else trained, published on Hugging
+Face, run by our own code. **SmolLM-135M** (Hugging Face, 2024) is a
+Llama-style model of 134,515,008 parameters: 30 blocks, width 576, 9 query
+heads sharing 3 key/value heads (head size 64), a SwiGLU feed-forward
+network of width 1,536, a vocabulary of 49,152, a context of 2,048 tokens,
+its output layer tied to its embeddings. It was trained in bfloat16 and
+published in f32: the low 16 bits of every number are zero, so the 513 MB
+file compresses to 227 MB.
+
+```
+transformer llama --model-dir models/SmolLM-135M --prompt "Once upon a time"
+python3 tools/llama_reference.py models/SmolLM-135M -o models/SmolLM-135M/reference.json
+transformer llama --model-dir models/SmolLM-135M --check models/SmolLM-135M/reference.json
+make llama LLAMA_DIR=models/SmolLM-135M PROMPT='Once upon a time'
+make llama-check LLAMA_DIR=models/SmolLM-135M
+```
+
+**What had to be added** (`src/llama.rs`, `src/hf_tokenizer.rs`), each
+piece explained in [What production models add](#what-production-models-add-and-why-its-left-out):
+
+- **RMSNorm** in place of layer norm; **no biases** anywhere.
+- **RoPE** in place of the position table, in Hugging Face's layout
+  (component j of a head turns together with component j + h/2). A test
+  checks the property that makes it work: a query–key dot product depends
+  only on the distance between their positions.
+- **SwiGLU**: W_down·(SiLU(W_gate·z) ⊙ W_up·z), with SiLU(x) = x·sigmoid(x).
+- **Grouped-query attention**: each of the 3 key/value heads serves 3
+  query heads, so the KV cache is a third the size.
+- **Hugging Face's files**: matrices stored as (out × in), PyTorch's
+  convention, transposed on loading; our own safetensors reader read the
+  file unchanged.
+- **Its tokenizer** (`tokenizer.json`): byte-level BPE like ours, but with
+  IDs from a vocabulary table (the 17 special tokens first), tokens written
+  in GPT-2's printable byte alphabet ("Ġ" for a space), and every digit
+  split off before GPT-2's pattern.
+
+Our own model's code (training, the tape, `generate`) is untouched: this is
+a second, inference-only path, sharing the matrix products (Accelerate
+included), sampling and UTF-8 streaming.
+
+**The check.** `tools/llama_reference.py` runs the same model with Hugging
+Face's own code (the `transformers` library, on PyTorch) and records token
+IDs for 12 tricky texts, every position's next-token log-probability for 4
+prompts, the last position's 49,152 scores, and 40-token greedy
+continuations. Against it, on the first attempt:
+
+| | Result |
+|---|---|
+| Token IDs (digits, Unicode, emoji, whitespace runs, contractions, special tokens) | identical on 12 of 12 texts |
+| Next-token log-probabilities, every position | within 2.4 × 10⁻⁵ |
+| Last-position scores | within 6.2 × 10⁻⁵ |
+| Greedy continuations | identical, 40 of 40 tokens, on all 4 prompts |
+
+The differences are f32 rounding: the two implementations add in different
+orders. Everything from the tokenizer through attention, RoPE, the KV cache
+and the output layer agrees with the reference, so the inference path
+built for our TinyStories models is, in substance, the one real models use.
+
+**What it writes.** SmolLM-135M is a base model, trained on web text, code
+and textbooks, not fine-tuned for conversation, so it continues text
+rather than answering. Greedily, "Once upon a time there was an itty bitty
+llm on m4 macbook pro that was trying to run inference like the big boys"
+becomes a programming forum post (". I was trying to figure out how to get
+the llm to run inference, but I couldn't figure out how to do it. I tried
+to use the following code:" and a Python code block); "The capital of
+France is" continues " Paris. It is the largest city in France and the
+second largest". Sampled at temperature 0.8, it writes a rambling but
+fluent story about an "AIE version" of inference. Compare our TinyStories
+models on the same prompt, which turn it into a story about a little girl
+at the beach: the model decides what the text knows, not the engine.
+
+**Speed.** In this project's cloud workspace (2 cores, Rust loops): 11
+tokens per second, the model loaded in 1.6 s. Decoding reads all 538 MB of
+weights for every token, so its speed is bounded by memory bandwidth, the
+reason production engines use 16-bit or quantized weights (see the
+Inference part of [What production models add](#what-production-models-add-and-why-its-left-out)).
+
 ## Order of work
 
 **Done:**
@@ -3464,28 +3545,10 @@ training and what follows it rerun.
 
 **The endpoint:**
 
-8. **A real open-weight model in our inference code.** Download a small
-   published model and generate from it with `transformer`, the final
-   test of everything built here: given the same weights and prompt, our
-   next-token probabilities must match the reference implementation's to
-   within rounding, which validates attention, the KV cache, the tokenizer
-   and sampling against the outside world rather than only against our own
-   tests. A small model keeps it practical: SmolLM-135M, for example, is a
-   Llama-style model of 135M parameters (30 blocks, width 576, 9 query
-   heads sharing 3 key/value heads, a vocabulary of 49,152, a context of
-   2,048, its output layer tied to its embeddings as ours is), about
-   540 MB in f32. What it takes, each piece with its own test:
-   - the architecture pieces (see
-     [What production models add](#what-production-models-add-and-why-its-left-out)):
-     RMSNorm, RoPE, SwiGLU, grouped-query attention;
-   - loading Hugging Face's safetensors files (their names and layout),
-     converting bf16, a 16-bit float format, to f32;
-   - its tokenizer, a byte-level BPE much like ours, read from Hugging
-     Face's `tokenizer.json`, with its byte mapping and special tokens;
-   - the check: our probabilities against a reference on a few prompts
-     (Hugging Face's `transformers` library, run once, or llama.cpp's
-     greedy output), then coherent text, then a comparison with an
-     established engine's stories at matched settings.
+8. ~~A real open-weight model in our inference code~~: SmolLM-135M, its
+   tokenizer and every prediction matching Hugging Face's own code to
+   f32 rounding, greedy text identical (see
+   [The endpoint](#the-endpoint-an-open-weight-model)).
 
 **Optional, after it:**
 
@@ -3500,8 +3563,8 @@ training and what follows it rerun.
 None of the architecture refinements (RoPE and the rest) is planned for
 our own models: at our scale each would change the loss by little, and
 [What production models add](#what-production-models-add-and-why-its-left-out)
-explains each in a paragraph. They're built for item 8, where a real
-model needs them.
+explains each in a paragraph. They were built for item 8, where a real
+model needs them, in an inference-only path (`src/llama.rs`).
 
 ## Bibliography
 
@@ -3748,5 +3811,5 @@ for language research.
 - Alammar, J. "The Illustrated Transformer" (2018), a blog post. The standard
   visual introduction to attention.
 - Hugging Face, SmolLM-135M (2024), a small open-weight Llama-style model;
-  its configuration: https://huggingface.co/HuggingFaceTB/SmolLM-135M. The
-  candidate for the endpoint (Order of work, item 8).
+  https://huggingface.co/HuggingFaceTB/SmolLM-135M. The model of
+  [The endpoint](#the-endpoint-an-open-weight-model).

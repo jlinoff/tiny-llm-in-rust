@@ -179,6 +179,28 @@ probe: $(TRANSFORMER) ## Look inside the trained model: head scores, logit lens,
 	@test -f $(PROBE_MODEL) || { echo "no $(PROBE_MODEL): run make train first"; exit 1; }
 	$(TRANSFORMER) probe --model $(PROBE_MODEL) --tokenizer $(OUT)/tok.bpe $(PROBE_ARGS)
 
+# The endpoint (PLAN.md, "The endpoint: an open-weight model"): a Llama-style
+# model downloaded from Hugging Face, such as SmolLM-135M, run by our own
+# code. LLAMA_DIR is the model's folder (config.json, model.safetensors,
+# tokenizer.json); LLAMA_ARGS passes options, such as '--temperature 0'.
+# make llama-check compares with $(LLAMA_DIR)/reference.json, written by
+# tools/llama_reference.py (which needs transformers and PyTorch).
+LLAMA_DIR ?=
+LLAMA_ARGS ?=
+
+.PHONY: llama
+llama: $(TRANSFORMER) ## The endpoint: generate with an open-weight model (LLAMA_DIR, PROMPT).
+	$(call hdr,$@)
+	@test -n "$(LLAMA_DIR)" || { echo "set LLAMA_DIR to the model's folder"; exit 1; }
+	$(TRANSFORMER) llama --model-dir $(LLAMA_DIR) --prompt '$(PROMPT)' $(LLAMA_ARGS)
+
+.PHONY: llama-check
+llama-check: $(TRANSFORMER) ## Check the open-weight model against Hugging Face's numbers.
+	$(call hdr,$@)
+	@test -n "$(LLAMA_DIR)" || { echo "set LLAMA_DIR to the model's folder"; exit 1; }
+	@test -f $(LLAMA_DIR)/reference.json || { echo "no $(LLAMA_DIR)/reference.json: run python3 tools/llama_reference.py $(LLAMA_DIR) -o $(LLAMA_DIR)/reference.json"; exit 1; }
+	$(TRANSFORMER) llama --model-dir $(LLAMA_DIR) --check $(LLAMA_DIR)/reference.json
+
 # Step 6. generate (inference)
 # Always runs (nothing is written). Override the prompt or the sampling:
 #   make generate PROMPT='Once upon a time' GEN_ARGS='--temperature 0.5 --seed 7'
@@ -324,6 +346,8 @@ help:  ## This help message.
 	@printf "   %-18s  %s\n" "EVAL_ARGS" "$(EVAL_ARGS)"
 	@printf "   %-18s  %s\n" "FORCE" "$(FORCE)   (1 lets make full-clean delete out-full/)"
 	@printf "   %-18s  %s\n" "GEN_ARGS" "$(GEN_ARGS)"
+	@printf "   %-18s  %s\n" "LLAMA_ARGS" "$(LLAMA_ARGS)"
+	@printf "   %-18s  %s\n" "LLAMA_DIR" "$(LLAMA_DIR)"
 	@printf "   %-18s  %s\n" "LORA_ARGS" "$(LORA_ARGS)"
 	@printf "   %-18s  %s\n" "MERGES" "$(MERGES)"
 	@printf "   %-18s  %s\n" "OUT" "$(OUT)"
