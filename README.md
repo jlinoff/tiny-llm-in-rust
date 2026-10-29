@@ -1,4 +1,5 @@
 # tiny-llm-in-rust: a small language model, built from scratch to learn how LLMs work
+
 [![Release](https://img.shields.io/github/v/release/jlinoff/tiny-llm-in-rust)](https://github.com/jlinoff/tiny-llm-in-rust/releases)
 [![Workflow](https://github.com/jlinoff/tiny-llm-in-rust/actions/workflows/main.yaml/badge.svg)](https://github.com/jlinoff/tiny-llm-in-rust/actions/workflows/main.yaml)
 
