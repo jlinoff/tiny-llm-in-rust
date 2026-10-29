@@ -1,5 +1,5 @@
 *~
-data/
+/data/
 target/
 out/
 out-full/
@@ -7,7 +7,3 @@ out-check/
 hugging_face/models/
 .DS_Store
 __pycache__/
-
-# test fixtures the Rust tests read at compile time
-!transformer/tests/data/
-!transformer/tests/data/**
