@@ -1345,33 +1345,49 @@ fn probe_command(
     );
     println!("  loss on the first copy:  {first:.3}");
     println!(
-        "  loss on the second copy: {second:.3}   (the drop is what copying from the first copy buys)"
+        "  loss on the second copy: {second:.3}   (lower than the first if the model copies from it)"
     );
-    ch.sort_by(|a, b| b.ablation.total_cmp(&a.ablation));
+    ch.sort_by(|a, b| b.copying().total_cmp(&a.copying()));
     println!(
-        "\n  heads ranked by how much the second copy's loss rises without them (top 10 of {})",
+        "\n  heads ranked by their part in the repeat: the loss rise on the second copy minus on the first,"
+    );
+    println!(
+        "  without the head (a head important for language in general raises both; top 10 of {})",
         ch.len()
     );
     println!(
-        "  {:>5} {:>5} {:>10} {:>10}",
-        "rank", "head", "loss rise", "induction"
+        "  {:>5} {:>5} {:>10} {:>12} {:>12} {:>10}",
+        "rank", "head", "repeat", "rise, 2nd", "rise, 1st", "induction"
     );
     for (r, h) in ch.iter().take(10).enumerate() {
         println!(
-            "  {:>5} {:>5} {:>+10.3} {:>10.2}",
+            "  {:>5} {:>5} {:>+10.3} {:>+12.3} {:>+12.3} {:>10.2}",
             r + 1,
             format!("{}.{}", h.block, h.head),
-            h.ablation,
+            h.copying(),
+            h.rise_second,
+            h.rise_first,
             h.attention
         );
     }
+    let most = ch
+        .iter()
+        .max_by(|a, b| a.rise_second.total_cmp(&b.rise_second))
+        .expect("at least one head");
     let top_att = ch
         .iter()
         .max_by(|a, b| a.attention.total_cmp(&b.attention))
         .expect("at least one head");
     println!(
-        "  strongest induction attention on this text: head {}.{} ({:.2}), loss rise {:+.3} without it",
-        top_att.block, top_att.head, top_att.attention, top_att.ablation
+        "  most important overall: head {}.{} (rises {:+.3} and {:+.3})",
+        most.block, most.head, most.rise_first, most.rise_second
+    );
+    println!(
+        "  strongest induction attention on this text: head {}.{} ({:.2}), repeat effect {:+.3}",
+        top_att.block,
+        top_att.head,
+        top_att.attention,
+        top_att.copying()
     );
     println!(
         "  (induction: attention, in the second copy, to the token after the current token's earlier occurrence)"

@@ -2386,8 +2386,10 @@ cp out-full/model.safetensors out-full/ckpt.safetensors
 - **Copying real text, head by head**: the prompt followed by the same
   text again, in-distribution where random words aren't. The model's loss
   on each copy, then every head **ablated** (switched off: its output set
-  to zero) in turn, and ranked by how much the second copy's loss rises
-  without it, beside its induction attention on this text. Ablation is
+  to zero) in turn: the loss rise on each copy without it, and its
+  **repeat effect**, the second copy's rise minus the first's (a head that
+  matters for language in general raises both), beside its induction
+  attention on this text. Heads are ranked by the repeat effect. Ablation is
   causal where attention is only suggestive: a head attending the right
   way whose output nothing uses scores high on attention and near zero on
   ablation, and a head doing the copying through a less tidy pattern
@@ -2491,6 +2493,19 @@ would mature. It didn't:
   directions the output layer doesn't read, so reading them directly
   fails. The fix in research is a "tuned lens", a small learned
   translation per layer.
+- **And it doesn't copy repeated real text.** On its prompt repeated, the
+  second copy is *harder* (loss 1.068 against 0.913), as for the small
+  model: TinyStories never repeats a story word for word, so the model
+  has no reason to expect a repeat. Copying in this corpus is small-scale,
+  a name or phrase recurring within one story, which is what the
+  random-word test's modest gain (0.65) and head 5.4's few remaining
+  matches ("find" to "it", "your" to "ball") show.
+- **A lesson about ablation.** The first version of the ranking ordered
+  heads by how much the *second* copy's loss rose without them, and put
+  heads 1.7 (+0.77), 0.5 and 0.6 on top. But those raise the first copy's
+  loss as much: they matter for language in general, not for the repeat.
+  The ranking now uses the rise on the second copy minus the rise on the
+  first, the part specific to repetition, and shows both.
 
 ## What production models add, and why it's left out
 
@@ -3582,7 +3597,25 @@ continuations. Against it, on the first attempt:
 | Greedy continuations | identical, 40 of 40 tokens, on all 4 prompts |
 
 The differences are f32 rounding: the two implementations add in different
-orders. Everything from the tokenizer through attention, RoPE, the KV cache
+orders. On the M4 with Accelerate, which rounds differently again, the
+model matched as closely (log-probabilities within 6.9 × 10⁻⁵, scores
+within 4.0 × 10⁻⁵, every greedy continuation identical).
+
+**One disagreement, and it was Hugging Face's.** On the M4 one tokenizer
+test first failed: "Fullwidth and other digits: ４２ ٣ ½ Ⅻ". The
+reference there kept the space before ٣, ½ and Ⅻ attached to them, as if
+they weren't digits, where ours splits each off. The cause: the model's
+folder also holds `tokenizer_config.json`, naming the class
+`GPT2Tokenizer`, and `transformers` 5 rebuilt that class with GPT-2's own
+pre-tokenizer, dropping `tokenizer.json`'s Digits step (in a folder
+without that file, as in this project's workspace, it reads
+`tokenizer.json` as written, and agreed with ours). Hugging Face's
+`tokenizers` library, reading `tokenizer.json` directly, gives our IDs
+everywhere. Ordinary digits come out the same either way (SmolLM's
+vocabulary has no merged digit tokens), so only numerals outside ASCII
+are affected. The reference script now takes its IDs from `tokenizer.json`
+through `tokenizers`, the file that describes how the model was trained. A
+check is only as good as its reference. Everything from the tokenizer through attention, RoPE, the KV cache
 and the output layer agrees with the reference, so the inference path
 built for our TinyStories models is, in substance, the one real models use.
 

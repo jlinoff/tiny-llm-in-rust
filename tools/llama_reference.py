@@ -6,7 +6,8 @@ and writes what our implementation must reproduce (PLAN.md, Order of work,
 the endpoint):
 
 - token IDs for a set of tricky strings (digits, whitespace, Unicode,
-  contractions, special tokens), from the model's own tokenizer;
+  contractions, special tokens), from the model's `tokenizer.json` read by
+  Hugging Face's `tokenizers` library;
 - for a few prompts: the log-probability of each actual next token at every
   position, the full scores (logits) at the last position, and a 40-token
   greedy continuation.
@@ -15,10 +16,18 @@ the endpoint):
     transformer llama --model-dir MODEL_DIR --check reference.json
 
 Needs `pip install transformers torch` (in a virtual environment).
+
+Token IDs come from `tokenizer.json` itself, not from `transformers`'
+AutoTokenizer: when the folder also holds a `tokenizer_config.json` naming
+a tokenizer class (SmolLM's says GPT2Tokenizer), transformers 5 rebuilds
+that class with its own pre-tokenizer, which drops `tokenizer.json`'s
+Digits step and splits non-ASCII numerals (٣, ½, Ⅻ) differently from how
+the model was trained.
 """
 
 import argparse
 import json
+import os
 import sys
 
 TOKENIZE = [
@@ -45,7 +54,7 @@ PROMPTS = [
 ]
 
 
-def main():
+def main():  # pylint: disable=too-many-locals
     """Run the model on the test texts and prompts, and write the JSON."""
     ap = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
     ap.add_argument("model_dir",
@@ -55,17 +64,22 @@ def main():
     a = ap.parse_args()
 
     import torch  # pylint: disable=import-outside-toplevel
-    from transformers import AutoModelForCausalLM, AutoTokenizer  # pylint: disable=import-outside-toplevel
+    from tokenizers import Tokenizer  # pylint: disable=import-outside-toplevel
+    from transformers import AutoModelForCausalLM  # pylint: disable=import-outside-toplevel
 
-    tok = AutoTokenizer.from_pretrained(a.model_dir)
+    tok = Tokenizer.from_file(os.path.join(a.model_dir, "tokenizer.json"))
+
+    def encode(text):
+        return tok.encode(text, add_special_tokens=False).ids
+
     model = AutoModelForCausalLM.from_pretrained(a.model_dir, dtype=torch.float32)
     model.eval()
     out = {"model_dir": a.model_dir, "tokenize": [], "prompts": []}
     for text in TOKENIZE:
-        out["tokenize"].append({"text": text, "ids": tok(text, add_special_tokens=False).input_ids})
+        out["tokenize"].append({"text": text, "ids": encode(text)})
     with torch.no_grad():
         for text in PROMPTS:
-            ids = tok(text, add_special_tokens=False).input_ids
+            ids = encode(text)
             logits = model(torch.tensor([ids])).logits[0]
             logp = torch.log_softmax(logits, dim=-1)
             next_logp = [logp[t, ids[t + 1]].item() for t in range(len(ids) - 1)]

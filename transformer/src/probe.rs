@@ -274,14 +274,25 @@ pub struct CopyHead {
     /// In the second copy: mean attention to the token after the current
     /// token's earlier occurrence (the induction pattern).
     pub attention: f64,
-    /// How much the loss on the second copy rises with the head ablated.
-    pub ablation: f64,
+    /// How much the loss on the first copy, and on the second, rises with
+    /// the head ablated.
+    pub rise_first: f64,
+    pub rise_second: f64,
+}
+
+impl CopyHead {
+    /// The part of the head's effect specific to the repeat: the second
+    /// copy's rise minus the first's. A head that matters for language in
+    /// general raises both; a head that copies raises only the second.
+    pub fn copying(&self) -> f64 {
+        self.rise_second - self.rise_first
+    }
 }
 
 /// Copying on real text: `story` (no start token) repeated twice after
 /// `start`, cut so the whole fits the context. Returns the losses on the
 /// first and second copies, and every head's induction attention and
-/// ablation effect on the second copy.
+/// ablation effect on each copy.
 pub fn copy_heads<T: Float>(
     p: &Params<T>,
     c: &ModelConfig,
@@ -315,7 +326,8 @@ pub fn copy_heads<T: Float>(
                 block: b,
                 head: h,
                 attention,
-                ablation: loss(&ablated, l) - second,
+                rise_first: loss(&ablated, 0) - first,
+                rise_second: loss(&ablated, l) - second,
             });
         }
     }
