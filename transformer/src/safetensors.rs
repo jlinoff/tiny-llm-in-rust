@@ -69,7 +69,7 @@ pub fn encode(tensors: &[Tensor], metadata: &BTreeMap<String, String>) -> Vec<u8
     }
     let mut text = Value::Object(header).to_string().into_bytes();
     // Pad the header with spaces so the byte buffer starts 8-byte aligned.
-    while (8 + text.len()) % 8 != 0 {
+    while !(8 + text.len()).is_multiple_of(8) {
         text.push(b' ');
     }
     let mut out = Vec::with_capacity(8 + text.len() + offset);

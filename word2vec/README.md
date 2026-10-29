@@ -42,7 +42,7 @@ Used throughout; each uses only terms defined before it.
 
 ## Requirements
 
-- Rust 1.85 or later (`cargo`). The only dependency is `clap`, for the command
+- Rust 1.87 or later (`cargo`). The only dependency is `clap`, for the command
   line.
 - For the exploration scripts: Python 3 with gensim (a widely used Python
   library that includes its own word2vec) and NumPy:

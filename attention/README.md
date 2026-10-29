@@ -17,7 +17,7 @@ cargo build --release
 cargo test --release
 ```
 
-Rust 1.85 or later; the only dependency is `clap`, for the command line.
+Rust 1.87 or later; the only dependency is `clap`, for the command line.
 All arithmetic uses 64-bit floats: at these sizes speed doesn't matter, and
 the extra precision keeps the checks clean.
 

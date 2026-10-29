@@ -95,7 +95,7 @@ impl LlamaConfig {
                 .ok_or(bad("rms_norm_eps missing".into()))? as f32,
             rope_theta: j["rope_theta"].as_f64().unwrap_or(10000.0),
         };
-        if c.heads % c.kv_heads != 0 || c.head_dim % 2 != 0 {
+        if !c.heads.is_multiple_of(c.kv_heads) || !c.head_dim.is_multiple_of(2) {
             return Err(bad(
                 "heads must be a multiple of kv_heads, head_dim even".into()
             ));

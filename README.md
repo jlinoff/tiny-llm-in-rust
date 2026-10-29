@@ -40,7 +40,7 @@ document each program.
 
 ## Requirements
 
-- Rust 1.85 or later (`cargo`), Python 3.8 or later (standard library only),
+- Rust 1.87 or later (`cargo`), Python 3.8 or later (standard library only),
   GNU make, and `curl` for the downloads. On macOS, Apple's `make` is too
   old: `brew install make` and use `gmake`.
 - On macOS, Apple's Accelerate library is used for large matrix products

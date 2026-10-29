@@ -359,7 +359,7 @@ mod tests {
             fn pick(l: &mut Lora<f64>, k: usize) -> &mut Mat<f64> {
                 if k == 2 * l.a.len() {
                     l.emb_delta.as_mut().unwrap()
-                } else if k % 2 == 0 {
+                } else if k.is_multiple_of(2) {
                     &mut l.a[k / 2]
                 } else {
                     &mut l.b[k / 2]

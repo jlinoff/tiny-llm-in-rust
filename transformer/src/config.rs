@@ -52,7 +52,7 @@ impl ModelConfig {
                 return Err(format!("[model] {name} must be at least 1"));
             }
         }
-        if self.d_model % self.heads != 0 {
+        if !self.d_model.is_multiple_of(self.heads) {
             return Err(format!(
                 "[model] heads ({}) must divide d_model ({})",
                 self.heads, self.d_model

@@ -624,11 +624,11 @@ pub fn run_with(
         win.steps += 1;
         let s = state.step;
         let last = s == t.steps;
-        let evaluate = s % t.eval_every == 0 || last;
+        let evaluate = s.is_multiple_of(t.eval_every) || last;
         if evaluate {
             last_valid = validation_loss(&state, c, valid, seq);
         }
-        if s % t.log_every == 0 || last || evaluate {
+        if s.is_multiple_of(t.log_every) || last || evaluate {
             let mean = win.loss_sum / win.steps as f64;
             let secs = win.start.elapsed().as_secs_f64();
             let tps = tokens_per_step * win.steps as f64 / secs;
@@ -647,7 +647,7 @@ pub fn run_with(
             last_loss = Some(mean);
             win = Window::new();
         }
-        if s % t.checkpoint_every == 0 || last {
+        if s.is_multiple_of(t.checkpoint_every) || last {
             save(output, &state, prov, last_loss, last_valid)?;
         }
     }

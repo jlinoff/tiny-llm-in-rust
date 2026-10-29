@@ -16,7 +16,7 @@ cargo build --release
 cargo test --release
 ```
 
-Rust 1.85 or later. Dependencies: `clap` (command line), `serde` with `toml`
+Rust 1.87 or later. Dependencies: `clap` (command line), `serde` with `toml`
 (the config) and `serde_json` (the safetensors header), `sha2` (the
 tokenizer fingerprint), `fancy-regex` (the tokenizer's pre-tokenizer
 pattern, which needs a lookahead), and `rayon` (threads). The binary is

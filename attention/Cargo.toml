@@ -2,7 +2,7 @@
 name = "mini_attention"
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.85"
+rust-version = "1.87"
 description = "Self-attention, small enough to print every number, written for understanding"
 
 [dependencies]
