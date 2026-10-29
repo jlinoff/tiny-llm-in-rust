@@ -3,5 +3,6 @@ data/
 target/
 out/
 out-full/
+hugging_face/models/
 .DS_Store/
 __pycache__/
