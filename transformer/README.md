@@ -396,10 +396,10 @@ fingerprint. `-v` lists every tensor.
 ## `transformer llama`
 
 ```
-transformer llama --model-dir models/SmolLM-135M --prompt TEXT [--max-tokens 100] [--temperature 0.8] [--top-k 40] [--seed 1]
-transformer llama --model-dir models/SmolLM-135M --check reference.json
-make llama LLAMA_DIR=models/SmolLM-135M PROMPT='Once upon a time'
-make llama-check LLAMA_DIR=models/SmolLM-135M
+transformer llama --model-dir hugging_face/models/SmolLM-135M --prompt TEXT [--max-tokens 100] [--temperature 0.8] [--top-k 40] [--seed 1]
+transformer llama --model-dir hugging_face/models/SmolLM-135M --check reference.json
+make llama PROMPT='Once upon a time'     # LLAMA_DIR defaults to hugging_face/models/SmolLM-135M
+make llama-check
 ```
 
 Runs a Llama-style open-weight model downloaded from Hugging Face (PLAN.md,

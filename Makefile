@@ -182,22 +182,24 @@ probe: $(TRANSFORMER) ## Look inside the trained model: head scores, logit lens,
 # The endpoint (PLAN.md, "The endpoint: an open-weight model"): a Llama-style
 # model downloaded from Hugging Face, such as SmolLM-135M, run by our own
 # code. LLAMA_DIR is the model's folder (config.json, model.safetensors,
-# tokenizer.json); LLAMA_ARGS passes options, such as '--temperature 0'.
+# tokenizer.json), by default where hugging_face/'s download puts SmolLM-135M
+# (keep hugging_face/models/ out of git: 513 MB); LLAMA_ARGS passes options,
+# such as '--temperature 0'.
 # make llama-check compares with $(LLAMA_DIR)/reference.json, written by
 # tools/llama_reference.py (which needs transformers and PyTorch).
-LLAMA_DIR ?=
+LLAMA_DIR ?= hugging_face/models/SmolLM-135M
 LLAMA_ARGS ?=
 
 .PHONY: llama
 llama: $(TRANSFORMER) ## The endpoint: generate with an open-weight model (LLAMA_DIR, PROMPT).
 	$(call hdr,$@)
-	@test -n "$(LLAMA_DIR)" || { echo "set LLAMA_DIR to the model's folder"; exit 1; }
+	@test -f $(LLAMA_DIR)/model.safetensors || { echo "no model in $(LLAMA_DIR): download one (PLAN.md, \"The endpoint\") or set LLAMA_DIR"; exit 1; }
 	$(TRANSFORMER) llama --model-dir $(LLAMA_DIR) --prompt '$(PROMPT)' $(LLAMA_ARGS)
 
 .PHONY: llama-check
 llama-check: $(TRANSFORMER) ## Check the open-weight model against Hugging Face's numbers.
 	$(call hdr,$@)
-	@test -n "$(LLAMA_DIR)" || { echo "set LLAMA_DIR to the model's folder"; exit 1; }
+	@test -f $(LLAMA_DIR)/model.safetensors || { echo "no model in $(LLAMA_DIR): download one (PLAN.md, \"The endpoint\") or set LLAMA_DIR"; exit 1; }
 	@test -f $(LLAMA_DIR)/reference.json || { echo "no $(LLAMA_DIR)/reference.json: run python3 tools/llama_reference.py $(LLAMA_DIR) -o $(LLAMA_DIR)/reference.json"; exit 1; }
 	$(TRANSFORMER) llama --model-dir $(LLAMA_DIR) --check $(LLAMA_DIR)/reference.json
 

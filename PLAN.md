@@ -2785,7 +2785,12 @@ llm/
 ├── config.toml    # settings for steps 3-6; config-full.toml for the full run,
 │                  # config-full-check.toml for checking its flow (make full-check)
 ├── out/           # generated files: tok.bpe, *.ids, *.safetensors (git-ignored; make clean removes it)
+├── out-full/      # the full run's files (git-ignored; make clean keeps it)
+├── out-check/     # make full-check's files (git-ignored; make clean removes it)
 ├── data/          # downloaded corpora, e.g. text8, TinyStories (git-ignored)
+├── hugging_face/  # downloading open-weight models: Pipfile (huggingface-hub,
+│   │              # transformers, torch), README.md
+│   └── models/    # the downloads, e.g. SmolLM-135M (git-ignored; see The endpoint)
 ├── tokenizer/     # text <-> token IDs: tokenize, encode, decode
 ├── chat/          # make_chat.py: fine-tuning conversations from the stories
 ├── tools/         # toc.py: this file's table of contents and link check (make toc);
@@ -2794,7 +2799,8 @@ llm/
 │                  # llama_reference.py: Hugging Face's numbers for the endpoint
 ├── word2vec/      # word vectors, the historical precursor
 ├── attention/     # self-attention on its own, then a look at one full block
-└── transformer/   # the model: build, train, finetune, generate
+└── transformer/   # the model: build, train, finetune (LoRA too), generate, evaluate,
+                   # probe; and llama, an open-weight model for inference
 ```
 
 | directory | flow steps | status |
@@ -3444,12 +3450,22 @@ its output layer tied to its embeddings. It was trained in bfloat16 and
 published in f32: the low 16 bits of every number are zero, so the 513 MB
 file compresses to 227 MB.
 
+Downloading it, into `hugging_face/` (whose `models/` folder stays out of
+git), with Hugging Face's command-line tool in its own virtual environment:
+
 ```
-transformer llama --model-dir models/SmolLM-135M --prompt "Once upon a time"
-python3 tools/llama_reference.py models/SmolLM-135M -o models/SmolLM-135M/reference.json
-transformer llama --model-dir models/SmolLM-135M --check models/SmolLM-135M/reference.json
-make llama LLAMA_DIR=models/SmolLM-135M PROMPT='Once upon a time'
-make llama-check LLAMA_DIR=models/SmolLM-135M
+mkdir hugging_face && cd hugging_face
+pipenv install huggingface-hub transformers torch      # the last two only for the check
+pipenv run hf download HuggingFaceTB/SmolLM-135M --local-dir models/SmolLM-135M
+```
+
+Running and checking it, from the top of the repository:
+
+```
+make llama PROMPT='Once upon a time'                   # LLAMA_DIR defaults to hugging_face/models/SmolLM-135M
+(cd hugging_face && pipenv run python3 ../tools/llama_reference.py models/SmolLM-135M -o models/SmolLM-135M/reference.json)
+make llama-check
+transformer/target/release/transformer llama --model-dir hugging_face/models/SmolLM-135M --prompt "…" --temperature 0
 ```
 
 **What had to be added** (`src/llama.rs`, `src/hf_tokenizer.rs`), each
