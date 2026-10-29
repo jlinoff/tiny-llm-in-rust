@@ -1,4 +1,7 @@
-# llm: a small language model, built from scratch to learn how LLMs work
+# tiny-llm-in-rust: a small language model, built from scratch to learn how LLMs work
+[![Release](https://img.shields.io/github/release/jlinoff/tiny-llm-in-rust?style)](https://github.com/jlinoff/tiny-llm-in-rust/releases)
+![Workflow](https://github.com/jlinoff/tiny-llm-in-rust/actions/workflows/main.yml/badge.svg)
+
 
 This project builds every piece of a GPT-style language model by hand, small
 enough to read and to run on a laptop, so a beginner can watch training and
