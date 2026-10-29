@@ -104,7 +104,19 @@ identical. Keep `hugging_face/models/` out of git: the weights are 513 MB.
 | `transformer/` | the model: build, train, finetune, generate, evaluate, probe, llama |
 | `attention/` | self-attention on its own, on toy inputs, up to an induction head |
 | `word2vec/` | word vectors, the historical precursor |
-| `tools/` | helpers: PLAN.md's table of contents, the Hugging Face reference, experiments |
+| `tools/` | helpers: PLAN.md's table of contents, the Hugging Face reference, experiments, CI's smoke test |
+
+## Checks
+
+Every push and pull request runs `.github/workflows/main.yaml`: formatting,
+lint (clippy, pylint) and the tests on Linux and macOS (there with
+Accelerate), PLAN.md's table of contents and links, and the whole flow on a
+dozen short stories (`tools/ci/smoke.sh`, a few seconds; it runs locally
+too).
+
+## License
+
+MIT: see [LICENSE](LICENSE). This is meant for learning; use it freely.
 
 ## Acknowledgments
 

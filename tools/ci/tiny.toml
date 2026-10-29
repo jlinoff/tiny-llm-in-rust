@@ -1,0 +1,33 @@
+# tiny.toml: a model small enough to train in seconds, for tools/ci/smoke.sh.
+# The same sections as config.toml (see it for what each key means).
+[model]
+d_model = 32
+layers  = 2
+heads   = 2
+context = 128
+d_ff    = 64
+seed    = 1
+
+[training]
+learning_rate = 0.003
+steps         = 60
+batch_size    = 4
+warmup_steps  = 10
+validation_fraction = 0.15
+log_every     = 20
+eval_every    = 30
+checkpoint_every = 60
+
+[generate]
+max_tokens  = 20
+
+[finetune]
+learning_rate = 0.001
+steps         = 20
+batch_size    = 2
+warmup_steps  = 5
+validation_fraction = 0.2
+log_every     = 10
+eval_every    = 10
+eval_batches  = 2
+checkpoint_every = 20

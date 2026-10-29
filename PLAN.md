@@ -2865,7 +2865,10 @@ llm/
 ├── tools/         # toc.py: this file's table of contents and link check (make toc);
 │                  # config_section.py: one config section per file, for make;
 │                  # sampling-test.sh: random against epoch sampling, five seeds;
-│                  # llama_reference.py: Hugging Face's numbers for the endpoint
+│                  # llama_reference.py: Hugging Face's numbers for the endpoint;
+│                  # ci/: the smoke test GitHub runs (smoke.sh, tiny.toml, stories.txt)
+├── .github/       # workflows/main.yaml: formatting, lint, tests and the smoke test
+├── LICENSE        # MIT
 ├── word2vec/      # word vectors, the historical precursor
 ├── attention/     # self-attention on its own, then a look at one full block
 └── transformer/   # the model: build, train, finetune (LoRA too), generate, evaluate,
