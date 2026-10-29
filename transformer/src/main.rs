@@ -208,14 +208,15 @@ enum Command {
         /// The tokenizer the model was built with (tok.bpe)
         #[arg(long)]
         tokenizer: PathBuf,
-        /// The text for the logit lens and the head's pattern
+        /// The text for the copying view, the logit lens and the head's
+        /// pattern (the default story repeats words and phrases naturally)
         #[arg(
             long,
-            default_value = "Once upon a time, there was a little girl named Lily. She liked to play with her red ball in the park. One day, Lily lost her ball. She looked and looked, but she could not find it. Then her friend Tom came. Tom said, \"Lily, I can help you find your"
+            default_value = "Once upon a time, there was a little girl named Lily. Lily had a red ball. She liked to play with her red ball in the park. One day, Lily lost her red ball. She looked and looked, but she could not find her red ball. Then her friend Tom came. Tom said, \"Lily, I can help you find your red ball.\" Lily and Tom looked under the big tree. They looked behind the big rock. Then Tom saw the red ball near the pond. Tom gave Lily her red ball. Lily said, \"Thank you, Tom!\" Lily and Tom played with the red ball in the park all day."
         )]
         prompt: String,
-        /// The head to show on the prompt, as BLOCK.HEAD counting from 0
-        /// (default: the strongest induction head)
+        /// The head to show at the copyable positions, as BLOCK.HEAD
+        /// counting from 0 (default: the strongest copier)
         #[arg(long)]
         head: Option<String>,
         /// Random sequences for the head scores
@@ -1338,60 +1339,70 @@ fn probe_command(
         (1..=2 * hs.length).map(|t| 1.0 / (t + 1) as f64).sum::<f64>() / (2 * hs.length) as f64
     );
 
-    // 1b. Copying on real text: the prompt repeated, each head ablated.
-    let (first, second, len, mut ch) = probe::copy_heads(&params, c, m.eos as usize, &ids[1..]);
+    // 1b. Copying at the prompt's natural repeats, each head ablated.
+    let cp = probe::copy_heads(&params, c, &ids).ok_or(
+        "the prompt has no natural repeat (a word followed by the same word as at an earlier occurrence): use a longer one",
+    )?;
     println!(
-        "\nCopying real text: the prompt's {len} tokens, then the same again; every head switched off (ablated) in turn"
-    );
-    println!("  loss on the first copy:  {first:.3}");
-    println!(
-        "  loss on the second copy: {second:.3}   (lower than the first if the model copies from it)"
-    );
-    ch.sort_by(|a, b| b.copying().total_cmp(&a.copying()));
-    println!(
-        "\n  heads ranked by their part in the repeat: the loss rise on the second copy minus on the first,"
+        "\nCopying in ordinary text: the prompt's natural repeats, every head switched off (ablated) in turn"
     );
     println!(
-        "  without the head (a head important for language in general raises both; top 10 of {})",
+        "  {} copyable positions (the current word occurred earlier, and the word that followed it then comes next again)",
+        cp.positions.len()
+    );
+    println!("  loss at the copyable positions: {:.3}", cp.loss_copy);
+    println!(
+        "  loss at the other {} positions: {:.3}   (copyable ones are easier if the model copies)",
+        cp.others, cp.loss_other
+    );
+    let mut ch = cp.heads;
+    ch.sort_by(|a, b| b.repeat_effect().total_cmp(&a.repeat_effect()));
+    println!(
+        "\n  heads ranked by their part in copying: the loss rise without the head at the copyable positions"
+    );
+    println!(
+        "  minus the rise elsewhere (a head important for language in general raises both; top 10 of {})",
         ch.len()
     );
     println!(
-        "  {:>5} {:>5} {:>10} {:>12} {:>12} {:>10}",
-        "rank", "head", "repeat", "rise, 2nd", "rise, 1st", "induction"
+        "  {:>5} {:>5} {:>10} {:>14} {:>14} {:>10}",
+        "rank", "head", "copying", "rise, copyable", "rise, others", "induction"
     );
     for (r, h) in ch.iter().take(10).enumerate() {
         println!(
-            "  {:>5} {:>5} {:>+10.3} {:>+12.3} {:>+12.3} {:>10.2}",
+            "  {:>5} {:>5} {:>+10.3} {:>+14.3} {:>+14.3} {:>10.2}",
             r + 1,
             format!("{}.{}", h.block, h.head),
-            h.copying(),
-            h.rise_second,
-            h.rise_first,
+            h.repeat_effect(),
+            h.rise_copy,
+            h.rise_other,
             h.attention
         );
     }
     let most = ch
         .iter()
-        .max_by(|a, b| a.rise_second.total_cmp(&b.rise_second))
+        .max_by(|a, b| a.rise_other.total_cmp(&b.rise_other))
         .expect("at least one head");
     let top_att = ch
         .iter()
         .max_by(|a, b| a.attention.total_cmp(&b.attention))
         .expect("at least one head");
     println!(
-        "  most important overall: head {}.{} (rises {:+.3} and {:+.3})",
-        most.block, most.head, most.rise_first, most.rise_second
+        "  most important for the rest of the text: head {}.{} (rise {:+.3} elsewhere, {:+.3} at copyable positions)",
+        most.block, most.head, most.rise_other, most.rise_copy
     );
     println!(
-        "  strongest induction attention on this text: head {}.{} ({:.2}), repeat effect {:+.3}",
+        "  strongest induction attention: head {}.{} ({:.2}), copying {:+.3}",
         top_att.block,
         top_att.head,
         top_att.attention,
-        top_att.copying()
+        top_att.repeat_effect()
     );
     println!(
-        "  (induction: attention, in the second copy, to the token after the current token's earlier occurrence)"
+        "  (induction: attention, at a copyable position, to the word after the current word's earlier occurrence)"
     );
+    let top_copier = (ch[0].block, ch[0].head);
+    let copyable = cp.positions;
 
     // 2. The logit lens on the prompt.
     let tr = probe::trace(&params, c, &ids);
@@ -1434,25 +1445,22 @@ fn probe_command(
         );
     }
 
-    // 3. One head's pattern on the prompt.
-    let (b, h) = pick.unwrap_or((ib, ih));
+    // 3. One head's pattern at the copyable positions.
+    let (b, h) = pick.unwrap_or(top_copier);
     let a = &tr.attention[b][h];
     println!(
-        "\nHead {b}.{h}{} on the prompt: where each position looks most (weight), from position 1",
-        if pick.is_none() {
-            " (the strongest induction head)"
-        } else {
-            ""
-        }
+        "\nHead {b}.{h}{} at the copyable positions: where it looks most (weight); ✓ marks the word after an earlier occurrence",
+        if pick.is_none() { " (the strongest copier)" } else { "" }
     );
-    for t in 1..ids.len() {
-        let row = &a.row(t)[..=t];
+    for (t, sources) in &copyable {
+        let row = &a.row(*t)[..=*t];
         let j = probe::argmax(row);
         println!(
-            "  [{t:>3}] {:<14} → [{j:>3}] {:<14} {:.2}",
-            token_text(&enc, ids[t]),
+            "  [{t:>3}] {:<14} → [{j:>3}] {:<14} {:.2} {}",
+            token_text(&enc, ids[*t]),
             token_text(&enc, ids[j]),
-            row[j]
+            row[j],
+            if sources.contains(&j) { "✓" } else { "" }
         );
     }
     Ok(())

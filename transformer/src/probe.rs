@@ -267,71 +267,114 @@ pub fn head_scores<T: Float>(
     }
 }
 
-/// One head's part in copying a repeated real text.
+/// Positions in a text where copying predicts the next token ("natural
+/// repeats"): position t whose token occurred earlier, at s, followed then
+/// by the same token that follows now (tokens[s + 1] == tokens[t + 1], as
+/// in "red ball … red ball"). For each such t, the positions s + 1 an
+/// induction head would attend to.
+pub fn copy_positions(tokens: &[usize]) -> Vec<(usize, Vec<usize>)> {
+    (1..tokens.len().saturating_sub(1))
+        .filter_map(|t| {
+            let sources: Vec<usize> = (0..t)
+                .filter(|&s| tokens[s] == tokens[t] && tokens[s + 1] == tokens[t + 1])
+                .map(|s| s + 1)
+                .collect();
+            (!sources.is_empty()).then_some((t, sources))
+        })
+        .collect()
+}
+
+/// One head's part in copying, at a text's natural repeats.
 pub struct CopyHead {
     pub block: usize,
     pub head: usize,
-    /// In the second copy: mean attention to the token after the current
-    /// token's earlier occurrence (the induction pattern).
+    /// At the copyable positions: mean attention to the earlier
+    /// occurrences' next tokens (the induction pattern).
     pub attention: f64,
-    /// How much the loss on the first copy, and on the second, rises with
-    /// the head ablated.
-    pub rise_first: f64,
-    pub rise_second: f64,
+    /// How much the loss rises with the head ablated: at the copyable
+    /// positions, and at all the others.
+    pub rise_copy: f64,
+    pub rise_other: f64,
 }
 
 impl CopyHead {
-    /// The part of the head's effect specific to the repeat: the second
-    /// copy's rise minus the first's. A head that matters for language in
-    /// general raises both; a head that copies raises only the second.
-    pub fn copying(&self) -> f64 {
-        self.rise_second - self.rise_first
+    /// The part of the head's effect specific to copying: the rise at the
+    /// copyable positions minus the rise elsewhere. A head that matters for
+    /// language in general raises both; a head that copies raises the first.
+    pub fn repeat_effect(&self) -> f64 {
+        self.rise_copy - self.rise_other
     }
 }
 
-/// Copying on real text: `story` (no start token) repeated twice after
-/// `start`, cut so the whole fits the context. Returns the losses on the
-/// first and second copies, and every head's induction attention and
-/// ablation effect on each copy.
-pub fn copy_heads<T: Float>(
-    p: &Params<T>,
-    c: &ModelConfig,
-    start: usize,
-    story: &[usize],
-) -> (f64, f64, usize, Vec<CopyHead>) {
-    let l = story.len().min((c.context - 1) / 2);
-    let s = &story[..l];
-    let mut tokens = vec![start];
-    tokens.extend(s);
-    tokens.extend(s);
-    // Predicting s[j+1] from position 1+j (first copy) or L+1+j (second).
-    let loss = |tr: &Trace<T>, offset: usize| {
-        let out = read_out(p, tr.residual.last().expect("at least the embeddings"));
-        (0..l - 1)
-            .map(|j| nll(out.row(offset + 1 + j), s[j + 1]))
-            .sum::<f64>()
-            / (l - 1) as f64
+/// What copying is worth in a text, and each head's part in it.
+pub struct Copying {
+    /// The copyable positions (see `copy_positions`), and how many others.
+    pub positions: Vec<(usize, Vec<usize>)>,
+    pub others: usize,
+    /// The model's loss at the copyable positions and at the others.
+    pub loss_copy: f64,
+    pub loss_other: f64,
+    pub heads: Vec<CopyHead>,
+}
+
+/// Copying at a text's natural repeats: the losses at copyable positions
+/// and elsewhere, and every head ablated in turn. None if the text has no
+/// copyable position.
+pub fn copy_heads<T: Float>(p: &Params<T>, c: &ModelConfig, tokens: &[usize]) -> Option<Copying> {
+    let positions = copy_positions(tokens);
+    if positions.is_empty() {
+        return None;
+    }
+    let copyable: Vec<bool> = {
+        let mut v = vec![false; tokens.len()];
+        for (t, _) in &positions {
+            v[*t] = true;
+        }
+        v
     };
-    let base = trace(p, c, &tokens);
-    let (first, second) = (loss(&base, 0), loss(&base, l));
+    // Mean loss predicting tokens[t + 1] at copyable positions, and at the rest.
+    let losses = |tr: &Trace<T>| {
+        let out = read_out(p, tr.residual.last().expect("at least the embeddings"));
+        let (mut a, mut na, mut b, mut nb) = (0.0, 0usize, 0.0, 0usize);
+        for t in 0..tokens.len() - 1 {
+            let l = nll(out.row(t), tokens[t + 1]);
+            if copyable[t] {
+                a += l;
+                na += 1;
+            } else {
+                b += l;
+                nb += 1;
+            }
+        }
+        (a / na.max(1) as f64, b / nb.max(1) as f64, nb)
+    };
+    let base = trace(p, c, tokens);
+    let (loss_copy, loss_other, others) = losses(&base);
     let mut heads = Vec::new();
     for (b, block) in base.attention.iter().enumerate() {
         for (h, a) in block.iter().enumerate() {
-            let attention = (0..l - 1)
-                .map(|j| a.row(l + 1 + j)[2 + j].to_f64())
+            let attention = positions
+                .iter()
+                .map(|(t, src)| src.iter().map(|&j| a.row(*t)[j].to_f64()).sum::<f64>())
                 .sum::<f64>()
-                / (l - 1) as f64;
-            let ablated = trace_ablated(p, c, &tokens, Some((b, h)));
+                / positions.len() as f64;
+            let (copy, other, _) = losses(&trace_ablated(p, c, tokens, Some((b, h))));
             heads.push(CopyHead {
                 block: b,
                 head: h,
                 attention,
-                rise_first: loss(&ablated, 0) - first,
-                rise_second: loss(&ablated, l) - second,
+                rise_copy: copy - loss_copy,
+                rise_other: other - loss_other,
             });
         }
     }
-    (first, second, l, heads)
+    Some(Copying {
+        positions,
+        others,
+        loss_copy,
+        loss_other,
+        heads,
+    })
 }
 
 #[cfg(test)]
@@ -408,8 +451,15 @@ mod tests {
         assert_eq!(plain.residual[2], none.residual[2]);
         assert_ne!(plain.residual[2], one.residual[2]);
         assert_eq!(plain.residual[1], one.residual[1]); // block 0 is untouched
-        let (_, _, l, ch) = copy_heads(&p, &c, 0, &[3, 1, 4, 1, 5, 9]);
-        assert_eq!((l, ch.len()), (4, c.layers * c.heads)); // cut to (9 − 1) / 2
+                                                        // "1 4" recurs: position 3 (the second 1) is copyable, from 2.
+        assert_eq!(copy_positions(&[3, 1, 4, 1, 4, 9]), vec![(3, vec![2])]);
+        assert!(copy_positions(&[3, 1, 4, 1, 5, 9]).is_empty()); // 1 recurs, its successor doesn't
+        let cp = copy_heads(&p, &c, &[3, 1, 4, 1, 4, 9]).unwrap();
+        assert_eq!(
+            (cp.positions.len(), cp.others, cp.heads.len()),
+            (1, 4, c.layers * c.heads)
+        );
+        assert!(copy_heads(&p, &c, &[3, 1, 4, 1, 5, 9]).is_none());
         let pool: Vec<usize> = (1..vocab).collect();
         let hs = head_scores(&p, &c, 0, &pool, 3, 1);
         assert_eq!(hs.length, 4); // (9 − 1) / 2

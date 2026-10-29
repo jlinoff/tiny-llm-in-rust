@@ -2383,18 +2383,24 @@ cp out-full/model.safetensors out-full/ckpt.safetensors
   the final layer norm and output layer as if the model stopped there.
   Its loss and accuracy on a prompt show how the prediction forms, block
   by block, and the top predictions after the prompt show it sharpening.
-- **Copying real text, head by head**: the prompt followed by the same
-  text again, in-distribution where random words aren't. The model's loss
-  on each copy, then every head **ablated** (switched off: its output set
-  to zero) in turn: the loss rise on each copy without it, and its
-  **repeat effect**, the second copy's rise minus the first's (a head that
-  matters for language in general raises both), beside its induction
-  attention on this text. Heads are ranked by the repeat effect. Ablation is
+- **Copying in ordinary text, head by head**, at the prompt's **natural
+  repeats**: positions where the current word occurred earlier and the
+  word that followed it then comes next again ("red ball … red ball"),
+  where copying is exactly what predicts the next word. The default prompt
+  is a short story full of them. The model's loss at those copyable
+  positions and at all others, then every head **ablated** (switched off:
+  its output set to zero) in turn: the loss rise at each kind of position
+  without it, and its **copying effect**, the rise at copyable positions
+  minus the rise elsewhere (a head that matters for language in general
+  raises both), beside its induction attention there. Heads are ranked by
+  the copying effect, and the head-pattern view shows the top copier at
+  the copyable positions. Ablation is
   causal where attention is only suggestive: a head attending the right
   way whose output nothing uses scores high on attention and near zero on
   ablation, and a head doing the copying through a less tidy pattern
   shows up on ablation even if its attention looks unremarkable.
-- **One head's pattern** on the prompt: where each position looks most.
+- **One head's pattern**: where a head looks most at each copyable position
+  (by default the top copier; `--head` picks another).
 
 A test checks that the probe's predictions equal training's forward pass,
 so what it shows is what the model computes.
@@ -2408,13 +2414,22 @@ so what it shows is what the model computes.
   token's vector scores highest against its own row. Each block then
   moves the vector toward the next word ("␣ball", "␣toy", "␣car" after
   "…help you find your").
-- No induction heads: every induction score 0.00, and the loss on the
-  second copy hardly lower than on the first (11.02 against 11.16), so
-  the model doesn't copy from its context at all. On its prompt repeated,
-  real text it knows, the second copy is even *harder* (2.07 against
-  1.81): it doesn't copy, and the restart mid-text surprises it. The
-  heads that matter most there (3.1 and 2.0, +0.15 each when ablated)
-  have no induction attention: ordinary language work. Its previous-token
+- No induction heads: every induction score 0.00, and on random words
+  the loss on the second copy hardly lower than on the first (11.02
+  against 11.16). Repeating a whole story doesn't help it either (2.07
+  against 1.81 on the second copy, harder): TinyStories never repeats a
+  story, so no model trained on it expects that.
+- **But it does copy in ordinary text, by a simpler trick.** At the
+  default story's 26 natural repeats its loss is lower than elsewhere
+  (2.09 against 2.25), and ablation singles out one head, 0.3, in the
+  *first* block: without it the loss at copyable positions rises by 0.48,
+  elsewhere by 0.06. At "red" it attends straight to an earlier "ball",
+  the word that followed "red" before; at "her" it looks at "ball" too.
+  That's not induction (a first-block head can't know what preceded each
+  earlier word): it's a content lookup, "the word I'm on tends to be
+  followed by one like that, fetch it", the skip-trigram behavior Elhage
+  et al. (2021) found in one-layer models. Small models learn it long
+  before induction heads. Its previous-token
   heads are weak too (0.12 at most, against about 0.02 for attention
   spread evenly). Both losses are above chance (ln 4,096 = 8.3): random
   words are far from any story, and the model is confidently wrong.
@@ -2493,19 +2508,18 @@ would mature. It didn't:
   directions the output layer doesn't read, so reading them directly
   fails. The fix in research is a "tuned lens", a small learned
   translation per layer.
-- **And it doesn't copy repeated real text.** On its prompt repeated, the
-  second copy is *harder* (loss 1.068 against 0.913), as for the small
-  model: TinyStories never repeats a story word for word, so the model
-  has no reason to expect a repeat. Copying in this corpus is small-scale,
-  a name or phrase recurring within one story, which is what the
-  random-word test's modest gain (0.65) and head 5.4's few remaining
-  matches ("find" to "it", "your" to "ball") show.
-- **A lesson about ablation.** The first version of the ranking ordered
-  heads by how much the *second* copy's loss rose without them, and put
-  heads 1.7 (+0.77), 0.5 and 0.6 on top. But those raise the first copy's
-  loss as much: they matter for language in general, not for the repeat.
-  The ranking now uses the rise on the second copy minus the rise on the
-  first, the part specific to repetition, and shows both.
+- **And it doesn't copy a repeated story.** A first version of the
+  copying view repeated the whole prompt: the second copy came out
+  *harder* (loss 1.068 against 0.913), as for the small model. TinyStories
+  never repeats a story word for word, so that test asked for copying the
+  corpus never teaches; copying here is small-scale, a name or phrase
+  recurring within one story. The view now measures exactly that, at
+  natural repeats.
+- **A lesson about ablation.** That first version also ranked heads by how
+  much the second copy's loss rose without them, and put heads 1.7
+  (+0.77), 0.5 and 0.6 on top. But those raise the loss everywhere: they
+  matter for language in general, not for copying. The ranking now uses
+  the rise at copyable positions minus the rise elsewhere, and shows both.
 
 ## What production models add, and why it's left out
 
@@ -2834,6 +2848,7 @@ directories would mean copying that code or reaching across directories for it.
 
 ```
 llm/
+├── README.md      # a short introduction, for GitHub
 ├── PLAN.md        # this file
 ├── Makefile       # one target per step: make tokenize, make encode, ...
 ├── config.toml    # settings for steps 3-6; config-full.toml for the full run,

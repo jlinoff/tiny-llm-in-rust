@@ -433,11 +433,13 @@ from `model-init` on:
 - **The logit lens** on the prompt: the residual stream after the
   embeddings and after each block, read through the final layer norm and
   output layer: loss, top-1 accuracy, and the top 3 next tokens.
-- **Copying real text**: the prompt repeated, the loss on each copy, and
-  every head ablated (its output zeroed) in turn, ranked by its repeat
-  effect: the second copy's loss rise without it minus the first's.
-- **One head's pattern** on the prompt (`--head BLOCK.HEAD`, by default the
-  strongest induction head): where each position looks most.
+- **Copying in ordinary text**, at the prompt's natural repeats (a word
+  followed by the same word as at an earlier occurrence): the loss there
+  and elsewhere, and every head ablated (its output zeroed) in turn,
+  ranked by its copying effect, the loss rise at those positions minus
+  the rise elsewhere. The head-pattern view then shows the top copier.
+- **One head's pattern** at the copyable positions (`--head BLOCK.HEAD`, by
+  default the strongest copier): where it looks most.
 
 `make probe` and `make full-probe` run it on the trained model
 (`PROBE_MODEL` picks another checkpoint, `PROBE_ARGS` passes options).
