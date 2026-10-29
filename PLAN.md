@@ -2320,8 +2320,8 @@ context T = 256; 1.35M parameters with `config.toml`, 7.4M with
   tracking characters and following requests can be learned. Measured: the
   first small model (1.33M parameters, context 128) reached a validation
   loss of 3.09 on V1's validation file after 4M tokens; the 7.4M model
-  reached 1.52 on V2 after 147M, still falling (different text and
-  tokenizers, so not strictly comparable).
+  reached 1.52 on V2 after 147M and 1.45 after 410M, still falling
+  (different text and tokenizers, so not strictly comparable).
 - **Knowledge: hard, set by the corpus.** Only what TinyStories contains:
   simple English stories. No facts about the world, no adult vocabulary,
   no mathematics, no other languages, however large the model.
@@ -2452,6 +2452,32 @@ the tiny controls needed more scale or patience.
   embeddings). Two independent views locate the same mechanism in the
   same place: block 5 retrieves "ball" from the context, the blocks after
   it commit to it.
+
+**The finished model, step 100,000** (410M tokens): I predicted head 5.4
+would mature. It didn't:
+
+| | Step 22,000 | Step 100,000 |
+|---|---|---|
+| Head 5.4's induction score, random words | 0.09 | 0.05 |
+| 5.4 at "find", attending to "it" (story prompt) | 0.90 | 0.49 |
+| 5.4 at "your", attending to "ball" | 0.70 | 0.47 |
+| Loss drop on the second copy | 0.60 | 0.65 |
+| Previous-token heads 2.4 / 2.6 | 0.32 / 0.32 | 0.34 / 0.32 |
+
+- **The model copies at least as well, but no single head does it
+  cleanly.** Head 5.4 now spends most of its attention on the first token
+  (the attention sink); the copying has likely spread over several heads,
+  none a clean induction head by this test. Early induction heads are
+  often crisp, and later training can blur them as other circuits take
+  over parts of the job. Where the copying went, the probe can't yet say.
+- **The logit lens stopped working.** At step 22,000 the prediction
+  sharpened block by block; now the intermediate blocks read as nonsense
+  through the output layer (" cray", " cri"; losses from 13.6 down to 4.9)
+  and the answer appears only at the last block (loss 0.91, "ball" at 97%).
+  A known limitation: as training goes on, intermediate layers can use
+  directions the output layer doesn't read, so reading them directly
+  fails. The fix in research is a "tuned lens", a small learned
+  translation per layer.
 
 ## What production models add, and why it's left out
 
@@ -2809,7 +2835,7 @@ llm/
 | `chat/` | data for LLM 5 finetune | done (`make_chat.py`) |
 | `word2vec/` | word2vec 1 train, 2 explore | done |
 | `attention/` | none: a learning exercise before `transformer/` | all 6 items of [its list](#where-each-part-is-built) done (`example`, `random`, `train`, `heads`, `block`, `induction`) |
-| `transformer/` | LLM 3 build, 4 train, 5 finetune, 6 generate | all four done (`transformer build`, `train`, `finetune`, `generate`, plus `evaluate`, `inspect` and `bench`); the full TinyStories run done: pretrained to validation loss 1.52, fine-tuned (requested words 3.76 times as likely) |
+| `transformer/` | LLM 3 build, 4 train, 5 finetune, 6 generate | all four done (`transformer build`, `train`, `finetune`, `generate`, plus `evaluate`, `inspect` and `bench`); two full TinyStories runs (the second: validation loss 1.446, requested words 3.51 times as likely after fine-tuning); `llama` runs an open-weight model |
 
 The Makefile in `llm/` drives the flow, with one target per step. Each target
 knows which files it needs, so `make train`, for example, first reruns any
@@ -3429,15 +3455,53 @@ near 2.5 turns clipping off:
   should start no higher than where pretraining ended unless the new
   behavior is worth some of the old.
 
-**A second full run** (running): `config-full.toml` now asks for 100,000
-steps, 410M tokens (about 55 per parameter, past the compute-optimal 20;
-a small model still improves beyond it, if less per token), with
-`sampling = "epochs"` (74% of V2's windows, each once, where random starts
-would leave about 48% unseen), and fine-tuning at 0.0005, between the two
-rates tried above, also with epochs. About 20 hours with Accelerate. The
-first run's files are kept in `out-full-36k/` for comparison; the second
-reuses its tokenizer, encoded corpus, initial model and chat data, so only
-training and what follows it rerun.
+**A second full run**: `config-full.toml` now asks for 100,000 steps,
+410M tokens (about 55 per parameter, past the compute-optimal 20; a small
+model still improves beyond it, if less per token), with `sampling =
+"epochs"` (74% of V2's windows, each once, where random starts would leave
+about 48% unseen), and fine-tuning at 0.0005, between the two rates tried
+above, also with epochs. Run from scratch: the tokenizer, the 6.2-minute
+encoding and the initial weights (fingerprint `73db6362…`) matched the
+first run exactly.
+
+**Result** (M4, Accelerate): pretraining in 19 hours 10 minutes, 5,935
+tokens per second overall, 2.8 times the first run's rate, so 2.8 times the
+tokens in about the same time.
+
+| Step | 10,000 | 20,000 | 40,000 | 60,000 | 80,000 | 90,000 | 100,000 |
+|---|---|---|---|---|---|---|---|
+| Validation loss | 1.855 | 1.761 | 1.665 | 1.582 | 1.496 | 1.461 | **1.446** |
+| Learning rate (10⁻⁴) | 9.8 | 9.2 | 7.0 | 4.2 | 1.9 | 1.2 | 1.0 |
+
+- **Final validation loss 1.446**, against the first run's 1.521 (my guess
+  beforehand: 1.42–1.47). Still falling at the end: more tokens would help
+  again.
+- **Behind the first run at the same step until late**, as expected: at
+  step 20,000 its loss was 1.761 against the first run's 1.684, because
+  its learning rate was still near the peak (9.2 × 10⁻⁴ against 4.9 ×
+  10⁻⁴). The equilibrium effect again: the gains came as the rate fell.
+- **The gradient's length grew steadily**, from 0.8 to 1.76, while the loss
+  fell; common late in training, as the learning rate decays and weight
+  decay holds the weights' size. It never reached the clipping limit of 2.
+
+Fine-tuning at 0.0005 (54 minutes) jumped from 1.463 to 1.707 in the first
+1,000 steps (five times pretraining's final rate) and ended at 1.431, below
+its start. Against the first run's two fine-tunings:
+
+| | Run 1, at 0.001 | Run 1, at 0.0003 | **Run 2, at 0.0005** |
+|---|---|---|---|
+| Story loss, pretrained (before fine-tuning) | 1.401 | 1.401 | **1.363** |
+| Story loss after fine-tuning | 1.494 | 1.419 | **1.377** |
+| Requested words: own request's advantage | 3.76× | 3.30× | **3.51×** |
+| Requested words in sampled stories (control) | 34.7% (0.2%) | 28.8% (0.5%) | **33.5% (0.7%)** |
+| All three words in one story | 3.5% | 2.5% | **4.5%** |
+| Stories that ended by themselves | 81% | 78% | **87%** |
+
+Nearly the strongest request-following, the most stories with all three
+words, the best stopping, and a fine-tuning cost of only 0.014 in story
+loss (against 0.093 at 0.001). A sample, asked for "fish, pond and name":
+"Once upon a time, there was a little fish named Fin. Fin lived in a big
+pond with his fish friends…", ending with a moral.
 
 ## The endpoint: an open-weight model
 
@@ -3522,8 +3586,9 @@ fluent story about an "AIE version" of inference. Compare our TinyStories
 models on the same prompt, which turn it into a story about a little girl
 at the beach: the model decides what the text knows, not the engine.
 
-**Speed.** In this project's cloud workspace (2 cores, Rust loops): 11
-tokens per second, the model loaded in 1.6 s. Decoding reads all 538 MB of
+**Speed.** On the M4 with Accelerate: 81 tokens per second, the model
+loaded in 0.5 s; in this project's cloud workspace (2 cores, Rust loops),
+11 tokens per second. Decoding reads all 538 MB of
 weights for every token, so its speed is bounded by memory bandwidth, the
 reason production engines use 16-bit or quantized weights (see the
 Inference part of [What production models add](#what-production-models-add-and-why-its-left-out)).
@@ -3553,11 +3618,9 @@ Inference part of [What production models add](#what-production-models-add-and-w
    Makefile's per-section dependencies and `make full-check`; `transformer
    probe` ([Looking inside the model](#looking-inside-the-model)).
 
-**Now:**
-
-7. The second full run: 100,000 steps, 410M tokens, epoch sampling,
-   fine-tuning at 0.0005. Then its evaluation, and a probe of the finished
-   model (does the induction head in block 5 mature?).
+7. ~~The second full run~~: 410M tokens, validation loss 1.446;
+   fine-tuned at 0.0005, the requested words 3.51 times as likely at a
+   story-loss cost of 0.014 ([The full TinyStories run](#the-full-tinystories-run)).
 
 **The endpoint:**
 
