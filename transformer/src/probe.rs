@@ -38,6 +38,17 @@ pub struct Trace<T> {
 
 /// The forward pass over one sequence (at most the context length).
 pub fn trace<T: Float>(p: &Params<T>, c: &ModelConfig, tokens: &[usize]) -> Trace<T> {
+    trace_ablated(p, c, tokens, None)
+}
+
+/// The forward pass with one head switched off ("ablated"): its output is
+/// zero, as if the head weren't there; everything else is unchanged.
+pub fn trace_ablated<T: Float>(
+    p: &Params<T>,
+    c: &ModelConfig,
+    tokens: &[usize],
+    ablate: Option<(usize, usize)>,
+) -> Trace<T> {
     let (n, d, heads) = (tokens.len(), c.d_model, c.heads);
     assert!(n >= 1 && n <= c.context, "1 to context tokens");
     let w = |name: &str| &p.mats[p.position(name)];
@@ -87,6 +98,9 @@ pub fn trace<T: Float>(p: &Params<T>, c: &ModelConfig, tokens: &[usize]) -> Trac
                 }
                 for s in &mut a.row_mut(t)[..=t] {
                     *s = *s / total;
+                }
+                if ablate == Some((i, h)) {
+                    continue; // the head's weights are kept, its output dropped
                 }
                 let out = &mut att.row_mut(t)[cols.clone()];
                 for j in 0..=t {
@@ -253,6 +267,61 @@ pub fn head_scores<T: Float>(
     }
 }
 
+/// One head's part in copying a repeated real text.
+pub struct CopyHead {
+    pub block: usize,
+    pub head: usize,
+    /// In the second copy: mean attention to the token after the current
+    /// token's earlier occurrence (the induction pattern).
+    pub attention: f64,
+    /// How much the loss on the second copy rises with the head ablated.
+    pub ablation: f64,
+}
+
+/// Copying on real text: `story` (no start token) repeated twice after
+/// `start`, cut so the whole fits the context. Returns the losses on the
+/// first and second copies, and every head's induction attention and
+/// ablation effect on the second copy.
+pub fn copy_heads<T: Float>(
+    p: &Params<T>,
+    c: &ModelConfig,
+    start: usize,
+    story: &[usize],
+) -> (f64, f64, usize, Vec<CopyHead>) {
+    let l = story.len().min((c.context - 1) / 2);
+    let s = &story[..l];
+    let mut tokens = vec![start];
+    tokens.extend(s);
+    tokens.extend(s);
+    // Predicting s[j+1] from position 1+j (first copy) or L+1+j (second).
+    let loss = |tr: &Trace<T>, offset: usize| {
+        let out = read_out(p, tr.residual.last().expect("at least the embeddings"));
+        (0..l - 1)
+            .map(|j| nll(out.row(offset + 1 + j), s[j + 1]))
+            .sum::<f64>()
+            / (l - 1) as f64
+    };
+    let base = trace(p, c, &tokens);
+    let (first, second) = (loss(&base, 0), loss(&base, l));
+    let mut heads = Vec::new();
+    for (b, block) in base.attention.iter().enumerate() {
+        for (h, a) in block.iter().enumerate() {
+            let attention = (0..l - 1)
+                .map(|j| a.row(l + 1 + j)[2 + j].to_f64())
+                .sum::<f64>()
+                / (l - 1) as f64;
+            let ablated = trace_ablated(p, c, &tokens, Some((b, h)));
+            heads.push(CopyHead {
+                block: b,
+                head: h,
+                attention,
+                ablation: loss(&ablated, l) - second,
+            });
+        }
+    }
+    (first, second, l, heads)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -319,6 +388,16 @@ mod tests {
                 assert!(row[t + 1..].iter().all(|&w| w == 0.0));
             }
         }
+        // Ablating a head changes the output; ablating nothing doesn't.
+        let toks = [3, 1, 4, 1, 5, 9, 2];
+        let plain = trace(&p, &c, &toks);
+        let none = trace_ablated(&p, &c, &toks, None);
+        let one = trace_ablated(&p, &c, &toks, Some((1, 0)));
+        assert_eq!(plain.residual[2], none.residual[2]);
+        assert_ne!(plain.residual[2], one.residual[2]);
+        assert_eq!(plain.residual[1], one.residual[1]); // block 0 is untouched
+        let (_, _, l, ch) = copy_heads(&p, &c, 0, &[3, 1, 4, 1, 5, 9]);
+        assert_eq!((l, ch.len()), (4, c.layers * c.heads)); // cut to (9 − 1) / 2
         let pool: Vec<usize> = (1..vocab).collect();
         let hs = head_scores(&p, &c, 0, &pool, 3, 1);
         assert_eq!(hs.length, 4); // (9 − 1) / 2

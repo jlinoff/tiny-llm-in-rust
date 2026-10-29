@@ -1338,6 +1338,45 @@ fn probe_command(
         (1..=2 * hs.length).map(|t| 1.0 / (t + 1) as f64).sum::<f64>() / (2 * hs.length) as f64
     );
 
+    // 1b. Copying on real text: the prompt repeated, each head ablated.
+    let (first, second, len, mut ch) = probe::copy_heads(&params, c, m.eos as usize, &ids[1..]);
+    println!(
+        "\nCopying real text: the prompt's {len} tokens, then the same again; every head switched off (ablated) in turn"
+    );
+    println!("  loss on the first copy:  {first:.3}");
+    println!(
+        "  loss on the second copy: {second:.3}   (the drop is what copying from the first copy buys)"
+    );
+    ch.sort_by(|a, b| b.ablation.total_cmp(&a.ablation));
+    println!(
+        "\n  heads ranked by how much the second copy's loss rises without them (top 10 of {})",
+        ch.len()
+    );
+    println!(
+        "  {:>5} {:>5} {:>10} {:>10}",
+        "rank", "head", "loss rise", "induction"
+    );
+    for (r, h) in ch.iter().take(10).enumerate() {
+        println!(
+            "  {:>5} {:>5} {:>+10.3} {:>10.2}",
+            r + 1,
+            format!("{}.{}", h.block, h.head),
+            h.ablation,
+            h.attention
+        );
+    }
+    let top_att = ch
+        .iter()
+        .max_by(|a, b| a.attention.total_cmp(&b.attention))
+        .expect("at least one head");
+    println!(
+        "  strongest induction attention on this text: head {}.{} ({:.2}), loss rise {:+.3} without it",
+        top_att.block, top_att.head, top_att.attention, top_att.ablation
+    );
+    println!(
+        "  (induction: attention, in the second copy, to the token after the current token's earlier occurrence)"
+    );
+
     // 2. The logit lens on the prompt.
     let tr = probe::trace(&params, c, &ids);
     let lens = probe::logit_lens(&params, &tr, &ids);

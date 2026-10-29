@@ -2383,6 +2383,15 @@ cp out-full/model.safetensors out-full/ckpt.safetensors
   the final layer norm and output layer as if the model stopped there.
   Its loss and accuracy on a prompt show how the prediction forms, block
   by block, and the top predictions after the prompt show it sharpening.
+- **Copying real text, head by head**: the prompt followed by the same
+  text again, in-distribution where random words aren't. The model's loss
+  on each copy, then every head **ablated** (switched off: its output set
+  to zero) in turn, and ranked by how much the second copy's loss rises
+  without it, beside its induction attention on this text. Ablation is
+  causal where attention is only suggestive: a head attending the right
+  way whose output nothing uses scores high on attention and near zero on
+  ablation, and a head doing the copying through a less tidy pattern
+  shows up on ablation even if its attention looks unremarkable.
 - **One head's pattern** on the prompt: where each position looks most.
 
 A test checks that the probe's predictions equal training's forward pass,
@@ -2399,7 +2408,11 @@ so what it shows is what the model computes.
   "…help you find your").
 - No induction heads: every induction score 0.00, and the loss on the
   second copy hardly lower than on the first (11.02 against 11.16), so
-  the model doesn't copy from its context at all. Its previous-token
+  the model doesn't copy from its context at all. On its prompt repeated,
+  real text it knows, the second copy is even *harder* (2.07 against
+  1.81): it doesn't copy, and the restart mid-text surprises it. The
+  heads that matter most there (3.1 and 2.0, +0.15 each when ablated)
+  have no induction attention: ordinary language work. Its previous-token
   heads are weak too (0.12 at most, against about 0.02 for attention
   spread evenly). Both losses are above chance (ln 4,096 = 8.3): random
   words are far from any story, and the model is confidently wrong.

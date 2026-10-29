@@ -433,6 +433,9 @@ from `model-init` on:
 - **The logit lens** on the prompt: the residual stream after the
   embeddings and after each block, read through the final layer norm and
   output layer: loss, top-1 accuracy, and the top 3 next tokens.
+- **Copying real text**: the prompt repeated, the loss on each copy, and
+  every head ablated (its output zeroed) in turn, ranked by how much the
+  second copy's loss rises without it.
 - **One head's pattern** on the prompt (`--head BLOCK.HEAD`, by default the
   strongest induction head): where each position looks most.
 

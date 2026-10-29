@@ -200,7 +200,7 @@ llama: $(TRANSFORMER) ## The endpoint: generate with an open-weight model (LLAMA
 llama-check: $(TRANSFORMER) ## Check the open-weight model against Hugging Face's numbers.
 	$(call hdr,$@)
 	@test -f $(LLAMA_DIR)/model.safetensors || { echo "no model in $(LLAMA_DIR): download one (PLAN.md, \"The endpoint\") or set LLAMA_DIR"; exit 1; }
-	@test -f $(LLAMA_DIR)/reference.json || { echo "no $(LLAMA_DIR)/reference.json: run python3 tools/llama_reference.py $(LLAMA_DIR) -o $(LLAMA_DIR)/reference.json"; exit 1; }
+	@test -f $(LLAMA_DIR)/reference.json || { echo "no $(LLAMA_DIR)/reference.json: make it with Hugging Face's code, for example in hugging_face/'s pipenv:"; echo "  cd hugging_face && pipenv install transformers torch && pipenv run python3 ../tools/llama_reference.py models/SmolLM-135M -o models/SmolLM-135M/reference.json"; exit 1; }
 	$(TRANSFORMER) llama --model-dir $(LLAMA_DIR) --check $(LLAMA_DIR)/reference.json
 
 # Step 6. generate (inference)
