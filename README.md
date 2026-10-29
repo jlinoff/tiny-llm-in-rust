@@ -3,12 +3,11 @@
 [![Release](https://img.shields.io/github/v/release/jlinoff/tiny-llm-in-rust)](https://github.com/jlinoff/tiny-llm-in-rust/releases)
 [![Workflow](https://github.com/jlinoff/tiny-llm-in-rust/actions/workflows/main.yaml/badge.svg)](https://github.com/jlinoff/tiny-llm-in-rust/actions/workflows/main.yaml)
 
-
 This project builds every piece of a GPT-style (generative pre-trained
 transformer) large language model, or LLM, by hand: small enough to read
 and to run on a laptop, so a beginner can watch training and inference
-happen instead of taking them on faith. Each term is explained in
-[PLAN.md](PLAN.md)'s glossary.
+happen instead of taking them on faith. Terms are defined in
+[PLAN.md](PLAN.md)'s Terms section.
 
 - **a tokenizer** (byte-pair encoding, plain Python) that turns text into
   token IDs and back;
@@ -17,9 +16,9 @@ happen instead of taking them on faith. Each term is explained in
   (including LoRA, low-rank adaptation, which trains a small add-on instead
   of every weight), text generation with a key–value (KV) cache so each new
   token reuses earlier work, and a probe for looking inside;
-- **the same inference code running a real open-weight model**, Hugging
-  Face's SmolLM-135M, its predictions checked against Hugging Face's own
-  implementation.
+- **the same inference code running a real open-weight model** (one whose
+  trained weights are published), Hugging Face's SmolLM-135M, its
+  predictions checked against Hugging Face's own implementation.
 
 Models are trained on [TinyStories](https://arxiv.org/abs/2305.07759), short
 stories written for small models. What it gets you:
@@ -99,11 +98,10 @@ probabilities at every position, greedy text):
 make llama-check
 ```
 
-The probabilities agree to about 0.00007, the difference the
-difference 32-bit floating-point (f32) arithmetic makes arithmetic
-makes when two programs add in different orders, and the greedy text
-(always taking the most likely token) is identical. Keep `hugging_face/models/`
-out of git: the weights are 513 MB.
+The probabilities agree to about 0.00007, the difference 32-bit
+floating-point (f32) arithmetic makes when two programs add in different
+orders, and the greedy text (always taking the most likely token) is
+identical. Keep `hugging_face/models/` out of git: the weights are 513 MB.
 
 ## What's where
 
@@ -114,7 +112,7 @@ out of git: the weights are 513 MB.
 | `transformer/` | the model: build, train, finetune, generate, evaluate, probe, llama |
 | `attention/` | self-attention on its own, on toy inputs, up to an induction head |
 | `word2vec/` | word vectors, the historical precursor |
-| `tools/` | helpers: PLAN.md's table of contents, the Hugging Face reference, experiments, continuous integration (CI)’s smoke test |
+| `tools/` | helpers: PLAN.md's table of contents, the Hugging Face reference, experiments, continuous integration (CI)'s smoke test |
 
 ## Checks
 
