@@ -113,6 +113,11 @@ Grouped so that each definition uses only terms defined above it.
   as it learns: the matrices, and the **biases**, vectors added to a matrix
   product's result. **Hyperparameters** are the settings we choose (more in
   [Configuration](#configuration)).
+- **activations**: the values computed from an input as it passes through
+  the model, such as each token's vector after each block. Unlike weights,
+  they belong to one pass: training keeps them only until the backward pass
+  has used them. (Embedding rows are weights; the vectors copied from them
+  are activations: see "Two kinds of vector" in [Step 4: train](#step-4-train).)
 - **self-attention**: a sublayer in which each token's vector takes in
   information from the other tokens of the same sequence ("self", as opposed
   to **cross-attention**, which looks at a different sequence, such as the
@@ -552,11 +557,67 @@ next step: B new random windows
   themselves say which way to move each weight; there's nothing to
   bootstrap, because the targets come free with the text. That's
   **self-supervised** learning.
-- **Only the rows used get a gradient.** A token absent from this batch
-  leaves its row of E unchanged this step (apart from weight decay).
+- **Every row of E gets a gradient, two ways.** As the input table, only
+  the rows of tokens in this batch are used, so only they get a gradient
+  from that side. But E is also the output layer (tied), and the softmax
+  there scores every token at every position: each step pushes the true
+  next token's row towards the final vectors and every other row slightly
+  away, in proportion to its probability. A token absent from the batch
+  still moves, but only from the output side. (Next: what exactly moves.)
 
 Tokens arrive one at a time only in generation (step 6), where each token
 must be chosen before the next can be computed.
+
+**Two kinds of vector: the embedding row and the residual vector.** It's
+easy to picture a token's vector as one thing that travels through the
+model and is changed by training. There are two different objects, and
+each half of that picture fits one of them:
+
+| | Embedding row | Residual vector |
+|---|---|---|
+| What it is | a parameter: row `id` of E (V × d) | an **activation**: a value computed in one pass |
+| How many | one per vocabulary entry | one per position: B·T in a step |
+| Depends on context | no: the same for every occurrence | yes: built from the tokens before it |
+| Changes | only when the optimizer updates it, a little each step | in every block, as each sublayer adds to it |
+| Lives | the whole of training, then in the checkpoint | one forward and backward pass, then discarded |
+
+- **The residual vector starts as a copy.** The forward pass copies row
+  `ids[b, t]` of E into slot (b, t) and adds row t of P (a **gather**,
+  `Tape::gather`). Every block then adds to that copy, so by the top it
+  carries the context, not just the token. Attention never looks back at
+  E: each block computes queries, keys and values from the residual
+  vectors as they stand at that block. E is read at the input and, being
+  tied, once more at the output.
+- **Each occurrence gets its own.** If " the" is at positions 3 and 17,
+  there are two residual vectors. They start as the same row of E plus
+  different rows of P (in a model with rotary positions, such as SmolLM,
+  they start identical; see [The endpoint](#the-endpoint-an-open-weight-model)),
+  and diverge from the first attention sublayer on, since each attends to
+  different tokens before it. That's what makes these **contextual
+  embeddings**, where word2vec gives a word one fixed vector.
+- **Nothing is copied back.** Training never writes a residual vector into
+  E. The backward pass computes the gradient with respect to the residual
+  vector at every block, top to bottom; at the bottom, the gradient for
+  slot (b, t) *is* the gradient for row `ids[b, t]`, since the copy passes
+  it through unchanged. The gather's backward is a **scatter-add**: each
+  slot's gradient is added into the row it came from, so a token that
+  occurs 40 times in the batch gets its 40 contributions summed (and P's
+  row t gets the same gradient, through the addition). The token IDs are
+  what remember which row each slot came from; the vector itself carries
+  no record. AdamW then moves the row a small step. It never becomes what
+  the residual vector had turned into at the top: those top-level vectors
+  are thrown away after every step, along with all the other activations.
+- **Rare tokens learn slowly.** A row is updated from the input side only
+  in the steps whose batch contains its token. Tying gives every row the
+  output-side push each step, but that push mostly says "less likely
+  here". In a model without tying, a token that almost never occurs keeps
+  nearly its random starting row: the origin of **glitch tokens** such as
+  " SolidGoldMagikarp" in GPT-2's vocabulary, which made models behave
+  strangely (Land and Bartolo 2024, in the bibliography).
+- **Generation keeps a little more.** The residual vectors are still
+  discarded, but each block's keys and values for every position are kept
+  for the rest of the sequence, so a new token needn't recompute the
+  prefix: the KV cache ([Step 6: generate](#step-6-generate)).
 
 **Where the windows come from: random places in one stream.** Training
 never sees stories, or documents of any kind. `corpus.ids` is one long
