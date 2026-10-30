@@ -2838,6 +2838,31 @@ Rules every program in the project follows:
 - **Record what produced a file.** Files passed between steps say what made
   them: the tokenizer lists its training documents with checksums, and an
   `.ids` file carries the tokenizer's fingerprint.
+- **Turn what an experiment established into a test.** While a piece is
+  being built, its results are checked by eye: loss curves, samples, probe
+  scores. Once it works, what that showed becomes a check a machine reruns,
+  so it stays true when nobody is looking. `make test` runs them all, as CI
+  does on every push:
+  - Rust unit tests in each crate, including gradient checks against finite
+    differences, the strongest single test, since wrong gradients still
+    train, just badly;
+  - a golden-loss test (`transformer`, `train.rs`): a fixed seed and model
+    on the fixture corpus must reproduce recorded losses to within 0.002,
+    which allows for summation-order rounding and nothing more (a 3% change
+    in the learning rate moves them by 0.02). If a change to training is
+    meant, rerun it with `--nocapture`, check the new values are plausible,
+    and update them in the same commit;
+  - fixtures shared across languages (`transformer/tests/data`): written by
+    `mini_bpe.py`, read back by both its own tests and the Rust tokenizer's.
+    Regenerating them is a deliberate change to both sides, never a way to
+    make a failing test pass;
+  - Python unit tests (`tokenizer/test_mini_bpe.py`, `chat/test_make_chat.py`),
+    with the standard library's unittest, like the scripts themselves;
+  - the smoke test (`tools/ci/smoke.sh`): every step on a dozen stories, to
+    show the steps still hand their files to one another.
+
+  The tests were added after the project's first release, which had relied
+  on the experiments alone; that's the gap this rule closes.
 
 ## Where the stages live
 
@@ -2850,7 +2875,8 @@ directories would mean copying that code or reaching across directories for it.
 llm/
 ├── README.md      # a short introduction, for GitHub
 ├── PLAN.md        # this file
-├── Makefile       # one target per step: make tokenize, make encode, ...
+├── Makefile       # one target per step: make tokenize, make encode, ...;
+│                  # make test runs every check (see Conventions for all code)
 ├── config.toml    # settings for steps 3-6; config-full.toml for the full run,
 │                  # config-full-check.toml for checking its flow (make full-check)
 ├── out/           # generated files: tok.bpe, *.ids, *.safetensors (git-ignored; make clean removes it)
@@ -2860,8 +2886,10 @@ llm/
 ├── hugging_face/  # downloading open-weight models: Pipfile (huggingface-hub,
 │   │              # transformers, torch), README.md
 │   └── models/    # the downloads, e.g. SmolLM-135M (git-ignored; see The endpoint)
-├── tokenizer/     # text <-> token IDs: tokenize, encode, decode
-├── chat/          # make_chat.py: fine-tuning conversations from the stories
+├── tokenizer/     # text <-> token IDs: tokenize, encode, decode; test_mini_bpe.py
+├── chat/          # make_chat.py: fine-tuning conversations from the stories;
+│                  # test_make_chat.py
+├── docs/          # the README's illustration
 ├── tools/         # toc.py: this file's table of contents and link check (make toc);
 │                  # config_section.py: one config section per file, for make;
 │                  # sampling-test.sh: random against epoch sampling, five seeds;

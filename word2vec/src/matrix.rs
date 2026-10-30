@@ -107,3 +107,59 @@ pub fn softplus(x: f64) -> f64 {
         x.exp().ln_1p()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rng_is_reproducible_and_in_range() {
+        let (mut a, mut b) = (Rng::new(9), Rng::new(9));
+        for _ in 0..1000 {
+            assert_eq!(a.next_u64(), b.next_u64());
+            let u = a.unit();
+            assert!((0.0..1.0).contains(&u));
+            assert!(a.below(7) < 7);
+            b.unit();
+            b.below(7);
+        }
+        assert_ne!(Rng::new(1).next_u64(), Rng::new(2).next_u64());
+    }
+
+    #[test]
+    fn rows_read_back_what_was_added() {
+        let m = Matrix::zeros(3, 2);
+        m.add_row(1, &[1.5, -2.0]);
+        m.add_row(1, &[0.5, 1.0]);
+        let mut row = [0.0; 2];
+        m.read_row(1, &mut row);
+        assert_eq!(row, [2.0, -1.0]);
+        m.read_row(0, &mut row);
+        assert_eq!(row, [0.0, 0.0]);
+        assert_eq!((m.rows(), m.dim()), (3, 2));
+    }
+
+    #[test]
+    fn uniform_stays_within_scale() {
+        let m = Matrix::uniform(50, 4, 0.25, &mut Rng::new(3));
+        let mut row = [0.0; 4];
+        for r in 0..m.rows() {
+            m.read_row(r, &mut row);
+            assert!(row.iter().all(|x| (-0.25..0.25).contains(x)));
+        }
+    }
+
+    /// softplus(x) = ln(1 + e^x), also where e^x would overflow; and the loss
+    /// identity it serves: -ln sigmoid(x) = softplus(-x).
+    #[test]
+    fn softplus_and_sigmoid() {
+        for x in [-20.0f64, -1.0, 0.0, 0.5, 10.0] {
+            assert!((softplus(x) - (1.0 + x.exp()).ln()).abs() < 1e-12);
+            let s = f64::from(sigmoid(x as f32));
+            assert!((-s.ln() - softplus(-x)).abs() < 1e-6);
+        }
+        assert_eq!(softplus(1000.0), 1000.0);
+        assert!((sigmoid(0.0) - 0.5).abs() < 1e-7);
+        assert_eq!(dot(&[1.0, 2.0, 3.0], &[4.0, -5.0, 6.0]), 12.0);
+    }
+}

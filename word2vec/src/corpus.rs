@@ -168,3 +168,83 @@ fn read_text(path: &Path) -> Result<String, String> {
     String::from_utf8(bytes)
         .map_err(|_| format!("corpus file {} is not valid UTF-8 text", path.display()))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Write each text to its own file in a fresh temporary folder.
+    fn files(name: &str, texts: &[&str]) -> Vec<PathBuf> {
+        let dir = std::env::temp_dir().join(format!("mini_w2v_{name}_{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        texts
+            .iter()
+            .enumerate()
+            .map(|(i, t)| {
+                let p = dir.join(format!("{i}.txt"));
+                fs::write(&p, t).unwrap();
+                p
+            })
+            .collect()
+    }
+
+    #[test]
+    fn words_are_lowercase_alphanumeric_runs() {
+        let got: Vec<String> = words("Don't stop! Café 42x, THE end.").collect();
+        assert_eq!(got, ["don", "t", "stop", "café", "42x", "the", "end"]);
+    }
+
+    /// Most frequent first, ties alphabetical; words below min_count are
+    /// dropped from the vocabulary and from the token stream.
+    #[test]
+    fn vocabulary_order_and_min_count() {
+        let paths = files("vocab", &["b a b c a b rare"]);
+        let c = Corpus::load(&paths, 2).unwrap();
+        assert_eq!(c.vocab.words, ["b", "a"]);
+        assert_eq!(c.vocab.counts, [3, 2]);
+        assert_eq!(c.distinct, 4);
+        assert_eq!(c.vocab.id("a"), Some(1));
+        assert_eq!(c.vocab.id("rare"), None);
+        assert_eq!(c.tokens, [0, 1, 0, 1, 0]); // "c" and "rare" are gone
+        assert_eq!(c.vocab.total(), 5);
+    }
+
+    #[test]
+    fn ties_break_alphabetically() {
+        let paths = files("ties", &["z y x z y x"]);
+        let c = Corpus::load(&paths, 1).unwrap();
+        assert_eq!(c.vocab.words, ["x", "y", "z"]);
+    }
+
+    /// Sentences are at most MAX_SENTENCE long and never cross a file.
+    #[test]
+    fn sentences_respect_length_and_documents() {
+        let long = "w ".repeat(MAX_SENTENCE + 5);
+        let paths = files("sentences", &[&long, "w w w"]);
+        let c = Corpus::load(&paths, 1).unwrap();
+        assert_eq!(
+            c.sentences,
+            [
+                (0, MAX_SENTENCE),
+                (MAX_SENTENCE, MAX_SENTENCE + 5),
+                (MAX_SENTENCE + 5, MAX_SENTENCE + 8)
+            ]
+        );
+        assert_eq!(c.documents.len(), 2);
+        assert_eq!(c.documents[1].words, 3);
+    }
+
+    #[test]
+    fn nothing_frequent_enough_is_an_error() {
+        let paths = files("empty", &["one two three"]);
+        assert!(Corpus::load(&paths, 2).is_err());
+    }
+
+    #[test]
+    fn invalid_utf8_is_an_error() {
+        let paths = files("utf8", &[""]);
+        fs::write(&paths[0], [0xff, 0xfe, b'a']).unwrap();
+        let err = Corpus::load(&paths, 1).err().unwrap();
+        assert!(err.contains("UTF-8"), "{err}");
+    }
+}

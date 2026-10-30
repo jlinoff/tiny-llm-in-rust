@@ -923,6 +923,49 @@ mod tests {
         }
     }
 
+    /// A golden regression test for training as a whole: a fixed model, seed
+    /// and corpus (tests/data/tiny.ids, a real tokenized text) must reproduce
+    /// the recorded losses. The other tests check pieces (gradients, the
+    /// schedule, resuming); this one catches a change that quietly makes
+    /// training different, such as a learning-rate or batching slip, which
+    /// those would all pass. The tolerance allows for summation-order
+    /// rounding (another BLAS library, another thread count) and nothing
+    /// more: a real change to training moves these by far more.
+    ///
+    /// If a change to training is intended, rerun with
+    /// `cargo test golden -- --nocapture`, check the new losses are
+    /// plausible, and update GOLDEN.
+    #[test]
+    fn golden_losses_on_the_fixture_corpus() {
+        const GOLDEN: [(u64, f64); 4] = [
+            (1, 5.757092),
+            (20, 4.652846),
+            (40, 4.190655),
+            (60, 4.424769),
+        ];
+        const TOLERANCE: f64 = 2e-3;
+        let corpus = Corpus::decode(include_bytes!("../tests/data/tiny.ids")).unwrap();
+        let c = tiny_model();
+        let t = training(60);
+        let mut s = fresh(&c, corpus.vocab_size);
+        let mut losses = Vec::new();
+        for step_no in 1..=t.steps {
+            let b = data::train_batch(&corpus.ids, 8, c.context, t.seed, step_no, None);
+            losses.push(step(&mut s, &c, &t, &b, c.context).0);
+        }
+        let got: Vec<(u64, f64)> = GOLDEN
+            .iter()
+            .map(|&(n, _)| (n, losses[n as usize - 1]))
+            .collect();
+        println!("losses at steps {got:?}");
+        for (&(n, want), &(_, have)) in GOLDEN.iter().zip(&got) {
+            assert!(
+                (have - want).abs() < TOLERANCE,
+                "step {n}: loss {have:.6}, golden {want:.6} (all: {got:?})"
+            );
+        }
+    }
+
     #[test]
     fn refuses_data_from_another_tokenizer() {
         let corpus = Corpus::decode(include_bytes!("../tests/data/tiny.ids")).unwrap();

@@ -123,11 +123,30 @@ identical. Keep `hugging_face/models/` out of git: the weights are 513 MB.
 
 ## Checks
 
-Every push and pull request runs `.github/workflows/main.yaml`: formatting,
-lint (clippy, pylint) and the tests on Linux and macOS (there with
-Accelerate), PLAN.md's table of contents and links, and the whole flow on a
-dozen short stories (`tools/ci/smoke.sh`, a few seconds; it runs locally
-too).
+```
+make test          # everything below: a minute or two after the first build
+make test-rust     # Rust unit tests: transformer, attention, word2vec
+make test-python   # Python unit tests: mini_bpe.py, make_chat.py
+make smoke         # the whole flow on a dozen short stories, in seconds
+make lint          # formatting, clippy, pylint, PLAN.md's table of contents and links
+```
+
+What the tests guard, beyond each piece's own behavior:
+
+- **gradients**: the whole model's, and LoRA's, match finite differences,
+  so backpropagation is right;
+- **training as a whole**: a fixed seed on a small fixture corpus must
+  reproduce recorded losses, so a change that quietly alters training (a
+  learning-rate or batching slip) fails a test instead of just training
+  worse;
+- **Python and Rust agree**: both tokenizers must reproduce the same
+  fixtures (`transformer/tests/data`), written by `mini_bpe.py`;
+- **honest fine-tuning data**: every request names words its story really
+  contains, and evaluation stories are never trained on.
+
+Every push and pull request runs the same checks in
+`.github/workflows/main.yaml`, on Linux and on macOS (there with
+Accelerate).
 
 ## License
 

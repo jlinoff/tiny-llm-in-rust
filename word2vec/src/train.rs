@@ -239,7 +239,7 @@ impl<'a> Trainer<'a> {
         {
             let done = self.progress.fetch_add((end - start) as u64, Relaxed);
             let alpha = self.learning_rate(done);
-            if thread == 0 && !self.cfg.quiet && n.is_multiple_of(64 * self.cfg.threads) {
+            if thread == 0 && !self.cfg.quiet && n % (64 * self.cfg.threads) == 0 {
                 self.show_progress(epoch, done, alpha);
             }
 
@@ -455,5 +455,107 @@ impl<'a> Trainer<'a> {
             rate / 1000.0
         );
         let _ = std::io::stderr().flush();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::query::Normalized;
+    use std::path::PathBuf;
+
+    #[test]
+    fn subsampling_keeps_rare_words_and_thins_frequent_ones() {
+        let counts = [1_000_000, 1_000, 10];
+        let keep = keep_probabilities(&counts, 1e-3);
+        assert!(keep[0] < 0.1, "{keep:?}");
+        assert_eq!(&keep[1..], [1.0, 1.0]);
+        let f = 1e6 / counts.iter().sum::<u64>() as f64;
+        let want = ((f / 1e-3).sqrt() + 1.0) * 1e-3 / f;
+        assert!((f64::from(keep[0]) - want).abs() < 1e-6);
+        assert!(keep_probabilities(&counts, 0.0).iter().all(|&p| p == 1.0));
+    }
+
+    /// Draws follow count^0.75: the table's shares, measured by sampling.
+    #[test]
+    fn negatives_follow_the_three_quarter_power() {
+        let counts = [1000u64, 100, 10];
+        let s = NegativeSampler::new(&counts);
+        let mut rng = Rng::new(1);
+        let mut seen = [0usize; 3];
+        let draws = 200_000;
+        for _ in 0..draws {
+            seen[s.sample(&mut rng) as usize] += 1;
+        }
+        let w: Vec<f64> = counts.iter().map(|&c| (c as f64).powf(0.75)).collect();
+        let total: f64 = w.iter().sum();
+        for i in 0..3 {
+            let share = seen[i] as f64 / draws as f64;
+            assert!((share - w[i] / total).abs() < 0.01, "word {i}: {share}");
+        }
+    }
+
+    #[test]
+    fn prediction_loss_is_minus_log_sigmoid() {
+        let p = f64::from(sigmoid(1.3));
+        assert!((prediction_loss(1.3, 1.0) + p.ln()).abs() < 1e-6);
+        assert!((prediction_loss(1.3, 0.0) + (1.0 - p).ln()).abs() < 1e-6);
+    }
+
+    /// Two topics that never share a window: after training, each word's
+    /// nearest neighbors are from its own topic, and the frozen-weight
+    /// evaluation loss has fallen. One thread, so the run is reproducible.
+    #[test]
+    fn training_separates_two_topics() {
+        let dir = std::env::temp_dir().join(format!("mini_w2v_topics_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let topics = [
+            ["cat", "dog", "mouse", "pet"],
+            ["car", "bus", "train", "road"],
+        ];
+        let mut rng = Rng::new(5);
+        let paths: Vec<PathBuf> = topics
+            .iter()
+            .enumerate()
+            .map(|(i, words)| {
+                let text: Vec<&str> = (0..3000).map(|_| words[rng.below(4)]).collect();
+                let p = dir.join(format!("{i}.txt"));
+                std::fs::write(&p, text.join(" ")).unwrap();
+                p
+            })
+            .collect();
+        let corpus = Corpus::load(&paths, 1).unwrap();
+        for arch in [Arch::SkipGram, Arch::Cbow] {
+            let cfg = Config {
+                arch,
+                window: 2,
+                negative: 3,
+                epochs: 5,
+                alpha: 0.05,
+                sample: 0.0,
+                threads: 1,
+                seed: 1,
+                quiet: true,
+            };
+            let model = Model::new(corpus.vocab.len(), 8, cfg.seed);
+            let trainer = Trainer::new(&cfg, &model, &corpus);
+            let before = trainer.eval_loss();
+            for epoch in 1..=cfg.epochs {
+                trainer.run_epoch(epoch);
+            }
+            let after = trainer.eval_loss();
+            assert!(after < 0.8 * before, "{arch:?}: loss {before} -> {after}");
+            let n = Normalized::new(&model.input);
+            let topic = |id: usize| {
+                let w = &corpus.vocab.words[id];
+                topics.iter().position(|t| t.contains(&w.as_str())).unwrap()
+            };
+            for id in 0..corpus.vocab.len() {
+                for (other, _) in n.nearest(id, 3) {
+                    assert_eq!(topic(other), topic(id), "{arch:?}: neighbors of {id}");
+                }
+            }
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

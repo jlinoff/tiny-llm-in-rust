@@ -369,6 +369,24 @@ intact. A tokenizer saved by an older version still carries the old pattern;
 encoding text with underscores using it fails the round-trip check, so retrain
 it.
 
+## Tests
+
+`python3 -m unittest discover -s tokenizer -v` (or `make test-python`) runs
+`test_mini_bpe.py`, standard library only:
+
+- decoding inverts encoding, for text it was trained on and text it
+  wasn't (other scripts, emoji, whitespace runs); the pre-tokenizer drops
+  no character (the underscore bug above, as a test)
+- the fast trainer gives exactly the reference trainer's merges, including
+  run to the end on texts full of ties; training is deterministic
+- `.bpe` and `.ids` files round-trip; the fingerprint ignores comments but
+  changes with the merges, the pattern or the special tokens
+- the fixtures in `transformer/tests/data`, which the Rust tokenizer is
+  tested against too: the vocabulary size and fingerprint of `tiny.bpe`,
+  the chunks and IDs of 19 texts, and the contents of `tiny.ids`
+- special tokens never come out of ordinary text, only from turn markers
+  when asked; end-of-text is never read from text
+
 ## Data files
 
 - `corpus.txt`: a small test corpus.

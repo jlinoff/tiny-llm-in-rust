@@ -308,6 +308,48 @@ data/TinyStoriesV2-GPT4-train.txt data/TinyStoriesV2-GPT4-valid.txt:
 	curl -fL -o $@.part https://huggingface.co/datasets/roneneldan/TinyStories/resolve/main/$(notdir $@)
 	mv $@.part $@
 
+# Checks: the same ones CI runs (.github/workflows/main.yaml), in a minute or
+# two after the first build. `make test` runs them all; each part runs on
+# its own too. Nothing here touches out/ or data/.
+CARGO_FEATURE_FLAGS = $(if $(CARGO_FEATURES),--features $(CARGO_FEATURES))
+PY_SOURCES = tokenizer/*.py chat/*.py tools/*.py
+
+.PHONY: test
+test: test-rust test-python smoke lint ## Run every check: Rust and Python tests, the smoke test, lint.
+	@printf "\nAll checks passed.\n"
+
+.PHONY: test-rust
+test-rust: ## Rust unit tests for transformer, attention and word2vec.
+	$(call hdr,$@)
+	cargo test --release -q --manifest-path transformer/Cargo.toml $(CARGO_FEATURE_FLAGS)
+	cargo test --release -q --manifest-path attention/Cargo.toml
+	cargo test --release -q --manifest-path word2vec/Cargo.toml
+
+.PHONY: test-python
+test-python: ## Python unit tests for mini_bpe.py and make_chat.py.
+	$(call hdr,$@)
+	python3 -m unittest discover -s tokenizer
+	python3 -m unittest discover -s chat
+
+.PHONY: smoke
+smoke: $(TRANSFORMER) ## The whole flow on a dozen stories, in seconds (tools/ci/smoke.sh).
+	$(call hdr,$@)
+	tools/ci/smoke.sh > /dev/null
+	@echo "the whole flow ran"
+
+.PHONY: lint
+lint: ## Formatting, clippy, pylint (if installed), PLAN.md's links.
+	$(call hdr,$@)
+	for c in transformer attention word2vec; do cargo fmt --manifest-path $$c/Cargo.toml -- --check || exit 1; done
+	cargo clippy --release -q --manifest-path transformer/Cargo.toml --all-targets $(CARGO_FEATURE_FLAGS) -- -D warnings
+	cargo clippy --release -q --manifest-path attention/Cargo.toml --all-targets -- -D warnings
+	cargo clippy --release -q --manifest-path word2vec/Cargo.toml --all-targets -- -D warnings
+	@if command -v pylint > /dev/null; then \
+		echo "pylint --disable=import-error $(PY_SOURCES)"; \
+		pylint --disable=import-error --score=n $(PY_SOURCES); \
+	else echo "pylint not installed: skipped (pip install pylint)"; fi
+	python3 tools/toc.py --check PLAN.md
+
 .PHONY: toc
 toc: ## Update PLAN.md's table of contents and check its internal links.
 	python3 tools/toc.py PLAN.md

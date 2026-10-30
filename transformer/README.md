@@ -564,7 +564,10 @@ starting shape with a small vocabulary, a 2-core Linux machine takes about
 - training: the learning-rate schedule; a tiny model memorizes a repeating
   text (loss from ln V to under 0.2); data from another tokenizer is
   refused; and 10 steps + checkpoint + resume + 10 steps gives exactly the
-  weights and Adam state of 20 steps
+  weights and Adam state of 20 steps; and a golden test: 60 steps on
+  `tests/data/tiny.ids` with a fixed seed reproduce recorded losses to
+  within 0.002, so a change that quietly alters training fails (see PLAN.md,
+  Conventions for all code, for updating them when a change is meant)
 - fine-tuning data: conversations parse into rows with only the reply and
   `<|end|>` scored, too-long ones are left out and counted, and malformed
   ones (no request, no reply, no end, two turns) are refused

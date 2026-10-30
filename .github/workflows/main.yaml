@@ -2,7 +2,8 @@
 # that the code is formatted, lint-free and passes its tests, and that the
 # whole flow (tokenizer to probe) still runs, on a tiny corpus
 # (tools/ci/smoke.sh). On macOS the transformer is also built and tested with
-# Apple's Accelerate library (the blas feature).
+# Apple's Accelerate library (the blas feature). `make test` runs the same
+# checks locally; keep the two in step.
 name: CI
 
 on:
@@ -74,6 +75,10 @@ jobs:
         # they're not installed here, hence --disable=import-error.
         run: |
           pip install pylint==4.1.3
-          pylint --disable=import-error tokenizer/mini_bpe.py chat/make_chat.py tools/*.py
+          pylint --disable=import-error tokenizer/*.py chat/*.py tools/*.py
+      - name: Unit tests
+        run: |
+          python3 -m unittest discover -s tokenizer -v
+          python3 -m unittest discover -s chat -v
       - name: PLAN.md's table of contents and internal links
         run: python3 tools/toc.py --check PLAN.md

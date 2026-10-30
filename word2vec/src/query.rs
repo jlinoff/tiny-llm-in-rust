@@ -68,3 +68,35 @@ pub fn save_vectors(path: &Path, vocab: &Vocab, m: &Matrix) -> std::io::Result<(
     }
     out.flush()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn matrix(rows: &[[f32; 2]]) -> Matrix {
+        let m = Matrix::zeros(rows.len(), 2);
+        for (r, v) in rows.iter().enumerate() {
+            m.add_row(r, v);
+        }
+        m
+    }
+
+    /// Nearest by cosine (direction, not length), never the word itself.
+    #[test]
+    fn nearest_by_cosine_excluding_self() {
+        let m = matrix(&[[1.0, 0.0], [10.0, 1.0], [0.0, 1.0], [-1.0, 0.0]]);
+        let n = Normalized::new(&m);
+        let got: Vec<usize> = n.nearest(0, 3).iter().map(|&(r, _)| r).collect();
+        assert_eq!(got, [1, 2, 3]);
+        let top = n.nearest(0, 1);
+        assert!((top[0].1 - 10.0 / 101f32.sqrt()).abs() < 1e-6);
+        assert_eq!(n.nearest(0, 99).len(), 3);
+        assert!(n.nearest(0, 0).is_empty());
+    }
+
+    #[test]
+    fn zero_rows_do_not_divide_by_zero() {
+        let n = Normalized::new(&matrix(&[[0.0, 0.0], [1.0, 1.0]]));
+        assert_eq!(n.nearest(1, 1)[0].1, 0.0);
+    }
+}

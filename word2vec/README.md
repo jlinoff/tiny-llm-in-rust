@@ -383,6 +383,17 @@ times the size of text8.
 - **Subsampling off.** `--sample 0`: slower, and frequent words crowd the
   neighbor lists.
 
+## Tests
+
+`cargo test --release` (or `make test-rust`) checks: splitting text into
+words; the vocabulary's order (most frequent first, ties alphabetical) and
+the `--min-count` cut; sentences never longer than 1,000 words nor crossing
+a file; the random generator, the shared matrix and the loss functions;
+subsampling (rare words always kept); negative sampling following
+count^0.75; cosine nearest neighbors; and, for skip-gram and CBOW, that
+training on two topics that never share a window lowers the loss and gives
+every word only neighbors from its own topic.
+
 ## How it relates to LLMs
 
 - **The same table.** word2vec's input table is the same kind of object as an

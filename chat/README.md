@@ -86,3 +86,12 @@ The input is checked to be readable and both outputs writable before any
 work, and no story may already contain a turn marker or the separator. After
 writing, `chat.txt` is read back and compared with what was meant to be
 written.
+
+## Tests
+
+`python3 -m unittest discover -s chat -v` (or `make test-python`) runs
+`test_make_chat.py`: splitting stories as text and as bytes gives the same
+stories; which words qualify; every request names three words its story
+contains, in the order they first appear, reproducibly for a seed; and, end
+to end on `tools/ci/stories.txt`, every training story comes from the
+training part and every evaluation story from the held-out part.
