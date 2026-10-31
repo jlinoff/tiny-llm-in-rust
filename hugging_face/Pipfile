@@ -6,7 +6,9 @@ name = "pypi"
 [packages]
 huggingface-hub = "*"
 transformers = "*"
+safetensors = "*"
 torch = "*"
+pylint = "*"
 
 [dev-packages]
 

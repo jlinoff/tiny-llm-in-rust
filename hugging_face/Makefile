@@ -6,6 +6,13 @@ download: models/SmolLM-135M/model.safetensors ## download SmolLM-135M
 models/SmolLM-135M/model.safetensors:
 	pipenv run hf download HuggingFaceTB/SmolLM-135M  --local-dir ./models/SmolLM-135
 
+# Once this is done
+# cd tiny-llm-in-rust
+# make llama LLAMA_DIR=hugging_face/models/SmolLM-1.7B PROMPT='Once upon a time' LLM_ARGS="--seed 5"
+models/SmolLM-1.7B/model.safetensors:
+	pipenv run hf download HuggingFaceTB/SmolLM-1.7B --local-dir models/SmolLM-1.7B --exclude "onnx/*"
+	cd models/SmolLM-1.7B && pipenv run python3 ../../join.py
+
 .PHONY: help
 help:  ## This help message.
 	$(call hdr,$@)

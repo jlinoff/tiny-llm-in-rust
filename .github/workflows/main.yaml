@@ -80,5 +80,8 @@ jobs:
         run: |
           python3 -m unittest discover -s tokenizer -v
           python3 -m unittest discover -s chat -v
+          python3 -m unittest discover -s tools -v
       - name: PLAN.md's table of contents and internal links
         run: python3 tools/toc.py --check PLAN.md
+      - name: Acronyms defined at first use (PLAN.md, README.md)
+        run: python3 tools/acronyms.py PLAN.md README.md --known tools/acronyms-known.txt

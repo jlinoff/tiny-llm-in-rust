@@ -20,8 +20,8 @@ written with Claude; no copyright is claimed.*
   token IDs and back;
 - **a transformer** (Rust, no machine-learning framework): its own matrices,
   automatic differentiation, training loop, optimizer, fine-tuning
-  (including LoRA, low-rank adaptation, which trains a small add-on instead
-  of every weight), text generation with a key–value (KV) cache so each new
+  (including LoRA (low-rank adaptation), which trains a small add-on
+  instead of every weight), text generation with a key–value (KV) cache so each new
   token reuses earlier work, and a probe for looking inside;
 - **the same inference code running a real open-weight model** (one whose
   trained weights are published), Hugging Face's SmolLM-135M and its
@@ -139,7 +139,7 @@ make test          # everything below: a minute or two after the first build
 make test-rust     # Rust unit tests: transformer, attention, word2vec
 make test-python   # Python unit tests: mini_bpe.py, make_chat.py
 make smoke         # the whole flow on a dozen short stories, in seconds
-make lint          # formatting, clippy, pylint, PLAN.md's table of contents and links
+make lint          # formatting, clippy, pylint, PLAN.md's links, acronyms defined at first use
 ```
 
 What the tests guard, beyond each piece's own behavior:

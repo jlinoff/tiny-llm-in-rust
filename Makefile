@@ -326,10 +326,11 @@ test-rust: ## Rust unit tests for transformer, attention and word2vec.
 	cargo test --release -q --manifest-path word2vec/Cargo.toml
 
 .PHONY: test-python
-test-python: ## Python unit tests for mini_bpe.py and make_chat.py.
+test-python: ## Python unit tests: mini_bpe.py, make_chat.py, the tools.
 	$(call hdr,$@)
 	python3 -m unittest discover -s tokenizer
 	python3 -m unittest discover -s chat
+	python3 -m unittest discover -s tools
 
 .PHONY: smoke
 smoke: $(TRANSFORMER) ## The whole flow on a dozen stories, in seconds (tools/ci/smoke.sh).
@@ -338,7 +339,7 @@ smoke: $(TRANSFORMER) ## The whole flow on a dozen stories, in seconds (tools/ci
 	@echo "the whole flow ran"
 
 .PHONY: lint
-lint: ## Formatting, clippy, pylint (if installed), PLAN.md's links.
+lint: ## Formatting, clippy, pylint (if installed), PLAN.md's links, acronyms defined.
 	$(call hdr,$@)
 	for c in transformer attention word2vec; do cargo fmt --manifest-path $$c/Cargo.toml -- --check || exit 1; done
 	cargo clippy --release -q --manifest-path transformer/Cargo.toml --all-targets $(CARGO_FEATURE_FLAGS) -- -D warnings
@@ -349,6 +350,7 @@ lint: ## Formatting, clippy, pylint (if installed), PLAN.md's links.
 		pylint --disable=import-error --score=n $(PY_SOURCES); \
 	else echo "pylint not installed: skipped (pip install pylint)"; fi
 	python3 tools/toc.py --check PLAN.md
+	python3 tools/acronyms.py PLAN.md README.md --known tools/acronyms-known.txt
 
 .PHONY: toc
 toc: ## Update PLAN.md's table of contents and check its internal links.

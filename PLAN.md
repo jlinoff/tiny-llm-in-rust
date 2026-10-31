@@ -80,7 +80,9 @@ Grouped so that each definition uses only terms defined above it.
 
 #### Text and tokens
 
-- **corpus**: the body of text a model is trained on.
+- **corpus**: the body of text a model is trained on. Ours is
+  **TinyStories** (Eldan and Li 2023), short, simple stories written for
+  small models (more in [Open decisions](#open-decisions), 6).
 - **token**: a unit of text the model works with: a word, part of a word, a
   punctuation mark, or a single byte. Each token has a **token ID**, an integer.
 - **tokenizer**: the component that converts text to token IDs (**encoding**)
@@ -618,7 +620,8 @@ each half of that picture fits one of them:
   tied, once more at the output.
 - **Each occurrence gets its own.** If " the" is at positions 3 and 17,
   there are two residual vectors. They start as the same row of E plus
-  different rows of P (in a model with rotary positions, such as SmolLM,
+  different rows of P (in a model with rotary positions, such as SmolLM
+  (the open-weight model of [The endpoint](#the-endpoint-an-open-weight-model)),
   they start identical; see [The endpoint](#the-endpoint-an-open-weight-model)),
   and diverge from the first attention sublayer on, since each attends to
   different tokens before it. That's what makes these **contextual
@@ -985,8 +988,8 @@ training:
 
 With a KV cache, at 5–20 GFLOP/s:
 
-- the 0.85M starting model (1.7 MFLOP, million floating-point operations,
-  per token): thousands of tokens per
+- the 0.85M starting model, at 1.7 MFLOP (million floating-point
+  operations) per token: thousands of tokens per
   second, so overhead decides
 - an 8M model (16 MFLOP per token): about 300–1,200 tokens per second
 - a 20M model (40 MFLOP per token): about 125–500 tokens per second. Its
@@ -1448,8 +1451,9 @@ V      →  what you get    (the information actually passed along)
 - **Q and K decide the weights; V doesn't.** The weights come from pairing
   the current token's query with the key of itself and each earlier token. V
   plays no part in deciding where to look; it's what gets delivered once the
-  weights are fixed. Elhage et al. (2021) call these the "QK circuit" and the
-  "OV circuit" (V with the output matrix W_o) and analyze them separately: a
+  weights are fixed. Elhage et al. (2021) call these the "QK circuit" (Q
+  and K, deciding where to look) and the "OV circuit" (V with the output
+  matrix W_o) and analyze them separately: a
   head can find tokens by one property and copy a different one from them.
 - **Each row is one token looking back.** The weights are the attention the
   *current* token pays to each earlier token (and itself): "sat"'s row,
@@ -2916,9 +2920,9 @@ Rules every program in the project follows:
   differences can grow; keeping the order fixed avoids that. The same
   happens across machines even with a fixed order: functions such as exp
   and tanh come from each platform's maths library, which may round the last
-  bit differently (+, −, ×, ÷ and √ are exact by the IEEE 754 standard, the
+  bit differently (+, −, ×, ÷ and √ are exact by IEEE 754, the
   floating-point standard of the Institute of Electrical and Electronics
-  Engineers). A
+  Engineers (IEEE)). A
   training run that converges firmly absorbs that; one that ends in a
   fragile partial solution can amplify it into a visibly different result
   (`mini_attention block`'s runs without an FFN are an example). So report
@@ -2952,6 +2956,10 @@ Rules every program in the project follows:
     with the standard library's unittest, like the scripts themselves;
   - the smoke test (`tools/ci/smoke.sh`): every step on a dozen stories, to
     show the steps still hand their files to one another.
+  - the documents' own checks: PLAN.md's table of contents and links
+    (`tools/toc.py`), and every acronym in PLAN.md and README.md defined at
+    its first use (`tools/acronyms.py`, with an allowlist of names in
+    `tools/acronyms-known.txt`).
 
   The tests were added after the project's first release, which had relied
   on the experiments alone; that's the gap this rule closes.
@@ -2983,6 +2991,7 @@ llm/
 │                  # test_make_chat.py
 ├── docs/          # the README's illustration
 ├── tools/         # toc.py: this file's table of contents and link check (make toc);
+│                  # acronyms.py: every acronym defined at first use (make lint);
 │                  # config_section.py: one config section per file, for make;
 │                  # sampling-test.sh: random against epoch sampling, five seeds;
 │                  # llama_reference.py: Hugging Face's numbers for the endpoint;
