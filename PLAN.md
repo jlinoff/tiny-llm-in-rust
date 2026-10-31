@@ -62,6 +62,8 @@ names are explained where they first appear.
 - [Open decisions](#open-decisions)
 - [The full TinyStories run](#the-full-tinystories-run)
 - [The endpoint: an open-weight model](#the-endpoint-an-open-weight-model)
+  - [How far could this go?](#how-far-could-this-go)
+  - [Trying a new model: SmolLM-1.7B, step by step](#trying-a-new-model-smollm-17b-step-by-step)
 - [Order of work](#order-of-work)
 - [Bibliography](#bibliography)
   - [Tokenization (tokenizer/)](#tokenization-tokenizer)
@@ -3746,7 +3748,9 @@ weights for every token, so its speed is bounded by memory bandwidth, the
 reason production engines use 16-bit or quantized weights (see the
 Inference part of [What production models add](#what-production-models-add-and-why-its-left-out)).
 
-**How far could this go?** Two different limits bound which models
+### How far could this go?
+
+Two different limits bound which models
 `transformer llama` can run on a 32 GB M4, and they point in different
 directions: memory and speed are physics, while the loader's checks are
 a choice.
@@ -3791,7 +3795,9 @@ about 4B, the limit is precision, not code:
   30-billion-parameter model in about 17 GB. That's how llama.cpp and MLX
   run large models on a Mac like this one, and a project of its own.
 
-**Trying a new model: SmolLM-1.7B, step by step.** Running another model
+### Trying a new model: SmolLM-1.7B, step by step
+
+Running another model
 means downloading it, checking that the loader accepts it, running it, and
 checking it against Hugging Face's numbers, the same steps as for
 SmolLM-135M. (Not yet run here: this records the procedure, and the
