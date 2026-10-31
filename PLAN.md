@@ -232,8 +232,8 @@ Grouped so that each definition uses only terms defined above it.
 - **backpropagation**: the algorithm that computes, for every weight, how much
   the error would change if the weight moved slightly (its **gradient**), by
   applying the chain rule backward through the network. **Gradient descent**
-  then moves each weight a little against its gradient; **Adam** is the
-  improved variant nearly every transformer is trained with.
+  then moves each weight a little against its gradient; **Adam** (below)
+  is the improved variant nearly every transformer is trained with.
 - **automatic differentiation**: computing gradients mechanically instead of
   writing each formula by hand. In the reverse-mode form used for training,
   every operation records itself on a **tape** as the forward pass runs, and
@@ -261,6 +261,22 @@ Grouped so that each definition uses only terms defined above it.
   with it: **weight decay** shrinks every weight slightly each step, and
   **gradient clipping** scales an unusually long gradient down (more in
   [Configuration](#configuration)).
+- **Adam** (adaptive moment estimation; Kingma and Ba 2015): the
+  improvement on plain gradient descent that nearly every transformer is
+  trained with. For each weight it keeps two running averages over the
+  steps: of the gradient (its first **moment**, which smooths out the
+  noise of single batches) and of the gradient squared (its second
+  moment, a measure of the gradient's typical size). Each step moves the
+  weight by the learning rate × the first average ÷ the square root of
+  the second, so every weight takes steps of about the learning rate,
+  whether its gradients are large or tiny ("adaptive"). The averages start
+  at zero, so early on they're divided by a correction that undoes the
+  resulting underestimate. Its state, two numbers per weight, is saved in
+  checkpoints, so a stopped run can resume exactly.
+- **AdamW** (Adam with decoupled weight decay; Loshchilov and Hutter 2019):
+  Adam plus weight decay applied to the weights directly, rather than
+  added to the gradient, where Adam's division would weaken it for exactly
+  the weights with large gradients. It's what `transformer/` trains with.
 - **N, D**: in training-cost and scaling formulas, N is the number of
   parameters and D the number of tokens trained on (D = steps × B × T),
   as in "training costs about 6·N·D operations". D counts tokens
@@ -289,6 +305,16 @@ Grouped so that each definition uses only terms defined above it.
   of low rank r, W + (α/r)·A·B; the result is a small **adapter** file (see
   [LoRA](#lora-fine-tuning-a-low-rank-adapter)).
 - **checkpoint**: a saved file of a model's weights (more in open decision 3).
+- **safetensors**: the file format our checkpoints use, from Hugging Face
+  (the main public hub for sharing models): a short header describing each named tensor, then the numbers
+  themselves, with no executable code in the file (more in
+  [Open decisions](#open-decisions), 3).
+- **f32**, **f64**: floating-point numbers (a significand and an exponent,
+  like scientific notation in binary) of 32 and 64 bits, with about 7 and
+  16 significant decimal digits. Training here uses f32; the gradient
+  checks use f64, where finite differences are precise enough to catch
+  subtle errors. **bfloat16** is a 16-bit format with f32's range but only
+  about 3 significant digits, which large models are commonly trained in.
 
 #### Generation (inference)
 
@@ -304,7 +330,7 @@ Grouped so that each definition uses only terms defined above it.
 - **prefill**, **decode phase**: generation's two phases. Prefill puts the
   whole prompt through the model at once, like a training step's forward
   pass; then each pass of the decode phase handles one new token.
-- **KV cache**: each earlier token's keys and values, kept during
+- **KV cache** (key–value cache): each earlier token's keys and values, kept during
   generation so that a new token computes only its own rather than
   recomputing the whole context.
 - **logits**: the output layer's V scores for the next token, before they
@@ -659,7 +685,8 @@ the same position in its window.)
   | 1 | 37% | 26% |
   | 3 | 5% | 80% |
 
-  The full run saw only about a quarter of V2 at all, yet its validation
+  The full run saw only about a quarter of TinyStories V2 (the larger
+  version of the corpus it trains on) at all, yet its validation
   loss on unseen stories matched its training loss: the unseen stories are
   statistically like the seen ones, so what was learned carries over.
 - **Epochs, the alternative** (`sampling = "epochs"`): one epoch strictly
@@ -916,7 +943,8 @@ takes four steps:
 4. **Text.** The tokenizer's vocabulary maps the ID to its bytes (such as
    " ball"), the bytes are printed, and the ID is appended
    to the input for the next pass. A token can be part of a UTF-8
-   character, so bytes are held back until they complete one
+   character (UTF-8, the standard way to store text as bytes, uses one
+   to four bytes per character), so bytes are held back until they complete one
    (`Utf8Stream` in `src/generate.rs`).
 
 Steps 1 and 2 are the model's; step 3 is the **decoding strategy**
@@ -2904,8 +2932,9 @@ Rules every program in the project follows:
 - **Turn what an experiment established into a test.** While a piece is
   being built, its results are checked by eye: loss curves, samples, probe
   scores. Once it works, what that showed becomes a check a machine reruns,
-  so it stays true when nobody is looking. `make test` runs them all, as CI
-  does on every push:
+  so it stays true when nobody is looking. `make test` runs them all, as
+  continuous integration (CI: GitHub running the same checks) does on
+  every push:
   - Rust unit tests in each crate, including gradient checks against finite
     differences, the strongest single test, since wrong gradients still
     train, just badly;
@@ -3722,7 +3751,8 @@ without that file, as in this project's workspace, it reads
 `tokenizers` library, reading `tokenizer.json` directly, gives our IDs
 everywhere. Ordinary digits come out the same either way (SmolLM's
 vocabulary has no merged digit tokens), so only numerals outside ASCII
-are affected. The reference script now takes its IDs from `tokenizer.json`
+(the 128 basic characters: unaccented Latin letters, digits 0–9,
+punctuation) are affected. The reference script now takes its IDs from `tokenizer.json`
 through `tokenizers`, the file that describes how the model was trained. A
 check is only as good as its reference. Everything from the tokenizer through attention, RoPE, the KV cache
 and the output layer agrees with the reference, so the inference path
@@ -3796,7 +3826,8 @@ section). Beyond about 4B, the limit is precision, not code:
   parameters in principle.
 - **4-bit quantization** (see What production models add) fits a
   30-billion-parameter model in about 17 GB. That's how llama.cpp and MLX
-  run large models on a Mac like this one, and a project of its own.
+  (Apple's machine-learning framework for its own chips) run large models
+  on a Mac like this one, and a project of its own.
 
 ### Trying a new model: SmolLM-1.7B, step by step
 
