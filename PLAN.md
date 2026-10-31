@@ -3791,6 +3791,77 @@ about 4B, the limit is precision, not code:
   30-billion-parameter model in about 17 GB. That's how llama.cpp and MLX
   run large models on a Mac like this one, and a project of its own.
 
+**Trying a new model: SmolLM-1.7B, step by step.** Running another model
+means downloading it, checking that the loader accepts it, running it, and
+checking it against Hugging Face's numbers, the same steps as for
+SmolLM-135M. (Not yet run here: this records the procedure, and the
+results belong here once it has been.)
+
+1. **Download** it into `hugging_face/models/`, which git ignores:
+
+   ```
+   cd hugging_face
+   pipenv run hf download HuggingFaceTB/SmolLM-1.7B --local-dir models/SmolLM-1.7B
+   ls -lh models/SmolLM-1.7B
+   ```
+
+2. **Make it one file, if it isn't.** The loader reads a single
+   `model.safetensors`. A large model is often published in **shards**
+   (`model-00001-of-00002.safetensors`, …, with an index file
+   `model.safetensors.index.json`). If `ls` shows shards, merge them;
+   the result is the same tensors in one file (6.8 GB here):
+
+   ```
+   cd models/SmolLM-1.7B
+   pipenv run python3 -c "
+   import glob
+   from safetensors.torch import load_file, save_file
+   t = {}
+   for f in sorted(glob.glob('model-*.safetensors')): t.update(load_file(f))
+   save_file(t, 'model.safetensors', metadata={'format': 'pt'})"
+   cd ../../..
+   ```
+
+   (Teaching the loader to read shards directly is the cleaner fix, not
+   yet made.)
+
+3. **Run it.** The loader reads the shape from `config.json` and refuses,
+   naming the reason, anything it doesn't implement exactly; for this
+   model every check should pass:
+
+   ```
+   make llama LLAMA_DIR=hugging_face/models/SmolLM-1.7B PROMPT='Once upon a time'
+   ```
+
+   Expect about 6 tokens per second (the table above), and better writing
+   than SmolLM-135M's. It's still a base model, so it continues text rather
+   than following instructions.
+
+4. **Check it against Hugging Face.** Generate the reference numbers with
+   Hugging Face's code (it holds the model in f32 too, about 7 GB), then
+   compare: token IDs exactly, log-probabilities and logits within f32
+   rounding, greedy text identical:
+
+   ```
+   (cd hugging_face && pipenv run python3 ../tools/llama_reference.py \
+       models/SmolLM-1.7B -o models/SmolLM-1.7B/reference.json)
+   make llama-check LLAMA_DIR=hugging_face/models/SmolLM-1.7B
+   ```
+
+   Only a passing check says the model runs correctly; text that merely
+   looks plausible doesn't.
+
+**A model from another family** (Qwen 2.5, say) fails step 3, by design:
+its attention has biases and its tokenizer splits text with a different
+pattern. Its weights can't be converted to SmolLM's shape: trained
+numbers mean something only inside the computation they were trained
+for, and the two models differ in vocabulary, width and depth (teaching a
+SmolLM-shaped model to imitate another, **distillation**, is training, not
+conversion). The route is the other way round: extend the loader to
+implement what the new family adds (here, the biases and the tokenizer
+pattern), and accept the model only once `make llama-check` passes for
+it.
+
 ## Order of work
 
 **Done:**
