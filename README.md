@@ -24,8 +24,9 @@ written with Claude; no copyright is claimed.*
   of every weight), text generation with a key–value (KV) cache so each new
   token reuses earlier work, and a probe for looking inside;
 - **the same inference code running a real open-weight model** (one whose
-  trained weights are published), Hugging Face's SmolLM-135M, its
-  predictions checked against Hugging Face's own implementation.
+  trained weights are published), Hugging Face's SmolLM-135M and its
+  13-times-larger sibling SmolLM-1.7B, their predictions checked against
+  Hugging Face's own implementation.
 
 Models are trained on [TinyStories](https://arxiv.org/abs/2305.07759), short
 stories written for small models. What it gets you:
@@ -109,6 +110,16 @@ The probabilities agree to about 0.00007, the difference 32-bit
 floating-point (f32) arithmetic makes when two programs add in different
 orders, and the greedy text (always taking the most likely token) is
 identical. Keep `hugging_face/models/` out of git: the weights are 513 MB.
+
+**Larger models.** The same code, unchanged, runs SmolLM-1.7B, 13 times the
+size: about 9 tokens per second on an M4, noticeably better stories, and the
+same match with Hugging Face. Its weights come as two files, which need
+merging into one first. PLAN.md gives the steps in
+[Trying a new model](PLAN.md#trying-a-new-model-smollm-17b-step-by-step),
+and the limits in [How far could this go?](PLAN.md#how-far-could-this-go):
+memory caps a 32 GB Mac at about 4 billion parameters in 32-bit floats,
+and the loader accepts only models it implements exactly, so other families
+such as Qwen need code first.
 
 ## What's where
 
