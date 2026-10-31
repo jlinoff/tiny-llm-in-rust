@@ -3746,6 +3746,51 @@ weights for every token, so its speed is bounded by memory bandwidth, the
 reason production engines use 16-bit or quantized weights (see the
 Inference part of [What production models add](#what-production-models-add-and-why-its-left-out)).
 
+**How far could this go?** Two different limits bound which models
+`transformer llama` can run on a 32 GB M4, and they point in different
+directions: memory and speed are physics, while the loader's checks are
+a choice.
+
+- **Memory.** Every weight is held as a 32-bit float, 4 bytes per
+  parameter. With macOS and other programs taking perhaps 8 GB, about 24 GB
+  is usable: a ceiling near 6 billion parameters, about 3–4 billion
+  comfortably.
+- **Speed.** Each new token reads every weight once, so speed falls about
+  in proportion to size. Scaling from the measured 81 tokens per second
+  (estimates, not measurements):
+
+  | Model size | Weights as f32 | Rough speed |
+  |---|---|---|
+  | 135M (SmolLM-135M) | 0.54 GB | 81 tokens/s (measured) |
+  | 360M | 1.4 GB | ~30 tokens/s |
+  | 1.7B | 6.8 GB | ~6 tokens/s |
+  | 3–4B | 12–16 GB | ~2–3 tokens/s |
+  | 7B | 28 GB | doesn't fit beside macOS |
+
+- **What the loader accepts.** It refuses anything it doesn't implement
+  exactly, so that every number it produces can be checked against Hugging
+  Face's: the Llama architecture with SiLU, no biases, no RoPE scaling, an
+  output layer tied to the embeddings, one `model.safetensors` file, and
+  a byte-level BPE tokenizer with SmolLM's digit-splitting step. That
+  rules out most popular models for small reasons: Llama 3.2 scales its
+  RoPE and splits text with a different pattern, Qwen 2.5 has biases in
+  attention, and most larger models split their weights across several
+  files. It's a trade of breadth for certainty.
+
+So the natural step up is the rest of the SmolLM family, which shares the
+architecture and tokenizer. SmolLM-360M should run as it is. SmolLM-1.7B
+(24 blocks, width 2,048, 32 heads with no sharing) passes every check in
+its `config.json`, but it's published in f32, 6.8 GB, possibly split
+into several files, which would need the loader to read shards. Beyond
+about 4B, the limit is precision, not code:
+
+- **Keeping bfloat16 weights as bfloat16** instead of widening them would
+  halve the memory and roughly double the speed: up to about 10 billion
+  parameters in principle.
+- **4-bit quantization** (see What production models add) fits a
+  30-billion-parameter model in about 17 GB. That's how llama.cpp and MLX
+  run large models on a Mac like this one, and a project of its own.
+
 ## Order of work
 
 **Done:**
