@@ -1,0 +1,28 @@
+# Names and plain words that need no definition, for tools/acronyms.py.
+# One per line; text after # is a comment. Add a name here only if it's
+# explained in passing where it's first used, or needs no explaining.
+
+# Units and plain words
+MB
+GB
+TB
+ID                  # an identifier, here a token's number
+AI
+
+# Products, projects, organizations, explained where they first appear
+GitHub
+ChatGPT
+TensorFlow
+JavaScript          # inside JSON's own expansion
+SentencePiece       # "Google's tokenizer library"
+EleutherAI          # "a nonprofit AI research group"
+SmolLM              # "Hugging Face's small open-weight model"
+TinyStories         # "short stories written for small models"
+GNU                 # GNU make, the build tool
+MIT                 # the license
+
+# File names, and quoted text that isn't a term
+README
+LICENSE
+SolidGoldMagikarp   # a glitch token, quoted
+AIE                 # quoted from a model's output

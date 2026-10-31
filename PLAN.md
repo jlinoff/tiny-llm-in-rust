@@ -2984,7 +2984,8 @@ llm/
 ├── out-check/     # make full-check's files (git-ignored; make clean removes it)
 ├── data/          # downloaded corpora, e.g. text8, TinyStories (git-ignored)
 ├── hugging_face/  # downloading open-weight models: Pipfile (huggingface-hub,
-│   │              # transformers, torch), README.md
+│   │              # transformers, torch), README.md, and a Makefile
+│   │              # (make download-big, reference-big, …)
 │   └── models/    # the downloads, e.g. SmolLM-135M (git-ignored; see The endpoint)
 ├── tokenizer/     # text <-> token IDs: tokenize, encode, decode; test_mini_bpe.py
 ├── chat/          # make_chat.py: fine-tuning conversations from the stories;
@@ -2992,6 +2993,7 @@ llm/
 ├── docs/          # the README's illustration
 ├── tools/         # toc.py: this file's table of contents and link check (make toc);
 │                  # acronyms.py: every acronym defined at first use (make lint);
+│                  # join_shards.py: a downloaded model's shards into one file;
 │                  # config_section.py: one config section per file, for make;
 │                  # sampling-test.sh: random against epoch sampling, five seeds;
 │                  # llama_reference.py: Hugging Face's numbers for the endpoint;
@@ -3846,6 +3848,11 @@ checking it against Hugging Face's numbers, the same steps as for
 SmolLM-135M. Done on the M4 on October 31, 2026; the results follow each
 step.
 
+Steps 1 and 2 are automated: `make download-big` in `hugging_face/`
+downloads SmolLM-1.7B and merges its shards (`make download-small` fetches
+SmolLM-135M), and `make reference-big` writes the reference numbers for
+step 4. The steps, by hand:
+
 1. **Download** it into `hugging_face/models/`, which git ignores:
 
    ```
@@ -3868,15 +3875,14 @@ step.
    the result is the same tensors in one file (6.8 GB here):
 
    ```
-   cd models/SmolLM-1.7B
-   pipenv run python3 -c "
-   import glob
-   from safetensors.torch import load_file, save_file
-   t = {}
-   for f in sorted(glob.glob('model-*.safetensors')): t.update(load_file(f))
-   save_file(t, 'model.safetensors', metadata={'format': 'pt'})"
-   cd ../../..
+   pipenv run python3 ../tools/join_shards.py models/SmolLM-1.7B
+   cd ..
    ```
+
+   `tools/join_shards.py` checks before writing: every tensor the index
+   lists is present, none appears in two shards. It writes through a
+   temporary file, so an interrupted run never leaves a partial
+   `model.safetensors` that `make` would take for a finished one.
 
    SmolLM-1.7B came as two shards, 4.7 and 1.7 GB, which merged into a
    6.4 GB file (6.8 billion bytes; `ls -lh` counts in binary units).
