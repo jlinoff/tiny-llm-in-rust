@@ -3761,13 +3761,17 @@ a choice.
   comfortably.
 - **Speed.** Each new token reads every weight once, so speed falls about
   in proportion to size. Scaling from the measured 81 tokens per second
-  (estimates, not measurements):
+  gives the estimates below. SmolLM-1.7B then ran half again as fast as
+  its estimate: a small model's matrix products are too small to keep
+  Accelerate's matrix hardware busy, so per weight it was the less
+  efficient of the two, and the estimates for larger models are likely
+  pessimistic:
 
   | Model size | Weights as f32 | Rough speed |
   |---|---|---|
   | 135M (SmolLM-135M) | 0.54 GB | 81 tokens/s (measured) |
   | 360M | 1.4 GB | ~30 tokens/s |
-  | 1.7B | 6.8 GB | ~6 tokens/s |
+  | 1.7B (SmolLM-1.7B) | 6.8 GB | 9 tokens/s (measured; ~6 estimated) |
   | 3–4B | 12–16 GB | ~2–3 tokens/s |
   | 7B | 28 GB | doesn't fit beside macOS |
 
@@ -3783,10 +3787,9 @@ a choice.
 
 So the natural step up is the rest of the SmolLM family, which shares the
 architecture and tokenizer. SmolLM-360M should run as it is. SmolLM-1.7B
-(24 blocks, width 2,048, 32 heads with no sharing) passes every check in
-its `config.json`, but it's published in f32, 6.8 GB, possibly split
-into several files, which would need the loader to read shards. Beyond
-about 4B, the limit is precision, not code:
+(24 blocks, width 2,048, 32 heads with no sharing) runs and matches
+Hugging Face, once its two weight files are merged into one (next
+section). Beyond about 4B, the limit is precision, not code:
 
 - **Keeping bfloat16 weights as bfloat16** instead of widening them would
   halve the memory and roughly double the speed: up to about 10 billion
@@ -3800,16 +3803,23 @@ about 4B, the limit is precision, not code:
 Running another model
 means downloading it, checking that the loader accepts it, running it, and
 checking it against Hugging Face's numbers, the same steps as for
-SmolLM-135M. (Not yet run here: this records the procedure, and the
-results belong here once it has been.)
+SmolLM-135M. Done on the M4 on October 31, 2026; the results follow each
+step.
 
 1. **Download** it into `hugging_face/models/`, which git ignores:
 
    ```
    cd hugging_face
-   pipenv run hf download HuggingFaceTB/SmolLM-1.7B --local-dir models/SmolLM-1.7B
+   pipenv run hf download HuggingFaceTB/SmolLM-1.7B --local-dir models/SmolLM-1.7B \
+       --exclude "onnx/*"
    ls -lh models/SmolLM-1.7B
    ```
+
+   `--exclude` skips the `onnx/` folder, the model again in ONNX format
+   (Open Neural Network Exchange, another model file format), which we
+   don't use. If the repository folder has moved since `pipenv install`,
+   the environment breaks (it stores absolute paths): `pipenv --rm`, then
+   `pipenv install`.
 
 2. **Make it one file, if it isn't.** The loader reads a single
    `model.safetensors`. A large model is often published in **shards**
@@ -3828,8 +3838,10 @@ results belong here once it has been.)
    cd ../../..
    ```
 
-   (Teaching the loader to read shards directly is the cleaner fix, not
-   yet made.)
+   SmolLM-1.7B came as two shards, 4.7 and 1.7 GB, which merged into a
+   6.4 GB file (6.8 billion bytes; `ls -lh` counts in binary units).
+   The shards can then be deleted. (Teaching the loader to read shards
+   directly is the cleaner fix, not yet made.)
 
 3. **Run it.** The loader reads the shape from `config.json` and refuses,
    naming the reason, anything it doesn't implement exactly; for this
@@ -3839,9 +3851,21 @@ results belong here once it has been.)
    make llama LLAMA_DIR=hugging_face/models/SmolLM-1.7B PROMPT='Once upon a time'
    ```
 
-   Expect about 6 tokens per second (the table above), and better writing
-   than SmolLM-135M's. It's still a base model, so it continues text rather
-   than following instructions.
+   Every check passed: 1,711,376,384 parameters; 24 blocks, width 2,048,
+   32 query heads sharing 32 key/value heads (so no sharing), FFN 8,192,
+   V = 49,152, context 2,048. It loaded in 12.9 s and wrote 9 tokens per
+   second:
+
+   > Once upon a time, there were two friends named Sammy the Squirrel and
+   > Oliver the Owl. They loved playing together in their forest home, but
+   > they noticed something strange happening with their fellow animals.
+   > Some of them had been coughing and sneezing more often than usual,
+   > while others had developed red, scaly patches on their skin. Even the
+   > trees seemed to be wilting!
+
+   That's clearly better than SmolLM-135M: named characters, a problem,
+   and a plot that holds for 100 tokens. It's still a base model, so it
+   continues text rather than following instructions.
 
 4. **Check it against Hugging Face.** Generate the reference numbers with
    Hugging Face's code (it holds the model in f32 too, about 7 GB), then
@@ -3855,7 +3879,13 @@ results belong here once it has been.)
    ```
 
    Only a passing check says the model runs correctly; text that merely
-   looks plausible doesn't.
+   looks plausible doesn't. SmolLM-1.7B passed: identical token IDs for
+   12 of 12 texts; on every prompt the greedy continuation was identical
+   (40 of 40 tokens), the log-probabilities agreed to 8.0e-5 and the
+   logits to 8.2e-5, the same f32 rounding as SmolLM-135M's (6.9e-5 and
+   4.0e-5), although its vectors are 3.6 times as wide, so every dot
+   product is a longer sum to round. No code changed: the loader read the shape
+   from `config.json`, and everything it checks for, this model has.
 
 **A model from another family** (Qwen 2.5, say) fails step 3, by design:
 its attention has biases and its tokenizer splits text with a different
