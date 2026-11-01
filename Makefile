@@ -351,6 +351,10 @@ lint: ## Formatting, clippy, pylint (if installed), PLAN.md's links, acronyms de
 	else echo "pylint not installed: skipped (pip install pylint)"; fi
 	python3 tools/toc.py --check PLAN.md
 	python3 tools/acronyms.py PLAN.md README.md --known tools/acronyms-known.txt
+	@missing=$$(grep -oE '^[A-Za-z0-9_]+ *\?=' Makefile | tr -d ' ?=' | \
+		while read v; do case " $(HELP_VARS) " in *" $$v "*) ;; *) echo $$v;; esac; done); \
+	test -z "$$missing" || { echo "make help doesn't list: $$missing (add to HELP_VARS)"; exit 1; }; \
+	echo "make help lists every variable"
 
 .PHONY: toc
 toc: ## Update PLAN.md's table of contents and check its internal links.
@@ -372,6 +376,37 @@ zip: project.zip ## Create the project zip file: project.zip.
 project.zip: $(SRC_FILES)
 	zip $@ $(SRC_FILES)
 
+# The variables make help lists, one per line, with what each does and its
+# value now. A variable meant to be set from the command line gets a place
+# in HELP_VARS and a HELP_ description; make lint fails if a ?= variable
+# is missing (FORCE has no default, so it is listed by hand).
+HELP_VARS := OUT CORPUS TOK_CORPUS SPLIT_ON MERGES CONFIG CARGO_FEATURES \
+	CHAT_ARGS LORA_ARGS EVAL_ARGS CHAT_MODEL PROMPT GEN_ARGS PROBE_MODEL \
+	PROBE_ARGS LLAMA_DIR LLAMA_ARGS W2V_CORPUS W2V_ARGS W2V_OUT FORCE
+HELP_OUT            := where the tokenizer, models and other outputs go (the full run uses out-full)
+HELP_CORPUS         := the training text
+HELP_TOK_CORPUS     := the text the tokenizer is learned from (CORPUS unless set)
+HELP_SPLIT_ON       := the line separating documents in the corpus (empty: none)
+HELP_MERGES         := merges the tokenizer learns: vocabulary = 256 bytes + merges + 4 special tokens
+HELP_CONFIG         := the settings file for steps 3 to 6 (config.toml; config-full.toml for the full run)
+HELP_CARGO_FEATURES := blas: Apple Accelerate for large matrix products (default on macOS); empty: plain Rust
+HELP_CHAT_ARGS      := options for chat/make_chat.py, which builds the conversations
+HELP_LORA_ARGS      := options for LoRA fine-tuning: the rank and the learning rate
+HELP_EVAL_ARGS      := options for transformer evaluate (make evaluate, lora-evaluate)
+HELP_CHAT_MODEL     := the model make chat talks to
+HELP_PROMPT         := the text make generate, chat and llama start from
+HELP_GEN_ARGS       := sampling options for make generate and chat, such as --temperature 0.5
+HELP_PROBE_MODEL    := the checkpoint make probe looks inside
+HELP_PROBE_ARGS     := options for transformer probe, such as --head 1.3
+HELP_LLAMA_DIR      := the open-weight model's folder for make llama and llama-check
+HELP_LLAMA_ARGS     := options for transformer llama, such as --temperature 0
+HELP_W2V_CORPUS     := the text word2vec trains on
+HELP_W2V_ARGS       := options for the word2vec tool
+HELP_W2V_OUT        := where word2vec writes its vectors
+HELP_FORCE          := 1 lets make full-clean delete out-full/ (a day of training)
+# A value inside single quotes, with any single quote in it escaped.
+q = $(subst ','\'',$(1))
+
 .PHONY: help
 help:  ## This help message.
 	$(call hdr,$@)
@@ -383,26 +418,5 @@ help:  ## This help message.
 		awk -F'##' '{printf("%-18s %s\n",$$1,$$2)}' | \
 		sort -f | \
 		sed -e 's@^@   @'
-	@printf "\n\033[35;1m%s\033[0m\n" "Variables"
-	@printf "   %-18s  %s\n" "CARGO_FEATURES" "$(CARGO_FEATURES)"
-	@printf "   %-18s  %s\n" "CHAT_ARGS" "$(CHAT_ARGS)"
-	@printf "   %-18s  %s\n" "CHAT_MODEL" "$(CHAT_MODEL)"
-	@printf "   %-18s  %s\n" "CONFIG" "$(CONFIG)"
-	@printf "   %-18s  %s\n" "CORPUS" "$(CORPUS)"
-	@printf "   %-18s  %s\n" "EVAL_ARGS" "$(EVAL_ARGS)"
-	@printf "   %-18s  %s\n" "FORCE" "$(FORCE)   (1 lets make full-clean delete out-full/)"
-	@printf "   %-18s  %s\n" "GEN_ARGS" "$(GEN_ARGS)"
-	@printf "   %-18s  %s\n" "LLAMA_ARGS" "$(LLAMA_ARGS)"
-	@printf "   %-18s  %s\n" "LLAMA_DIR" "$(LLAMA_DIR)"
-	@printf "   %-18s  %s\n" "LORA_ARGS" "$(LORA_ARGS)"
-	@printf "   %-18s  %s\n" "MERGES" "$(MERGES)"
-	@printf "   %-18s  %s\n" "OUT" "$(OUT)"
-	@printf "   %-18s  %s\n" "PROBE_ARGS" "$(PROBE_ARGS)"
-	@printf "   %-18s  %s\n" "PROBE_MODEL" "$(PROBE_MODEL)"
-	@printf "   %-18s  %s\n" "PROMPT" "$(PROMPT)"
-	@printf "   %-18s  %s\n" "SPLIT_ON" "$(SPLIT_ON)"
-	@printf "   %-18s  %s\n" "TOK_CORPUS" "$(TOK_CORPUS)"
-	@printf "   %-18s  %s\n" "W2V" "$(W2V)"
-	@printf "   %-18s  %s\n" "W2V_CORPUS" "$(W2V_CORPUS)"
-	@printf "   %-18s  %s\n" "W2V_ARGS" "$(W2V_ARGS)"
-	@printf "   %-18s  %s\n" "W2V_OUT" "$(W2V_OUT)"
+	@printf "\n\033[35;1m%s\033[0m\n" "Variables, set on the command line (make generate PROMPT='The cat')"
+	@$(foreach v,$(HELP_VARS),printf "   %-18s %s\n   %-18s now: %s\n" '$(v)' '$(call q,$(HELP_$(v)))' '' '$(call q,$(or $($(v)),(empty)))';)

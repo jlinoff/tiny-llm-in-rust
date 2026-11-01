@@ -70,7 +70,7 @@ make generate PROMPT='Once upon a time'
 make finetune evaluate         # teach it to answer requests, then measure how well
 make chat PROMPT='Write a story with the words frog, bell and egg.'
 make probe                     # look inside: which heads copy, what each block predicts
-make help                      # every target and setting
+make help                      # every target, and every setting with what it does and its value
 ```
 
 `config.toml` holds every setting, with comments. Change a section and only
@@ -139,7 +139,7 @@ make test          # everything below: a minute or two after the first build
 make test-rust     # Rust unit tests: transformer, attention, word2vec
 make test-python   # Python unit tests: mini_bpe.py, make_chat.py
 make smoke         # the whole flow on a dozen short stories, in seconds
-make lint          # formatting, clippy, pylint, PLAN.md's links, acronyms defined at first use
+make lint          # formatting, clippy, pylint, PLAN.md's links, acronyms defined at first use, every setting in make help
 ```
 
 What the tests guard, beyond each piece's own behavior:
