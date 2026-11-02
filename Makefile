@@ -352,7 +352,7 @@ lint: ## Formatting, clippy, pylint (if installed), PLAN.md's links, acronyms de
 	python3 tools/toc.py --check PLAN.md
 	python3 tools/acronyms.py PLAN.md README.md --known tools/acronyms-known.txt
 	@missing=$$(grep -oE '^[A-Za-z0-9_]+ *\?=' Makefile | tr -d ' ?=' | \
-		while read v; do case " $(HELP_VARS) " in *" $$v "*) ;; *) echo $$v;; esac; done); \
+		while read v; do echo " $(HELP_VARS) " | grep -q " $$v " || echo $$v; done); \
 	test -z "$$missing" || { echo "make help doesn't list: $$missing (add to HELP_VARS)"; exit 1; }; \
 	echo "make help lists every variable"
 
