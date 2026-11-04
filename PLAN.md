@@ -1,9 +1,9 @@
 # Plan: building the pieces of an LLM (large language model)
 
 This project builds a small LLM piece by piece. The goal
-is understanding, not performance: each stage is small enough to read, and each
+is understanding, not performance: each piece is small enough to read, and each
 runs on its own so its output can be inspected. A Makefile (a build script run
-by the `make` tool) chains the LLM stages into a complete flow, with one target
+by the `make` tool) chains the LLM's steps into a complete flow, with one target
 per step: `make tokenize`, `make encode`, and so on.
 
 Technical terms are defined in [Terms](#terms), just below; tool and product
@@ -20,7 +20,7 @@ names are explained where they first appear.
   - [word2vec](#word2vec)
 - [The flows](#the-flows)
   - [1. The LLM flow](#1-the-llm-flow)
-    - [What each stage does](#what-each-stage-does)
+    - [What each step does](#what-each-step-does)
       - [Step 1: tokenize](#step-1-tokenize)
       - [Step 2: encode](#step-2-encode)
       - [Step 3: build](#step-3-build)
@@ -57,7 +57,7 @@ names are explained where they first appear.
   - [Languages: Python for text, Rust for arithmetic](#languages-python-for-text-rust-for-arithmetic)
   - [What is built by hand, and what isn't](#what-is-built-by-hand-and-what-isnt)
   - [Conventions for all code](#conventions-for-all-code)
-- [Where the stages live](#where-the-stages-live)
+- [Where the steps live](#where-the-steps-live)
 - [word2vec: the historical side branch](#word2vec-the-historical-side-branch)
 - [Open decisions](#open-decisions)
 - [The full TinyStories run](#the-full-tinystories-run)
@@ -417,11 +417,11 @@ Steps 1–4 are **pretraining**; step 5 is **post-training** (see
 `model.safetensors` it continues text, with `chat.safetensors` and `--chat`
 it answers a request.
 
-The files are the interfaces between stages, so their
+The files are the interfaces between steps, so their
 formats must be defined exactly. This matters doubly because the tokenizer is
-in Python and the later stages are in Rust.
+in Python and the later steps are in Rust.
 
-#### What each stage does
+#### What each step does
 
 Commands marked *proposed* belong to programs not yet written; their names
 and options may change when the code is. `transformer` is the planned program
@@ -1993,9 +1993,9 @@ weight; each token's input is x = E[token] + P[position].
 
 ## Configuration
 
-One file, `config.toml`, holds the settings for every LLM stage, with one
-section per stage. (TOML, "Tom's Obvious, Minimal Language", is a simple
-format for settings files.) Each stage reads only its own section:
+One file, `config.toml`, holds the settings for every LLM step, with one
+section per step. (TOML, "Tom's Obvious, Minimal Language", is a simple
+format for settings files.) Each step reads only its own section:
 
 ```
 [model]        # read by build:    d, layers, heads, context length, d_ff, seed
@@ -2169,7 +2169,7 @@ optional, and each can be overridden on the command line (`--max-tokens`,
 - `seed` (1): for the sampling. The same seed and prompt give the same text.
 
 **Guaranteeing consistency.** d and the other `[model]` values must be the
-same in every stage. Rather than every stage rereading the config (someone
+same in every step. Rather than every step rereading the config (someone
 could edit it between build and train), **build copies `[model]` into the
 checkpoint**, and train, finetune and generate read the shapes from the
 checkpoint only. After build, there is exactly one source of truth, so a
@@ -2900,7 +2900,7 @@ hand.
   reference.
 - **The driver:** a Makefile, one target per step, each model file
   depending only on its own config section (open decision 5; see
-  [Where the stages live](#where-the-stages-live)).
+  [Where the steps live](#where-the-steps-live)).
 
 ### Conventions for all code
 
@@ -2974,7 +2974,7 @@ Rules every program in the project follows:
   The tests were added after the project's first release, which had relied
   on the experiments alone; that's the gap this rule closes.
 
-## Where the stages live
+## Where the steps live
 
 The rule: **one directory per component, one command per step.** A component
 is code that several steps share. The tokenizer's code serves steps 1, 2 and 6;
@@ -3096,7 +3096,7 @@ word2vec (2013) is not part of the LLM flow. It shows the oldest form of the
 idea the embedding table relies on, that a word's meaning can be learned from
 the words around it, with nothing else in the way:
 
-- Its internal steps mirror the LLM flow's first four stages (see "The
+- Its internal steps mirror the LLM flow's first four steps (see "The
   word2vec flow" above).
 - Its vocabulary is whole words counted from the corpus, not `tok.bpe`.
 - Its trained table *is* its final product. It's a legitimate phase output,
@@ -3140,9 +3140,9 @@ text8, matching gensim (a widely used Python library with its own word2vec) at
 
 ## Open decisions
 
-1. **Where encoding happens in Rust.** Stages 4–6 need token IDs, and stage
+1. **Where encoding happens in Rust.** Steps 4–6 need token IDs, and step
    6 must also decode IDs to text. Options:
-   - (a) Python pre-encodes the corpus to `corpus.ids` (stage 2), and Rust
+   - (a) Python pre-encodes the corpus to `corpus.ids` (step 2), and Rust
      only ever sees IDs. Generate then needs decode in Rust, which is
      easy: decoding is concatenating each token's bytes.
    - (b) Port `encode` to Rust as well. Small, but note that the pattern's
@@ -3255,7 +3255,7 @@ text8, matching gensim (a widely used Python library with its own word2vec) at
    library's `tomllib` (3.11 and later). The copy stored in a checkpoint is
    the same TOML text, in the safetensors header's metadata.
 5. **The driver.** *Decided:* a Makefile, with one target per step (see
-   [Where the stages live](#where-the-stages-live)). Unlike a shell script, it
+   [Where the steps live](#where-the-steps-live)). Unlike a shell script, it
    reruns only the steps whose inputs changed.
 6. **The training data.** *Decided for pretraining:* **TinyStories** (Eldan
    and Li, 2023): short, simple stories written by GPT-3.5 and GPT-4, made
@@ -3956,6 +3956,11 @@ it.
 
 ## Order of work
 
+These items are this project's chapters, built once and in order; the
+companion project tiny-diffusion-in-rust calls its chapters stages. A step
+here is something else: one link of the LLM flow (tokenize to generate),
+run every time the model is made or used.
+
 **Done:**
 
 1. ~~word2vec~~, the historical side branch.
@@ -4020,8 +4025,8 @@ model needs them, in an inference-only path (`src/llama.rs`).
 
 ## Bibliography
 
-Grouped by stage of the plan. Each entry says why it matters here. ★ marks a
-suggested first-reading path, roughly one paper per stage. Most papers are free
+Grouped by part of the plan. Each entry says why it matters here. ★ marks a
+suggested first-reading path, roughly one paper per part. Most papers are free
 on arXiv, the open preprint server used throughout machine learning.
 
 Venue abbreviations: NeurIPS (Conference on Neural Information Processing
@@ -4182,7 +4187,7 @@ for language research.
 - Biderman, S., et al. (2023). "Pythia: A Suite for Analyzing Large Language
   Models Across Training and Scaling." ICML.
   [arXiv:2304.01373](https://arxiv.org/abs/2304.01373). The models whose
-  step-0 checkpoints are the precedent for the build stage.
+  step-0 checkpoints are the precedent for the build step.
 - Kaplan, J., et al. (2020). "Scaling Laws for Neural Language Models."
   [arXiv:2001.08361](https://arxiv.org/abs/2001.08361), and Hoffmann, J., et
   al. (2022). "Training Compute-Optimal Large Language Models."

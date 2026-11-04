@@ -20,7 +20,7 @@ MERGES    ?= 3836
 # Print a section header: $(call hdr,text)
 hdr = @printf "\n\033[35;1m== %s ==\033[0m\n" "$(1)"
 
-# Stages
+# Steps
 .PHONY: tokenize
 tokenize: $(OUT)/tok.bpe ## Step 1: learn the tokenizer from the training text.
 
