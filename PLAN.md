@@ -2656,8 +2656,18 @@ buys, and why it isn't here.
   pair, by an angle proportional to the token's position, so the score
   q·k depends on the two tokens' *relative* positions. It has no
   parameters and handles long contexts, even somewhat beyond those trained
-  on. Not here: at context 256 a learned table works as well, and it's the
-  simpler idea to see first. (It would save the T·d position table.)
+  on. Not here: it's the simpler idea to see first, and this plan
+  expected a learned table to work as well at context 256. (It would save
+  the T·d position table.) That expectation was later tested, and it was
+  wrong at this budget: tiny-diffusion-in-rust (its stage 6, the
+  next-token control) trained a network of this project's development
+  size on the same tokens for the same 2,000 steps, both ways. With a
+  learned table its validation loss was 3.53 nats per token, with RoPE
+  3.30, 0.23 lower, and the RoPE model led from step 200 on. Two
+  cautions: that is tiny-diffusion-in-rust's reimplementation (its
+  learned-table loss is 3.53 against this project's 3.23, a gap never
+  traced), and only 2,000 steps; whether the learned table catches up
+  with longer training wasn't measured.
 - **RMSNorm** (root mean square normalization; Zhang and Sennrich 2019).
   Layer norm without the mean subtraction and the shift β: it only divides
   by the root mean square, √(mean(x²) + ε). One pass over the numbers
@@ -3988,10 +3998,22 @@ it.
    on pairs of replies, the preferred one using the requested words. It
    uses the existing tape and training loop.
 10. **Smaller items:** top-p sampling; folding this plan into
-    `llm/README.md` at the end.
+    the README at the end.
+11. **Drawing: a language model that makes images** (planned, not
+    started). The mirror image of tiny-diffusion-in-rust's stage 6,
+    where diffusion wrote text: an image tokenizer (an autoencoder whose
+    latent values are replaced by entries of a learned codebook) turns
+    digits into short sequences of tokens, and this project's
+    transformer learns to predict them, as it predicts stories.
+    tiny-diffusion-in-rust's PLAN.md (The other direction: language
+    models that draw) sets out the idea and its research; this project
+    would copy back the convolutions and decoder that project's stage 7
+    built, as that project began by copying this one's foundation.
 
 None of the architecture refinements (RoPE and the rest) is planned for
-our own models: at our scale each would change the loss by little, and
+our own models: at our scale each was expected to change the loss by
+little (for RoPE, since measured to be wrong at 2,000 steps: see its
+paragraph), and
 [What production models add](#what-production-models-add-and-why-its-left-out)
 explains each in a paragraph. They were built for item 8, where a real
 model needs them, in an inference-only path (`src/llama.rs`).

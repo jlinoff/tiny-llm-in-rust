@@ -159,6 +159,16 @@ Every push and pull request runs the same checks in
 `.github/workflows/main.yaml`, on Linux and on macOS (there with
 Accelerate).
 
+## Companion project
+
+[tiny-diffusion-in-rust](https://github.com/jlinoff/tiny-diffusion-in-rust)
+does the same for diffusion models, the method behind image generators,
+starting from this project's matrices, automatic differentiation and model
+files. Its stage 6 trains a masked diffusion language model on this
+project's tokenizer and corpus and compares it with this project's model;
+its stage 7 runs a full-scale open model (DiT-XL/2) through its own code, as
+this project ran SmolLM.
+
 ## License
 
 MIT: see [LICENSE](LICENSE). This is meant for learning; use it freely.
