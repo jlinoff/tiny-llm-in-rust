@@ -76,9 +76,16 @@ names are explained where they first appear.
 
 ## Terms
 
-Grouped so that each definition uses only terms defined above it.
+The groups follow the order a reader meets the ideas, which is also the
+order of the [LLM flow](#1-the-llm-flow): the text and its tokens, the model that reads
+them, how it's trained, how it generates, and word2vec, the side branch.
+Within and across groups, each definition uses only terms defined above
+it. Each group opens with a line saying what it collects.
 
 #### Text and tokens
+
+What the model reads and writes: the corpus, and how text becomes
+tokens (steps 1 and 2).
 
 - **corpus**: the body of text a model is trained on. Ours is
   **TinyStories** (Eldan and Li 2023), short, simple stories written for
@@ -102,6 +109,9 @@ Grouped so that each definition uses only terms defined above it.
 - **vocabulary**, **V**: the set of all tokens, and its size.
 
 #### The model
+
+What the model is made of: vectors, layers, attention and the rest
+(step 3).
 
 - **vector**: a list of numbers; here, the numbers that represent a token.
 - **d (model width)**: the length of every token's vector (more in
@@ -218,6 +228,8 @@ Grouped so that each definition uses only terms defined above it.
 
 #### Training
 
+How the weights are learned (steps 4 and 5).
+
 - **training**: repeatedly make a prediction, measure the error (the loss,
   next), and adjust the weights slightly to reduce it (gradient descent).
 - **loss**: the number training minimizes, the error averaged over
@@ -320,6 +332,8 @@ Grouped so that each definition uses only terms defined above it.
 
 #### Generation (inference)
 
+How the trained model writes (step 6).
+
 - **inference**: running a trained model to get its output, with the
   weights fixed: no backward pass, no optimizer. The term contrasts with
   training; in statistics "inference" means something different (drawing
@@ -359,6 +373,8 @@ Grouped so that each definition uses only terms defined above it.
   strategy.
 
 #### word2vec
+
+The historical side branch, which has its own flow.
 
 - **word2vec**: a 2013 method that learns one vector per word, the historical
   precursor covered by this project's second flow.
