@@ -4020,16 +4020,27 @@ run every time the model is made or used.
    uses the existing tape and training loop.
 10. **Smaller items:** top-p sampling; folding this plan into
     the README at the end.
-11. **Drawing: a language model that makes images** (planned, not
-    started). The mirror image of tiny-diffusion-in-rust's stage 6,
-    where diffusion wrote text: an image tokenizer (an autoencoder whose
-    latent values are replaced by entries of a learned codebook) turns
-    digits into short sequences of tokens, and this project's
-    transformer learns to predict them, as it predicts stories.
-    tiny-diffusion-in-rust's PLAN.md (The other direction: language
-    models that draw) sets out the idea and its research; this project
-    would copy back the convolutions and decoder that project's stage 7
-    built, as that project began by copying this one's foundation.
+11. **Drawing: a language model that makes images** (planned, not started;
+    its plan and predictions come before any code). The mirror image of
+    tiny-diffusion-in-rust's stage 6, where diffusion wrote text: images
+    become sequences of tokens, and this project's transformer learns to
+    predict them, as it predicts stories. Decided so far: the code goes in
+    the `transformer` crate, reusing its model, training loop and sampler,
+    with images batched as whole sequences rather than windows of a stream;
+    the data is MNIST (70,000 handwritten digits of 28 × 28 pixels), with a
+    class token first so that "draw a 7" is a prompt. Planned in four parts:
+    pixels as tokens, each pixel's brightness rounded to 4 levels (784
+    tokens an image, the context raised to 784 for this model); a learned
+    codebook of typical 4 × 4 patches, found by k-means clustering (49
+    tokens an image); both measured with tiny-diffusion-in-rust's digit
+    classifier, copied here, so the results compare row for row with its
+    stage 4; and classifier-free guidance applied to the token
+    probabilities. Not planned: a learned autoencoder tokenizer, as
+    full-scale systems use (VQ-VAE: a vector-quantized variational
+    autoencoder), which would need convolutions trained with a backward
+    pass; tiny-diffusion-in-rust's convolutions run forward only.
+    tiny-diffusion-in-rust's PLAN.md (The other direction: language models
+    that draw) sets out the idea and its research.
 
 None of the architecture refinements (RoPE and the rest) is planned for
 our own models: at our scale each was expected to change the loss by
