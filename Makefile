@@ -376,13 +376,51 @@ zip: project.zip ## Create the project zip file: project.zip.
 project.zip: $(SRC_FILES)
 	zip $@ $(SRC_FILES)
 
+# ----- Drawing (PLAN.md, Drawing): a language model that makes images.
+# MNIST is downloaded from the copy tiny-diffusion-in-rust uses, never
+# stored here: copyright Yann LeCun and Corinna Cortes, under CC BY-SA 3.0.
+URL_MNIST       ?= https://ossci-datasets.s3.amazonaws.com/mnist
+CLASSIFIER_ARGS ?=
+CODEBOOK_ARGS   ?=
+
+data/mnist/%-ubyte:
+	$(call hdr,download MNIST: $*)
+	mkdir -p data/mnist
+	curl -fL -o $@.gz $(URL_MNIST)/$*-ubyte.gz && gunzip -f $@.gz
+
+MNIST := $(addprefix data/mnist/,train-images-idx3-ubyte train-labels-idx1-ubyte \
+	t10k-images-idx3-ubyte t10k-labels-idx1-ubyte)
+
+.PHONY: data/mnist
+data/mnist: $(MNIST) ## Download MNIST's 70,000 digits (for drawing).
+
+.PHONY: draw-classifier
+draw-classifier: $(OUT)/classifier.safetensors ## Drawing: train the digit classifier, the instrument (a minute or two).
+
+$(OUT)/classifier.safetensors: $(MNIST) | $(OUT) $(TRANSFORMER)
+	$(call hdr,draw-classifier)
+	$(TRANSFORMER) draw-classifier --data data/mnist $(CLASSIFIER_ARGS) -o $@
+
+.PHONY: draw-codebook
+draw-codebook: $(OUT)/codebook.safetensors ## Drawing, part 2: learn the codebook of 4 x 4 patches by k-means.
+
+$(OUT)/codebook.safetensors: $(MNIST) | $(OUT) $(TRANSFORMER)
+	$(call hdr,draw-codebook)
+	$(TRANSFORMER) draw-codebook --data data/mnist $(CODEBOOK_ARGS) -o $@
+
+.PHONY: draw-check
+draw-check: $(OUT)/classifier.safetensors $(OUT)/codebook.safetensors | $(TRANSFORMER) ## Drawing: what the tokenizers keep, before any model (predictions 1 and 2).
+	$(call hdr,$@)
+	$(TRANSFORMER) draw-check --data data/mnist --classifier $(OUT)/classifier.safetensors --codebook $(OUT)/codebook.safetensors
+
 # The variables make help lists, one per line, with what each does and its
 # value now. A variable meant to be set from the command line gets a place
 # in HELP_VARS and a HELP_ description; make lint fails if a ?= variable
 # is missing (FORCE has no default, so it is listed by hand).
 HELP_VARS := OUT CORPUS TOK_CORPUS SPLIT_ON MERGES CONFIG CARGO_FEATURES \
 	CHAT_ARGS LORA_ARGS EVAL_ARGS CHAT_MODEL PROMPT GEN_ARGS PROBE_MODEL \
-	PROBE_ARGS LLAMA_DIR LLAMA_ARGS W2V_CORPUS W2V_ARGS W2V_OUT FORCE
+	PROBE_ARGS LLAMA_DIR LLAMA_ARGS W2V_CORPUS W2V_ARGS W2V_OUT URL_MNIST \
+	CLASSIFIER_ARGS CODEBOOK_ARGS FORCE
 HELP_OUT            := where the tokenizer, models and other outputs go (the full run uses out-full)
 HELP_CORPUS         := the training text
 HELP_TOK_CORPUS     := the text the tokenizer is learned from (CORPUS unless set)
@@ -403,6 +441,9 @@ HELP_LLAMA_ARGS     := options for transformer llama, such as --temperature 0
 HELP_W2V_CORPUS     := the text word2vec trains on
 HELP_W2V_ARGS       := options for the word2vec tool
 HELP_W2V_OUT        := where word2vec writes its vectors
+HELP_URL_MNIST      := where make data/mnist downloads MNIST from
+HELP_CLASSIFIER_ARGS := options for transformer draw-classifier, such as --steps 2000
+HELP_CODEBOOK_ARGS  := options for transformer draw-codebook, such as --size 512
 HELP_FORCE          := 1 lets make full-clean delete out-full/ (a day of training)
 # A value inside single quotes, with any single quote in it escaped.
 q = $(subst ','\'',$(1))

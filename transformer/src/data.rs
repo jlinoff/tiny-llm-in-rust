@@ -209,6 +209,38 @@ impl EpochOrder {
     }
 }
 
+/// Drawing's batches (PLAN.md, Drawing): whole images, never a window
+/// across two. `sentences` holds image after image, each `len` tokens (its
+/// class token, then its image's tokens); a row's inputs are all of an
+/// image's tokens but the last and its targets all but the first, so every
+/// row starts at position 0 with its class token. Each row's class token
+/// is replaced by `none` with probability `drop` (so one model learns
+/// "draw a 7" and "draw a digit", for guidance), the choice depending only
+/// on the seed, the step and the row, so resuming is exact.
+// Used by drawing's training, which comes after the tokenizer checks.
+#[allow(dead_code, clippy::too_many_arguments)]
+pub fn image_batch(
+    sentences: &[u32],
+    len: usize,
+    batch: usize,
+    seed: u64,
+    step: u64,
+    order: &EpochOrder,
+    drop: f64,
+    none: u32,
+) -> Batch {
+    assert_eq!(sentences.len() % len, 0, "whole sentences of {len} tokens");
+    let starts: Vec<usize> = order.picks(batch, step).iter().map(|&i| i * len).collect();
+    let mut b = batch_at(sentences, &starts, len - 1);
+    let mut rng = Rng::stream(seed ^ 0x6472_6f70, step); // "drop"
+    for row in 0..batch {
+        if rng.unit() <= drop {
+            b.inputs[row * (len - 1)] = none as usize;
+        }
+    }
+    b
+}
+
 /// Fixed validation batches: windows spread evenly over the held-out part,
 /// the same every time, so validation losses are comparable across steps.
 pub fn valid_batches(data: &[u32], batches: usize, batch: usize, seq: usize) -> Vec<Batch> {
@@ -373,6 +405,49 @@ mod tests {
         }
         firsts.sort();
         assert_eq!(firsts, vec![0, 5, 10, 15]);
+    }
+
+    /// Drawing's batches: every row is one whole image, starting with its
+    /// class token (or `<none>`), its targets its inputs shifted by one;
+    /// and the class is dropped about as often as asked.
+    #[test]
+    fn image_batches_hold_whole_images() {
+        let (len, images) = (6, 50);
+        // Image i: its class token 100 + i % 10, then 10·i + 1 … 10·i + 5.
+        let mut s = Vec::new();
+        for i in 0..images as u32 {
+            s.push(100 + i % 10);
+            s.extend((1..len as u32).map(|k| 10 * i + k));
+        }
+        let order = EpochOrder::new(images, 3);
+        let none = 999;
+        for step in 1..=20 {
+            let b = image_batch(&s, len, 8, 3, step, &order, 0.0, none);
+            assert_eq!(b.inputs.len(), 8 * (len - 1));
+            for (row, &i) in order.picks(8, step).iter().enumerate() {
+                let inp = &b.inputs[row * (len - 1)..(row + 1) * (len - 1)];
+                let tgt = &b.targets[row * (len - 1)..(row + 1) * (len - 1)];
+                assert_eq!(inp[0], 100 + i % 10, "the class token first");
+                let want: Vec<usize> = (1..len).map(|k| 10 * i + k).collect();
+                assert_eq!(&inp[1..], &want[..len - 2]);
+                let got: Vec<usize> = tgt.iter().map(|t| t.unwrap()).collect();
+                assert_eq!(got, want, "targets: the image's tokens, the inputs shifted");
+            }
+        }
+        // A drop of 10%, over 10,000 rows: within a point of 10%.
+        let mut dropped = 0;
+        for step in 1..=1250 {
+            let b = image_batch(&s, len, 8, 3, step, &order, 0.1, none);
+            dropped += (0..8)
+                .filter(|r| b.inputs[r * (len - 1)] == none as usize)
+                .count();
+        }
+        let share = dropped as f64 / 10_000.0;
+        assert!((share - 0.1).abs() < 0.01, "{share}");
+        // The same seed and step give the same batch.
+        let a = image_batch(&s, len, 8, 3, 7, &order, 0.5, none);
+        let b = image_batch(&s, len, 8, 3, 7, &order, 0.5, none);
+        assert_eq!(a.inputs, b.inputs);
     }
 
     /// tests/data/tiny.ids was written by mini_bpe.py --encode with

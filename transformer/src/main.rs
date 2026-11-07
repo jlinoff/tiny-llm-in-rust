@@ -8,18 +8,25 @@
 //!   evaluate  measure how often generated stories use requested words
 //!   inspect   show what a checkpoint holds, and check it against its config
 //!   bench     measure this machine's matrix-multiply speed
+//!   draw-*    drawing (PLAN.md, Drawing): the classifier, the codebook,
+//!             and the tokenizer checks
 
 mod bench;
 mod blas;
+mod classify;
+mod codebook;
 mod config;
 mod data;
+mod draw;
 mod evaluate;
 mod generate;
 mod gpt;
 mod hf_tokenizer;
+mod image;
 mod llama;
 mod lora;
 mod model;
+mod optim;
 mod probe;
 mod rng;
 mod safetensors;
@@ -284,6 +291,65 @@ enum Command {
         #[arg(long)]
         checkpoint: Option<PathBuf>,
     },
+    /// Drawing: train the digit classifier, the instrument drawing is
+    /// measured with (copied from tiny-diffusion-in-rust, same settings).
+    DrawClassifier {
+        /// The folder holding MNIST's four files
+        #[arg(long, default_value = "data/mnist")]
+        data: PathBuf,
+        /// Neurons per hidden layer
+        #[arg(long, default_value_t = 256)]
+        hidden: usize,
+        /// Hidden layers
+        #[arg(long, default_value_t = 2)]
+        layers: usize,
+        #[arg(long, default_value_t = 5000)]
+        steps: u64,
+        #[arg(long, default_value_t = 128)]
+        batch: usize,
+        #[arg(long, default_value_t = 1e-3)]
+        lr: f32,
+        #[arg(long, default_value_t = 100)]
+        warmup: u64,
+        #[arg(long, default_value_t = 1)]
+        seed: u64,
+        #[arg(long, default_value_t = 500)]
+        log_every: u64,
+        #[arg(short, long)]
+        output: PathBuf,
+    },
+    /// Drawing, part 2: learn the codebook of typical patches by k-means.
+    DrawCodebook {
+        /// The folder holding MNIST's four files
+        #[arg(long, default_value = "data/mnist")]
+        data: PathBuf,
+        /// Entries (K)
+        #[arg(long, default_value_t = 256)]
+        size: usize,
+        /// The patch side, in pixels
+        #[arg(long, default_value_t = 4)]
+        patch: usize,
+        /// At most this many repetitions (it stops sooner if it settles)
+        #[arg(long, default_value_t = 30)]
+        repetitions: usize,
+        #[arg(long, default_value_t = 1)]
+        seed: u64,
+        #[arg(short, long)]
+        output: PathBuf,
+    },
+    /// Drawing: what the tokenizers keep and how their tokens are spread,
+    /// before any model is trained (PLAN.md, Drawing, predictions 1 and 2).
+    DrawCheck {
+        /// The folder holding MNIST's four files
+        #[arg(long, default_value = "data/mnist")]
+        data: PathBuf,
+        /// The classifier (draw-classifier writes it)
+        #[arg(long)]
+        classifier: PathBuf,
+        /// The codebook (draw-codebook writes it); without it, part 1 only
+        #[arg(long)]
+        codebook: Option<PathBuf>,
+    },
 }
 
 fn main() -> ExitCode {
@@ -413,6 +479,48 @@ fn main() -> ExitCode {
             verbose,
         } => inspect(&checkpoint, verbose),
         Command::Bench { checkpoint } => bench_command(checkpoint.as_deref()),
+        Command::DrawClassifier {
+            data,
+            hidden,
+            layers,
+            steps,
+            batch,
+            lr,
+            warmup,
+            seed,
+            log_every,
+            output,
+        } => draw_classifier(
+            &data,
+            classify::ClassifierConfig {
+                inputs: 0,
+                hidden,
+                layers,
+                classes: 0,
+            },
+            &classify::ClassifierTraining {
+                steps,
+                batch,
+                learning_rate: lr,
+                warmup,
+                seed,
+            },
+            log_every,
+            &output,
+        ),
+        Command::DrawCodebook {
+            data,
+            size,
+            patch,
+            repetitions,
+            seed,
+            output,
+        } => draw_codebook(&data, size, patch, repetitions, seed, &output),
+        Command::DrawCheck {
+            data,
+            classifier,
+            codebook,
+        } => draw_check(&data, &classifier, codebook.as_deref()),
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,
@@ -421,6 +529,275 @@ fn main() -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+// ----- drawing (PLAN.md, Drawing)
+
+/// MNIST's training or test images, from the folder the Makefile downloads
+/// them into.
+fn mnist(dir: &Path, test: bool) -> Result<image::Images, String> {
+    let part = if test { "t10k" } else { "train" };
+    image::read_idx(
+        &dir.join(format!("{part}-images-idx3-ubyte")),
+        &dir.join(format!("{part}-labels-idx1-ubyte")),
+    )
+    .map_err(|e| format!("{e} (make data/mnist downloads MNIST)"))
+}
+
+/// How long is left, from the work done and the time it took: "~3m left".
+fn left(done: usize, total: usize, elapsed: f64) -> String {
+    if done == 0 || done >= total {
+        return String::new();
+    }
+    let rest = train::duration(elapsed / done as f64 * (total - done) as f64);
+    if rest == "—" {
+        return String::new(); // under a second
+    }
+    format!(", ~{rest} left")
+}
+
+fn draw_classifier(
+    data: &Path,
+    shape: classify::ClassifierConfig,
+    tc: &classify::ClassifierTraining,
+    log_every: u64,
+    output: &Path,
+) -> Result<(), String> {
+    use std::time::Instant;
+    check_writable(output)?;
+    let (train, test) = (mnist(data, false)?, mnist(data, true)?);
+    let cfg = classify::ClassifierConfig {
+        inputs: train.shape.values(),
+        classes: 1 + *train.labels.iter().max().unwrap_or(&0) as usize,
+        ..shape
+    };
+    println!(
+        "Training the classifier ({} parameters: {} inputs, {} hidden layers of {}, {} classes) on MNIST: {} training images, {} test images; {} steps of {}",
+        cfg.parameters(),
+        cfg.inputs,
+        cfg.layers,
+        cfg.hidden,
+        cfg.classes,
+        train.labels.len(),
+        test.labels.len(),
+        tc.steps,
+        tc.batch
+    );
+    println!("   step    loss        lr");
+    let mut clf = classify::Classifier::new(cfg, tc.seed);
+    let (mut sum, mut count) = (0.0f64, 0u64);
+    let start = Instant::now();
+    clf.train(&train, tc, |step, loss| {
+        sum += loss as f64;
+        count += 1;
+        if step % log_every == 0 || step == tc.steps {
+            println!(
+                "  {step:>5}   {:.4}  {:.2e}{}",
+                sum / count as f64,
+                tc.lr(step),
+                left(
+                    step as usize,
+                    tc.steps as usize,
+                    start.elapsed().as_secs_f64()
+                )
+            );
+            (sum, count) = (0.0, 0);
+        }
+    });
+    // Training accuracy on the first 10,000 training images, as many as
+    // the test set: a gap between the two means memorizing.
+    let k = train.labels.len().min(10_000);
+    let subset = image::Images {
+        shape: train.shape,
+        pixels: tensor::Mat::from_vec(k, cfg.inputs, train.pixels.data[..k * cfg.inputs].to_vec()),
+        labels: train.labels[..k].to_vec(),
+    };
+    let (tr, te) = (clf.accuracy(&subset), clf.accuracy(&test));
+    println!(
+        "Accuracy: {:.2}% on the test images, {:.2}% on {k} training images ({})",
+        100.0 * te,
+        100.0 * tr,
+        train::duration(start.elapsed().as_secs_f64())
+    );
+    let mut meta = BTreeMap::new();
+    meta.insert("data".to_string(), "mnist".to_string());
+    meta.insert("steps".to_string(), tc.steps.to_string());
+    meta.insert("test_accuracy".to_string(), format!("{te:.4}"));
+    meta.insert("train_accuracy".to_string(), format!("{tr:.4}"));
+    let f = clf.to_file(meta);
+    safetensors::write(output, &f.tensors, &f.metadata)?;
+    println!("Wrote {}", output.display());
+    Ok(())
+}
+
+fn draw_codebook(
+    data: &Path,
+    size: usize,
+    patch: usize,
+    repetitions: usize,
+    seed: u64,
+    output: &Path,
+) -> Result<(), String> {
+    use std::time::Instant;
+    check_writable(output)?;
+    let train = mnist(data, false)?;
+    image::check_patch(train.shape, patch)?;
+    let patches = image::patchify(&train.pixels, train.shape, patch);
+    println!(
+        "Learning a codebook of {size} entries of {patch} × {patch} pixels by k-means, from MNIST's {} training images ({} patches); at most {repetitions} repetitions",
+        train.labels.len(),
+        patches.rows
+    );
+    println!("   rep   mean squared distance per pixel   patches that changed entry");
+    let start = Instant::now();
+    let per = (patches.rows * patch * patch) as f64;
+    let (book, log) =
+        codebook::Codebook::learn(&patches, patch, size, repetitions, seed, |i, r| {
+            println!(
+                "  {i:>4}   {:>12.6}                      {:>10}{}",
+                r.total / per,
+                r.changed,
+                left(i, repetitions, start.elapsed().as_secs_f64())
+            );
+        });
+    let settled = log.last().is_some_and(|r| r.changed == 0);
+    println!(
+        "{} after {} repetitions ({})",
+        if settled { "Settled" } else { "Stopped" },
+        log.len(),
+        train::duration(start.elapsed().as_secs_f64())
+    );
+    let mut meta = BTreeMap::new();
+    meta.insert("data".to_string(), "mnist".to_string());
+    meta.insert("seed".to_string(), seed.to_string());
+    meta.insert("repetitions".to_string(), log.len().to_string());
+    meta.insert("settled".to_string(), settled.to_string());
+    let f = book.to_file(meta);
+    safetensors::write(output, &f.tensors, &f.metadata)?;
+    println!(
+        "Wrote {} (fingerprint {})",
+        output.display(),
+        book.fingerprint()
+    );
+    Ok(())
+}
+
+fn draw_check(data: &Path, classifier: &Path, book: Option<&Path>) -> Result<(), String> {
+    let (train, test) = (mnist(data, false)?, mnist(data, true)?);
+    let clf = classify::Classifier::from_file(&safetensors::read(classifier)?)
+        .map_err(|e| format!("{}: {e}", classifier.display()))?;
+    let pct = |x: f64| format!("{:.2}%", 100.0 * x);
+    println!(
+        "The tokenizers, before any model (PLAN.md, Drawing, predictions 1 and 2): MNIST's {} training and {} test images.",
+        train.labels.len(),
+        test.labels.len()
+    );
+    println!();
+    println!("The classifier on the test images:");
+    println!(
+        "  as they are                  {}",
+        pct(clf.accuracy(&test))
+    );
+    println!(
+        "  rounded to {} levels          {}",
+        draw::LEVELS,
+        pct(clf.accuracy(&draw::quantized(&test)))
+    );
+    let book = match book {
+        Some(p) => Some((
+            p,
+            codebook::Codebook::from_file(&safetensors::read(p)?)
+                .map_err(|e| format!("{}: {e}", p.display()))?,
+        )),
+        None => None,
+    };
+    if let Some((_, b)) = &book {
+        let rec = b.reconstructed(&test);
+        let mse = rec
+            .pixels
+            .data
+            .iter()
+            .zip(&test.pixels.data)
+            .map(|(a, b)| ((a - b) as f64).powi(2))
+            .sum::<f64>()
+            / test.pixels.data.len() as f64;
+        println!(
+            "  rebuilt from the codebook    {}   ({} entries of {p} × {p}; mean squared error {mse:.4} per pixel, on the −1 to 1 scale)",
+            pct(clf.accuracy(&rec)),
+            b.size(),
+            p = b.patch
+        );
+    }
+    println!();
+    // The training images as part 1's sentences: 1 + 784 tokens each.
+    let v = draw::PIXELS;
+    let len = train.pixels.cols + 1;
+    let sentences = draw::pixel_sentences(&train);
+    println!(
+        "Part 1's sentences: {} tokens each, from a vocabulary of {} ({} … {}, {} … {}, {})",
+        len,
+        v.size(),
+        v.name(0, true),
+        v.name(draw::LEVELS as u32 - 1, true),
+        v.name(v.class(0), true),
+        v.name(v.class(draw::CLASSES - 1), true),
+        v.name(v.none(), true)
+    );
+    let levels = draw::shares(
+        sentences.chunks(len).flat_map(|s| s[1..].iter().copied()),
+        draw::LEVELS,
+    );
+    let names: Vec<String> = levels
+        .iter()
+        .enumerate()
+        .map(|(k, s)| format!("L{k} {}", pct(*s)))
+        .collect();
+    println!("Pixel levels in the training images: {}", names.join(", "));
+    println!(
+        "  knowing only how common each level is costs {:.3} nats per pixel",
+        draw::entropy(&levels)
+    );
+    if let Some((path, b)) = &book {
+        let ids = b.encode(&train.pixels, train.shape);
+        let per = image::patch_count(train.shape, b.patch);
+        let cv = draw::Vocab { image: b.size() };
+        let sentences = draw::codebook_sentences(&ids, per, &train.labels, cv);
+        println!(
+            "Part 2's sentences: {} tokens each, from a vocabulary of {}",
+            per + 1,
+            cv.size()
+        );
+        let s = draw::shares(
+            sentences
+                .chunks(per + 1)
+                .flat_map(|s| s[1..].iter().copied()),
+            b.size(),
+        );
+        let (top, share) =
+            s.iter()
+                .copied()
+                .enumerate()
+                .fold((0, 0.0), |a, (k, v)| if v > a.1 { (k, v) } else { a });
+        let brightest = b
+            .entries
+            .row(top)
+            .iter()
+            .copied()
+            .fold(f32::NEG_INFINITY, f32::max);
+        let used = s.iter().filter(|&&v| v > 0.0).count();
+        println!(
+            "Codebook entries in the training images ({}): the commonest, #{top}, takes {} of the patches (its brightest pixel {brightest:.3}: {}); {used} of {} entries used",
+            path.display(),
+            pct(share),
+            if brightest <= -0.99 { "all black" } else { "not all black" },
+            b.size()
+        );
+        println!(
+            "  knowing only how common each entry is costs {:.3} nats per patch",
+            draw::entropy(&s)
+        );
+    }
+    Ok(())
 }
 
 /// Stop now, before any work, if `path` can't be written (the project's

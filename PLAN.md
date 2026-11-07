@@ -410,7 +410,8 @@ learns to make images ([Drawing](#drawing-a-language-model-that-makes-images)).
   pixels from left to right, then the next row, to the bottom right.
   The pixel directly above a pixel is 28 positions earlier.
 - **brightness level**: one of 4 values a pixel is rounded to (black,
-  dark gray, light gray, white), so that a pixel can be a token: the
+  dark gray, light gray, white: 0, 85, 170 and 255 as bytes, the nearest
+  one to the pixel's own 0 to 255), so that a pixel can be a token: the
   pixel model's vocabulary is the 4 levels plus the class tokens.
 - **class token**: a token that names the digit to draw, `<0>` to
   `<9>`, put before the image's tokens, so "draw a 7" is a prompt;
@@ -423,7 +424,9 @@ learns to make images ([Drawing](#drawing-a-language-model-that-makes-images)).
   The image tokenizer's version of BPE's merges: a vocabulary learned
   from data that makes sequences shorter.
 - **k-means**: the way the codebook is learned. Start from K patches
-  picked from the data; then repeat two steps: give each training patch
+  picked from the data, each new one picked with probability
+  proportional to its squared distance from the nearest already picked
+  (k-means++, so no two start the same); then repeat two steps: give each training patch
   to its nearest entry, and move each entry to the average of the
   patches it was given. Each repetition can only lower the total
   squared distance from patches to their entries, so it settles.
@@ -455,7 +458,7 @@ learns to make images ([Drawing](#drawing-a-language-model-that-makes-images)).
 
 ## The flows
 
-There are five separate flows, the fifth planned:
+There are five separate flows, the fifth being built:
 
 1. **The LLM flow**: the main goal. It builds a small GPT-style language
    model, from text to a trained model that generates text, and then
@@ -473,7 +476,7 @@ There are five separate flows, the fifth planned:
    multiplies and a real training step for a built model, to turn the
    training-time estimates into measured figures before committing to a
    long run. It reads a checkpoint and writes nothing.
-5. **The drawing flow** (planned): the LLM flow's model and training
+5. **The drawing flow** (being built): the LLM flow's model and training
    applied to images, digits as sequences of tokens. Its flow and plan
    are in [Drawing](#drawing-a-language-model-that-makes-images).
 
@@ -4041,7 +4044,12 @@ it.
 
 ## Drawing: a language model that makes images
 
-**Planned, not started.** This section was written before any code: the
+**Started.** Built so far: the classifier (copied), part 1's levels and
+sentences, whole-image batches, the codebook, and `draw-check`, which
+measures the tokenizers (predictions 1 and 2); no drawing model has been
+trained yet.
+
+This section was written before any code: the
 plan, the tests, and the predictions, each with its mechanism and a
 numeric check, in the manner of tiny-diffusion-in-rust's stages 4 to 7.
 The results will be added below them, and a prediction that misses
@@ -4108,8 +4116,16 @@ context of 784 holds a whole image. Pixel p1 is the top-left corner,
 p28 the top-right, p29 the start of the second row.
 
 **Part 1: pixels as tokens.** Each pixel's brightness, 0 to 255, is
-rounded to one of 4 levels (0–63, 64–127, 128–191, 192–255), decoded as
-the middle of its range. The vocabulary is 15: 4 levels, 10 class
+rounded to the nearest of 4 levels, 0, 85, 170 and 255, which are also
+what the levels decode to. (Corrected before any code: the plan first
+had the ranges 0–63, 64–127, 128–191 and 192–255, decoded as their
+middles, which would have made the black background 32 and the white
+strokes 224. The classifier learned on black at exactly 0; a gray
+background would have measured the instrument's surprise, not the
+tokenizer's loss. Prediction 2's shares were written for the first
+ranges and are kept as written; the new ranges make level 0 a little
+smaller, 0 to 42 instead of 0 to 63, and level 3 a little smaller, 213
+to 255 instead of 192 to 255.) The vocabulary is 15: 4 levels, 10 class
 tokens and `<none>`. The model is the development size (d = 128, 4
 layers, 4 heads, d_ff = 512) with a context of 784: by
 [the parameter formula](#configuration) (N = V·d + T·d + L·(4d² + 2·d·d_ff + 9d + d_ff) + 2d), 15 × 128 + 784 × 128 + 4 ×
@@ -4195,8 +4211,8 @@ Written with the code, before any training, as design for test asks
 ([Conventions for all code](#conventions-for-all-code)):
 
 - **Levels.** Each brightness goes to the right level, at every
-  boundary (63 and 64, 127 and 128, 191 and 192), and decoding gives the
-  middle of each range.
+  boundary (42 and 43, 127 and 128, 212 and 213), and decoding gives
+  0, 85, 170 and 255, so black stays black.
 - **The sentence.** An image encodes to 785 tokens, the class first;
   decoding its tokens gives its reconstruction; a hand-made 2 × 2 image
   gives tokens checked by hand.
@@ -4360,28 +4376,28 @@ run every time the model is made or used.
    uses the existing tape and training loop.
 10. **Smaller items:** top-p sampling; folding this plan into
     the README at the end.
-11. **Drawing: a language model that makes images** (planned, not started;
-    its plan and predictions come before any code). The mirror image of
-    tiny-diffusion-in-rust's stage 6, where diffusion wrote text: images
-    become sequences of tokens, and this project's transformer learns to
-    predict them, as it predicts stories. Decided so far: the code goes in
-    the `transformer` crate, reusing its model, training loop and sampler,
-    with images batched as whole sequences rather than windows of a stream;
-    the data is MNIST (70,000 handwritten digits of 28 × 28 pixels), with a
-    class token first so that "draw a 7" is a prompt. Planned in four parts:
-    pixels as tokens, each pixel's brightness rounded to 4 levels (784
-    tokens an image, the context raised to 784 for this model); a learned
-    codebook of typical 4 × 4 patches, found by k-means clustering (49
-    tokens an image); both measured with tiny-diffusion-in-rust's digit
-    classifier, copied here, so the results compare row for row with its
-    stage 4; and classifier-free guidance applied to the token
-    probabilities. Not planned: a learned autoencoder tokenizer, as
-    full-scale systems use (VQ-VAE: a vector-quantized variational
-    autoencoder), which would need convolutions trained with a backward
-    pass; tiny-diffusion-in-rust's convolutions run forward only.
+11. **Drawing: a language model that makes images** (started: its plan and
+    predictions came before any code, and its section says what is built).
+    The mirror image of tiny-diffusion-in-rust's stage 6, where diffusion
+    wrote text: images become sequences of tokens, and this project's
+    transformer learns to predict them, as it predicts stories. Decided so
+    far: the code goes in the `transformer` crate, reusing its model,
+    training loop and sampler, with images batched as whole sequences rather
+    than windows of a stream; the data is MNIST (70,000 handwritten digits
+    of 28 × 28 pixels), with a class token first so that "draw a 7" is a
+    prompt. Planned in four parts: pixels as tokens, each pixel's brightness
+    rounded to 4 levels (784 tokens an image, the context raised to 784 for
+    this model); a learned codebook of typical 4 × 4 patches, found by
+    k-means clustering (49 tokens an image); both measured with
+    tiny-diffusion-in-rust's digit classifier, copied here, so the results
+    compare row for row with its stage 4; and classifier-free guidance
+    applied to the token probabilities. Not planned: a learned autoencoder
+    tokenizer, as full-scale systems use (VQ-VAE: a vector-quantized
+    variational autoencoder), which would need convolutions trained with a
+    backward pass; tiny-diffusion-in-rust's convolutions run forward only.
     tiny-diffusion-in-rust's PLAN.md (The other direction: language models
-    that draw) sets out the idea and its research; its plan and
-    predictions are in [Drawing](#drawing-a-language-model-that-makes-images).
+    that draw) sets out the idea and its research; its plan and predictions
+    are in [Drawing](#drawing-a-language-model-that-makes-images).
 
 None of the architecture refinements (RoPE and the rest) is planned for
 our own models: at our scale each was expected to change the loss by

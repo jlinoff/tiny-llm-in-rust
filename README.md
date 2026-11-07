@@ -173,6 +173,16 @@ this project ran SmolLM.
 
 MIT: see [LICENSE](LICENSE). This is meant for learning; use it freely.
 
+The repository holds no training data; `make` downloads it from its own
+sources, under its own licences:
+[TinyStories](https://huggingface.co/datasets/roneneldan/TinyStories), by
+Ronen Eldan and Yuanzhi Li, under CDLA-Sharing-1.0 (Community Data License
+Agreement); and, for drawing, **MNIST**, a standard set of handwritten
+digits ([its home page](https://yann.lecun.com/exdb/mnist/)), copyright Yann
+LeCun and Corinna Cortes, under CC BY-SA 3.0 (Creative Commons
+Attribution-Share Alike). The open-weight models in Run a real open-weight
+model are downloaded under their own licences too.
+
 ## Acknowledgments
 
 Built by Joe in collaboration with **Claude**, Anthropic's AI model (Claude
