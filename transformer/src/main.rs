@@ -398,6 +398,63 @@ enum Command {
         #[arg(short, long)]
         output: PathBuf,
     },
+    /// Drawing: a grid of digits, one row per digit (0 to 9), one column
+    /// per random stream, the same stream down each column.
+    DrawSample {
+        #[arg(long)]
+        model: PathBuf,
+        /// The codebook, for a codebook model
+        #[arg(long)]
+        codebook: Option<PathBuf>,
+        /// The guidance scale w (1: the model as trained)
+        #[arg(long, default_value_t = 1.0)]
+        guidance: f64,
+        #[arg(long, default_value_t = 8)]
+        columns: usize,
+        #[arg(long, default_value_t = 1)]
+        seed: u64,
+        /// Pixels per pixel in the PNG
+        #[arg(long, default_value_t = 3)]
+        zoom: usize,
+        /// The PNG file
+        #[arg(short, long)]
+        output: PathBuf,
+    },
+    /// Drawing: measure a model's digits with the classifier, at each
+    /// guidance scale, as tiny-diffusion-in-rust's stage 4 did.
+    DrawMeasure {
+        #[arg(long)]
+        model: PathBuf,
+        /// The classifier (draw-classifier writes it)
+        #[arg(long)]
+        classifier: PathBuf,
+        /// The codebook, for a codebook model
+        #[arg(long)]
+        codebook: Option<PathBuf>,
+        /// The folder holding MNIST's four files (real digits, for variety)
+        #[arg(long, default_value = "data/mnist")]
+        data: PathBuf,
+        /// Guidance scales, comma-separated
+        #[arg(long, default_value = "1")]
+        guidance: String,
+        /// Images per scale, the same number of each digit
+        #[arg(long, default_value_t = 1000)]
+        samples: usize,
+        #[arg(long, default_value_t = 1)]
+        seed: u64,
+    },
+    /// Drawing: where each head looks, averaged by distance back, over
+    /// test images (PLAN.md, Drawing, prediction 5).
+    DrawAttention {
+        #[arg(long)]
+        model: PathBuf,
+        /// The test images' token file (draw-encode writes it)
+        #[arg(long)]
+        valid: PathBuf,
+        /// Test images to average over, spread evenly
+        #[arg(long, default_value_t = 50)]
+        images: usize,
+    },
 }
 
 fn main() -> ExitCode {
@@ -588,6 +645,45 @@ fn main() -> ExitCode {
             steps,
             output,
         } => draw_train(&model, &data, &valid, &config, steps, &output),
+        Command::DrawSample {
+            model,
+            codebook,
+            guidance,
+            columns,
+            seed,
+            zoom,
+            output,
+        } => draw_sample(
+            &model,
+            codebook.as_deref(),
+            guidance,
+            columns,
+            seed,
+            zoom,
+            &output,
+        ),
+        Command::DrawAttention {
+            model,
+            valid,
+            images,
+        } => draw_attention(&model, &valid, images),
+        Command::DrawMeasure {
+            model,
+            classifier,
+            codebook,
+            data,
+            guidance,
+            samples,
+            seed,
+        } => draw_measure(
+            &model,
+            &classifier,
+            codebook.as_deref(),
+            &data,
+            &guidance,
+            samples,
+            seed,
+        ),
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,
@@ -1194,6 +1290,315 @@ fn draw_train(
         "Wrote {} with Adam's state (resumable); read back and verified.",
         output.display()
     );
+    Ok(())
+}
+
+/// A drawing model loaded for sampling: its weights, shape, vocabulary,
+/// how many image tokens an image has, and how they become pixels.
+struct Drawer {
+    params: gpt::Params<f32>,
+    config: ModelConfig,
+    vocab: draw::Vocab,
+    tokens: usize,
+    book: Option<codebook::Codebook>,
+    kind: String,
+}
+
+impl Drawer {
+    fn load(model_path: &Path, book: Option<&Path>) -> Result<Drawer, String> {
+        let m = load_checkpoint(model_path)?;
+        let kind = m.meta("drawing").map_err(|_| {
+            format!(
+                "{}: not a drawing model (draw-build makes one)",
+                model_path.display()
+            )
+        })?;
+        let fp = m.meta("tokenizer_fingerprint")?;
+        let (want, vocab, book) = draw_tokens(&kind, book)?;
+        if hex(&want) != fp {
+            return Err(format!(
+                "{}: its tokens' fingerprint {fp} isn't this {kind} encoding's ({})",
+                model_path.display(),
+                hex(&want)
+            ));
+        }
+        if vocab.size() != m.vocab {
+            return Err(format!(
+                "{}: V = {}, not {}",
+                model_path.display(),
+                m.vocab,
+                vocab.size()
+            ));
+        }
+        let shape = image::Shape {
+            height: 28,
+            width: 28,
+            channels: 1,
+        };
+        let tokens = match &book {
+            None => shape.values(),
+            Some(b) => image::patch_count(shape, b.patch),
+        };
+        if tokens != m.config.context {
+            return Err(format!(
+                "{}: context {}, but an image is {tokens} tokens",
+                model_path.display(),
+                m.config.context
+            ));
+        }
+        Ok(Drawer {
+            params: m.params(),
+            config: m.config.clone(),
+            vocab,
+            tokens,
+            book,
+            kind,
+        })
+    }
+
+    fn shape(&self) -> image::Shape {
+        image::Shape {
+            height: 28,
+            width: 28,
+            channels: 1,
+        }
+    }
+
+    /// Draw, and turn the tokens into images, one per row.
+    fn draw(&self, asks: &[draw::Ask], seed: u64) -> tensor::Mat<f32> {
+        let all = draw::draw_many(
+            &self.params,
+            &self.config,
+            self.vocab,
+            self.tokens,
+            asks,
+            seed,
+        );
+        let values = self.shape().values();
+        let mut data = Vec::with_capacity(asks.len() * values);
+        for t in &all {
+            match &self.book {
+                None => data.extend(draw::pixel_image(t)),
+                Some(b) => data.extend(b.decode(t, self.shape()).data),
+            }
+        }
+        tensor::Mat::from_vec(asks.len(), values, data)
+    }
+}
+
+fn draw_sample(
+    model_path: &Path,
+    book: Option<&Path>,
+    w: f64,
+    columns: usize,
+    seed: u64,
+    zoom: usize,
+    output: &Path,
+) -> Result<(), String> {
+    check_writable(output)?;
+    let d = Drawer::load(model_path, book)?;
+    let asks: Vec<draw::Ask> = (0..draw::CLASSES)
+        .flat_map(|digit| {
+            (0..columns).map(move |col| draw::Ask {
+                class: Some(digit),
+                w,
+                stream: col as u64,
+            })
+        })
+        .collect();
+    println!(
+        "Drawing {} digits with {} ({} model): rows 0 to 9, {columns} columns, the same random stream down each column; guidance w = {w}, seed {seed}",
+        asks.len(),
+        model_path.display(),
+        if d.kind == "pixels" { "pixel" } else { "codebook" }
+    );
+    let start = std::time::Instant::now();
+    let images = d.draw(&asks, seed);
+    image::write_grid(output, &images, d.shape(), columns, zoom)?;
+    println!(
+        "Wrote {} ({})",
+        output.display(),
+        train::duration(start.elapsed().as_secs_f64())
+    );
+    Ok(())
+}
+
+fn draw_measure(
+    model_path: &Path,
+    clf_path: &Path,
+    book: Option<&Path>,
+    data: &Path,
+    scales: &str,
+    n: usize,
+    seed: u64,
+) -> Result<(), String> {
+    let scales: Vec<f64> = scales
+        .split(',')
+        .map(|x| {
+            x.trim()
+                .parse()
+                .map_err(|_| format!("--guidance {scales}: not numbers"))
+        })
+        .collect::<Result<_, _>>()?;
+    let d = Drawer::load(model_path, book)?;
+    let clf = classify::Classifier::from_file(&safetensors::read(clf_path)?)
+        .map_err(|e| format!("{}: {e}", clf_path.display()))?;
+    let real = mnist(data, true)?;
+    let l = draw::CLASSES;
+    let ys: Vec<usize> = (0..n).map(|i| i % l).collect();
+    let rows_of = |imgs: &tensor::Mat<f32>, pick: &dyn Fn(usize) -> bool| {
+        let v = imgs.cols;
+        let mut out = Vec::new();
+        for i in (0..imgs.rows).filter(|&i| pick(i)) {
+            out.extend_from_slice(imgs.row(i));
+        }
+        tensor::Mat::from_vec(out.len() / v, v, out)
+    };
+    let per = n / l;
+    let real_by: Vec<tensor::Mat<f32>> = (0..l)
+        .map(|c| {
+            let idx: Vec<usize> = (0..real.labels.len())
+                .filter(|&i| real.labels[i] as usize == c)
+                .take(per.max(2))
+                .collect();
+            rows_of(&real.pixels, &|i| idx.contains(&i))
+        })
+        .collect();
+    println!(
+        "Measuring {} ({} model) with {}: {n} images per guidance scale, {per} of each digit, random stream i for image i; variety against {} real test images per digit",
+        model_path.display(),
+        if d.kind == "pixels" { "pixel" } else { "codebook" },
+        clf_path.display(),
+        per.max(2)
+    );
+    println!("      w   agreement   confident   variety   time");
+    for &w in &scales {
+        let asks: Vec<draw::Ask> = (0..n)
+            .map(|i| draw::Ask {
+                class: if w == 0.0 { None } else { Some(ys[i]) },
+                w,
+                stream: i as u64,
+            })
+            .collect();
+        let start = std::time::Instant::now();
+        let out = d.draw(&asks, seed);
+        let secs = start.elapsed().as_secs_f64();
+        let ms = classify::measure(&clf, &out, if w == 0.0 { None } else { Some(&ys) });
+        let variety: f64 = (0..l)
+            .map(|c| classify::variety(&rows_of(&out, &|i| ys[i] == c), &real_by[c]))
+            .sum::<f64>()
+            / l as f64;
+        let agree = ms
+            .agreement
+            .map_or("   (none)".to_string(), |a| format!("{:8.1}%", 100.0 * a));
+        let var = if w == 0.0 {
+            "   (none)".to_string()
+        } else {
+            format!("{variety:9.2}")
+        };
+        println!(
+            "  {w:5}   {agree}   {:8.1}%   {var}   {}",
+            100.0 * ms.confident,
+            train::duration(secs)
+        );
+    }
+    Ok(())
+}
+
+/// The distances back that prediction 5 counts: the pixel to the left (1)
+/// and the three above it (27, 28, 29), in an image 28 pixels wide.
+const NEIGHBOURS: [usize; 4] = [1, 27, 28, 29];
+
+/// Each head's attention averaged by distance back: share[k] is the mean
+/// weight a position gives the position k before it, over positions that
+/// have one 29 back (the pixel above-left exists from row 2 on).
+fn attention_by_distance(
+    p: &gpt::Params<f32>,
+    c: &ModelConfig,
+    sentences: &[&[u32]],
+) -> Vec<Vec<Vec<f64>>> {
+    let n = c.context;
+    let first = NEIGHBOURS[3];
+    let mut share = vec![vec![vec![0.0f64; n]; c.heads]; c.layers];
+    let mut count = 0usize;
+    for s in sentences {
+        let tokens: Vec<usize> = s[..n].iter().map(|&t| t as usize).collect();
+        let tr = probe::trace(p, c, &tokens);
+        for (l, heads) in tr.attention.iter().enumerate() {
+            for (h, a) in heads.iter().enumerate() {
+                for t in first..n {
+                    let row = a.row(t);
+                    for k in 0..=t {
+                        share[l][h][k] += row[t - k] as f64;
+                    }
+                }
+            }
+        }
+        count += n - first;
+    }
+    for l in share.iter_mut() {
+        for h in l.iter_mut() {
+            for v in h.iter_mut() {
+                *v /= count as f64;
+            }
+        }
+    }
+    share
+}
+
+fn draw_attention(model_path: &Path, valid: &Path, images: usize) -> Result<(), String> {
+    let m = load_checkpoint(model_path)?;
+    if m.meta("drawing").ok().as_deref() != Some("pixels") {
+        return Err(format!(
+            "{}: prediction 5 is about the pixel model (draw-build pixels)",
+            model_path.display()
+        ));
+    }
+    let len = m.config.context + 1;
+    let corpus = draw_corpus(valid, len)?;
+    train::check_data(&corpus, m.vocab, &m.meta("tokenizer_fingerprint")?)?;
+    let total = corpus.ids.len() / len;
+    let k = images.min(total).max(1);
+    let picks: Vec<&[u32]> = (0..k)
+        .map(|i| {
+            let at = i * total / k * len;
+            &corpus.ids[at..at + len]
+        })
+        .collect();
+    let params = m.params();
+    let start = std::time::Instant::now();
+    let share = attention_by_distance(&params, &m.config, &picks);
+    println!(
+        "Attention by distance back, {} ({}), averaged over {k} test images and positions {} to {} ({}):",
+        model_path.display(),
+        m.describe(),
+        NEIGHBOURS[3],
+        m.config.context - 1,
+        train::duration(start.elapsed().as_secs_f64())
+    );
+    println!("  head    1 (left)   27     28 (above)  29     these four   the five largest (distance back: weight; 0 is itself)");
+    for (l, heads) in share.iter().enumerate() {
+        for (h, s) in heads.iter().enumerate() {
+            let four: f64 = NEIGHBOURS.iter().map(|&d| s[d]).sum();
+            let mut order: Vec<usize> = (0..s.len()).collect();
+            order.sort_by(|&a, &b| s[b].total_cmp(&s[a]).then(a.cmp(&b)));
+            let top: Vec<String> = order[..5]
+                .iter()
+                .map(|&d| format!("{d}: {:.1}%", 100.0 * s[d]))
+                .collect();
+            println!(
+                "  {}.{}   {:7.1}% {:6.1}% {:7.1}%    {:5.1}%   {:7.1}%     {}",
+                l + 1,
+                h + 1,
+                100.0 * s[1],
+                100.0 * s[27],
+                100.0 * s[28],
+                100.0 * s[29],
+                100.0 * four,
+                top.join(", ")
+            );
+        }
+    }
     Ok(())
 }
 
@@ -3214,4 +3619,41 @@ fn bench_command(checkpoint: Option<&Path>) -> Result<(), String> {
     };
     bench::run(model.as_ref());
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Each position's attention weights sum to 1, so a head's shares by
+    /// distance back sum to 1 too; and the shares are computed over the
+    /// positions from 29 on, where every distance prediction 5 counts
+    /// exists.
+    #[test]
+    fn attention_shares_sum_to_one() {
+        let c = ModelConfig {
+            d_model: 16,
+            layers: 2,
+            heads: 2,
+            context: 40,
+            d_ff: 32,
+            seed: 3,
+        };
+        let p = gpt::Params::<f32>::from_tensors(&model::init(&c, draw::PIXELS.size()));
+        let s1: Vec<u32> = (0..41).map(|i| (i % 4) as u32).collect();
+        let s2: Vec<u32> = (0..41).map(|i| (i * 7 % 4) as u32).collect();
+        let share = attention_by_distance(&p, &c, &[&s1, &s2]);
+        for (l, heads) in share.iter().enumerate() {
+            for (h, s) in heads.iter().enumerate() {
+                let total: f64 = s.iter().sum();
+                assert!(
+                    (total - 1.0).abs() < 1e-5,
+                    "head {}.{}: {total}",
+                    l + 1,
+                    h + 1
+                );
+                assert!(s.iter().all(|&v| v >= 0.0));
+            }
+        }
+    }
 }

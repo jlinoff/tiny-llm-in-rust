@@ -13,8 +13,13 @@
 //! part 1, 256 codebook entries for part 2), then the 10 class tokens
 //! `<0>`–`<9>`, then `<none>`, "any digit", for guidance.
 
+use crate::config::ModelConfig;
+use crate::generate::{sample, Generator};
+use crate::gpt::Params;
 use crate::image::{to_byte, Images};
-use crate::tensor::Mat;
+use crate::rng::Rng;
+use crate::tensor::{Float, Mat};
+use rayon::prelude::*;
 
 /// The brightness levels a pixel is rounded to (part 1).
 pub const LEVELS: usize = 4;
@@ -168,6 +173,94 @@ pub fn entropy(p: &[f64]) -> f64 {
         .sum::<f64>()
 }
 
+// ----- sampling (PLAN.md, Drawing, parts 1 and 4)
+
+/// Classifier-free guidance's combination of two rows of logits,
+/// ℓ_none + w·(ℓ_class − ℓ_none): exactly ℓ_class at w = 1 and exactly
+/// ℓ_none at w = 0 (returned as they are, not computed, so no rounding).
+pub fn guide(class: &[f64], none: &[f64], w: f64) -> Vec<f64> {
+    if w == 1.0 {
+        class.to_vec()
+    } else if w == 0.0 {
+        none.to_vec()
+    } else {
+        class
+            .iter()
+            .zip(none)
+            .map(|(c, n)| n + w * (c - n))
+            .collect()
+    }
+}
+
+/// One image to draw: the digit (None: any digit, the `<none>` token), the
+/// guidance scale, and which random stream it draws with.
+#[derive(Clone, Copy, Debug)]
+pub struct Ask {
+    pub class: Option<usize>,
+    pub w: f64,
+    pub stream: u64,
+}
+
+/// One image's `n` tokens, after its class token. Each is drawn at
+/// temperature 1 with no cutoff from the image tokens only (a class token
+/// in the middle of an image means nothing), its random numbers from
+/// `stream` of `seed`, so an image doesn't depend on what else is drawn
+/// with it. With guidance (a digit asked for and w ≠ 1) a second copy of
+/// the model reads the same tokens after `<none>`, and the two sets of
+/// logits are combined by `guide`.
+pub fn draw_one<T: Float>(
+    p: &Params<T>,
+    c: &ModelConfig,
+    vocab: Vocab,
+    n: usize,
+    ask: Ask,
+    seed: u64,
+) -> Vec<u32> {
+    assert!(n <= c.context, "{n} tokens need a context of {n}");
+    let mut rng = Rng::stream(seed, ask.stream);
+    let first = ask.class.map_or(vocab.none(), |k| vocab.class(k));
+    let guided = ask.class.is_some() && ask.w != 1.0;
+    let mut g = Generator::new(p, c);
+    let mut u = guided.then(|| Generator::new(p, c));
+    let row =
+        |m: &Mat<T>| -> Vec<f64> { m.row(0)[..vocab.image].iter().map(|v| v.to_f64()).collect() };
+    let mut lc = row(&g.feed(&[first as usize], false));
+    let mut ln = u
+        .as_mut()
+        .map(|u| row(&u.feed(&[vocab.none() as usize], false)));
+    let mut out = Vec::with_capacity(n);
+    while out.len() < n {
+        let logits = match &ln {
+            Some(l) => guide(&lc, l, ask.w),
+            None => lc.clone(),
+        };
+        let t = sample(&logits, 1.0, 0, &mut rng);
+        out.push(t as u32);
+        if out.len() < n {
+            lc = row(&g.feed(&[t], false));
+            if let Some(u) = u.as_mut() {
+                ln = Some(row(&u.feed(&[t], false)));
+            }
+        }
+    }
+    out
+}
+
+/// Many images at once, one per core at a time: each gives exactly the
+/// tokens `draw_one` gives it alone.
+pub fn draw_many<T: Float>(
+    p: &Params<T>,
+    c: &ModelConfig,
+    vocab: Vocab,
+    n: usize,
+    asks: &[Ask],
+    seed: u64,
+) -> Vec<Vec<u32>> {
+    asks.par_iter()
+        .map(|&a| draw_one(p, c, vocab, n, a, seed))
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -254,6 +347,82 @@ mod tests {
         let v = Vocab { image: 256 };
         let s = codebook_sentences(&[1, 2, 3, 4, 5, 6], 3, &[7, 0], v);
         assert_eq!(s, vec![263, 1, 2, 3, 256, 4, 5, 6]);
+    }
+
+    #[test]
+    fn guidance_by_hand() {
+        let (c, n) = ([2.0, 0.0, -1.0], [1.0, 1.0, 1.0]);
+        assert_eq!(guide(&c, &n, 1.0), c.to_vec());
+        assert_eq!(guide(&c, &n, 0.0), n.to_vec());
+        // 1 + 3·(2 − 1) = 4, 1 + 3·(0 − 1) = −2, 1 + 3·(−1 − 1) = −5.
+        assert_eq!(guide(&c, &n, 3.0), vec![4.0, -2.0, -5.0]);
+        assert_eq!(guide(&c, &n, 0.5), vec![1.5, 0.5, 0.0]);
+    }
+
+    fn tiny() -> (Params<f32>, ModelConfig) {
+        let c = ModelConfig {
+            d_model: 16,
+            layers: 1,
+            heads: 2,
+            context: 9,
+            d_ff: 32,
+            seed: 4,
+        };
+        (
+            Params::from_tensors(&crate::model::init(&c, PIXELS.size())),
+            c,
+        )
+    }
+
+    /// Drawn together, each image gets exactly the tokens it gets alone,
+    /// with and without guidance; the tokens are image tokens; the same
+    /// stream gives the same image, another stream another.
+    #[test]
+    fn many_at_once_equals_one_at_a_time() {
+        let (p, c) = tiny();
+        let asks: Vec<Ask> = (0..8)
+            .map(|i| Ask {
+                class: if i == 7 { None } else { Some(i % 10) },
+                w: [1.0, 3.0, 0.0, 1.5][i % 4],
+                stream: i as u64,
+            })
+            .collect();
+        let many = draw_many(&p, &c, PIXELS, 9, &asks, 5);
+        for (a, got) in asks.iter().zip(&many) {
+            assert_eq!(*got, draw_one(&p, &c, PIXELS, 9, *a, 5), "{a:?}");
+            assert_eq!(got.len(), 9);
+            assert!(got.iter().all(|&t| (t as usize) < LEVELS));
+        }
+        let a = Ask {
+            class: Some(3),
+            w: 1.0,
+            stream: 1,
+        };
+        let b = Ask { stream: 2, ..a };
+        assert_eq!(
+            draw_one(&p, &c, PIXELS, 9, a, 5),
+            draw_one(&p, &c, PIXELS, 9, a, 5)
+        );
+        assert_ne!(
+            draw_one(&p, &c, PIXELS, 9, a, 5),
+            draw_one(&p, &c, PIXELS, 9, b, 5)
+        );
+    }
+
+    /// At w = 0 a request for a digit draws exactly what `<none>` does (and
+    /// at w = 1 it is the unguided request itself, by `guide`'s test).
+    #[test]
+    fn guidance_at_one_and_zero() {
+        let (p, c) = tiny();
+        let ask = |class, w| Ask {
+            class,
+            w,
+            stream: 3,
+        };
+        let none = draw_one(&p, &c, PIXELS, 9, ask(None, 1.0), 1);
+        assert_eq!(draw_one(&p, &c, PIXELS, 9, ask(Some(4), 0.0), 1), none);
+        let strong = draw_one(&p, &c, PIXELS, 9, ask(Some(4), 8.0), 1);
+        assert_eq!(strong.len(), 9);
     }
 
     #[test]

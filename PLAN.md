@@ -452,10 +452,11 @@ learns to make images ([Drawing](#drawing-a-language-model-that-makes-images)).
   both because training replaces the class token with `<none>` 10% of
   the time. (tiny-diffusion-in-rust's stage 4 combines velocities the
   same way.)
-- **batched sampling**: generating many images at once, one position at
-  a time for all of them together, so each step's matrix products serve
-  the whole batch; it gives exactly the tokens one-at-a-time generation
-  would, with the same seeds.
+- **batched sampling**: generating many images at once; it gives exactly
+  the tokens one-at-a-time generation would, with the same seeds. (As
+  built, each image runs on its own core, its random numbers from its own
+  stream; the plan first described one shared matrix product per step
+  for the whole batch, which would be faster per image but more code.)
 
 ## The flows
 
@@ -4222,7 +4223,9 @@ and Makefile targets, built so far and planned:
 | 4. encode | `transformer draw-encode` | `make draw-encode-pixels` | built (part 1) |
 | 5. build | `transformer draw-build` | (made as needed) | built |
 | 5. train | `transformer draw-train` | `make draw-pixels-time` (the timing run), `make draw-pixels` | built (part 1) |
-| 6, 7. sample, measure | `transformer draw-sample`, `draw-measure` | `make draw-guidance` | planned |
+| 6. sample | `transformer draw-sample` | `make draw-pixels-grid` | built (part 1) |
+| 7. measure | `transformer draw-measure` | `make draw-pixels-measure` | built (part 1) |
+| prediction 5's attention | `transformer draw-attention` | `make draw-pixels-attention` | built |
 
 The tokenizer checks aren't an item of the flow: they measure items 1 to
 3 before anything is trained, so they come first. `make draw-check` runs

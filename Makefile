@@ -446,6 +446,26 @@ $(OUT)/draw-pixels.safetensors: $(OUT)/draw-pixels-init.safetensors $(OUT)/draw-
 		--data $(OUT)/draw-pixels-train.ids --valid $(OUT)/draw-pixels-test.ids \
 		--config $(DRAW_PIXELS_CONFIG) -o $@ 2>&1 | tee $(OUT)/draw-pixels.log
 
+DRAW_GUIDANCE ?= 0,1,1.5,2,3,5,8
+
+.PHONY: draw-pixels-grid
+draw-pixels-grid: $(OUT)/draw-pixels.safetensors | $(TRANSFORMER) ## Drawing, part 1: grids of the pixel model's digits, at w = 1 and 3.
+	$(call hdr,$@)
+	$(TRANSFORMER) draw-sample --model $(OUT)/draw-pixels.safetensors --guidance 1 -o $(OUT)/draw-pixels-w1.png
+	$(TRANSFORMER) draw-sample --model $(OUT)/draw-pixels.safetensors --guidance 3 -o $(OUT)/draw-pixels-w3.png
+
+.PHONY: draw-pixels-measure
+draw-pixels-measure: $(OUT)/draw-pixels.safetensors $(OUT)/classifier.safetensors | $(TRANSFORMER) ## Drawing, part 1: measure the pixel model's digits at each guidance scale.
+	$(call hdr,$@)
+	set -o pipefail; $(TRANSFORMER) draw-measure --model $(OUT)/draw-pixels.safetensors \
+		--classifier $(OUT)/classifier.safetensors --data data/mnist --guidance $(DRAW_GUIDANCE) \
+		2>&1 | tee $(OUT)/draw-pixels-measure.log
+
+.PHONY: draw-pixels-attention
+draw-pixels-attention: $(OUT)/draw-pixels.safetensors $(OUT)/draw-pixels-test.ids | $(TRANSFORMER) ## Drawing, part 1: where each head looks, by distance back (prediction 5).
+	$(call hdr,$@)
+	$(TRANSFORMER) draw-attention --model $(OUT)/draw-pixels.safetensors --valid $(OUT)/draw-pixels-test.ids
+
 # The variables make help lists, one per line, with what each does and its
 # value now. A variable meant to be set from the command line gets a place
 # in HELP_VARS and a HELP_ description; make lint fails if a ?= variable
@@ -453,7 +473,7 @@ $(OUT)/draw-pixels.safetensors: $(OUT)/draw-pixels-init.safetensors $(OUT)/draw-
 HELP_VARS := OUT CORPUS TOK_CORPUS SPLIT_ON MERGES CONFIG CARGO_FEATURES \
 	CHAT_ARGS LORA_ARGS EVAL_ARGS CHAT_MODEL PROMPT GEN_ARGS PROBE_MODEL \
 	PROBE_ARGS LLAMA_DIR LLAMA_ARGS W2V_CORPUS W2V_ARGS W2V_OUT URL_MNIST \
-	CLASSIFIER_ARGS CODEBOOK_ARGS DRAW_PIXELS_CONFIG DRAW_TIME_STEPS FORCE
+	CLASSIFIER_ARGS CODEBOOK_ARGS DRAW_PIXELS_CONFIG DRAW_TIME_STEPS DRAW_GUIDANCE FORCE
 HELP_OUT            := where the tokenizer, models and other outputs go (the full run uses out-full)
 HELP_CORPUS         := the training text
 HELP_TOK_CORPUS     := the text the tokenizer is learned from (CORPUS unless set)
@@ -479,6 +499,7 @@ HELP_CLASSIFIER_ARGS := options for transformer draw-classifier, such as --steps
 HELP_CODEBOOK_ARGS  := options for transformer draw-codebook, such as --size 512
 HELP_DRAW_PIXELS_CONFIG := the settings file for drawing's part 1 (the pixel model)
 HELP_DRAW_TIME_STEPS := steps in make draw-pixels-time's timing run
+HELP_DRAW_GUIDANCE  := the guidance scales make draw-pixels-measure measures at
 HELP_FORCE          := 1 lets make full-clean delete out-full/ (a day of training)
 # A value inside single quotes, with any single quote in it escaped.
 q = $(subst ','\'',$(1))

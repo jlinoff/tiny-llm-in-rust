@@ -1,7 +1,7 @@
 //! Copied from tiny-diffusion-in-rust (diffusion/src/image.rs) for drawing
 //! (PLAN.md, Drawing), keeping only what drawing uses: image sets, MNIST's
-//! IDX files, and cutting images into patches and back. The PNG writer
-//! comes over when sampling does.
+//! IDX files, cutting images into patches and back, and grids of images as
+//! PNG files.
 //!
 //! An image set holds `n` images of height × width pixels with `channels`
 //! values each (1 for grayscale, 3 for color), as an n × (h·w·c) matrix:
@@ -16,6 +16,7 @@
 use crate::rng::Rng;
 use crate::tensor::Mat;
 use std::fs;
+use std::io::Write;
 use std::path::Path;
 
 /// The shape of every image in a set.
@@ -229,6 +230,126 @@ pub fn shapes(n: usize, size: usize, channels: usize, seed: u64) -> Images {
     }
 }
 
+// ----- PNG
+
+/// CRC-32 (the cyclic redundancy check PNG uses for each chunk; polynomial
+/// 0xEDB88320, reflected), bit by bit: slow, plain, and fast enough here.
+pub fn crc32(bytes: &[u8]) -> u32 {
+    let mut c = 0xFFFF_FFFFu32;
+    for &b in bytes {
+        c ^= b as u32;
+        for _ in 0..8 {
+            c = if c & 1 != 0 {
+                (c >> 1) ^ 0xEDB8_8320
+            } else {
+                c >> 1
+            };
+        }
+    }
+    !c
+}
+
+/// Adler-32, the checksum ending a zlib stream.
+pub fn adler32(bytes: &[u8]) -> u32 {
+    let (mut a, mut b) = (1u32, 0u32);
+    for &x in bytes {
+        a = (a + x as u32) % 65521;
+        b = (b + a) % 65521;
+    }
+    (b << 16) | a
+}
+
+/// A zlib stream holding `data` in "stored" (uncompressed) deflate blocks
+/// of at most 65,535 bytes: valid for every PNG reader, just not small.
+fn zlib_stored(data: &[u8]) -> Vec<u8> {
+    let mut out = vec![0x78, 0x01];
+    let blocks: Vec<&[u8]> = if data.is_empty() {
+        vec![&[]]
+    } else {
+        data.chunks(65_535).collect()
+    };
+    for (i, block) in blocks.iter().enumerate() {
+        out.push(u8::from(i + 1 == blocks.len())); // BFINAL, BTYPE = 00
+        let len = block.len() as u16;
+        out.extend_from_slice(&len.to_le_bytes());
+        out.extend_from_slice(&(!len).to_le_bytes());
+        out.extend_from_slice(block);
+    }
+    out.extend_from_slice(&adler32(data).to_be_bytes());
+    out
+}
+
+/// One image (pixel values from −1 to 1, h × w × c, c = 1 or 3) as PNG
+/// bytes: 8 bits per channel, grayscale or RGB.
+pub fn png(pixels: &[f32], height: usize, width: usize, channels: usize) -> Vec<u8> {
+    assert!(channels == 1 || channels == 3, "grayscale or RGB");
+    assert_eq!(pixels.len(), height * width * channels);
+    let mut raw = Vec::with_capacity(height * (1 + width * channels));
+    for y in 0..height {
+        raw.push(0); // filter type 0: the row as it is
+        let row = &pixels[y * width * channels..(y + 1) * width * channels];
+        raw.extend(row.iter().map(|&x| to_byte(x)));
+    }
+    let mut out = vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
+    let mut chunk = |kind: &[u8; 4], data: &[u8]| {
+        out.extend_from_slice(&(data.len() as u32).to_be_bytes());
+        let mut body = kind.to_vec();
+        body.extend_from_slice(data);
+        out.extend_from_slice(&body);
+        out.extend_from_slice(&crc32(&body).to_be_bytes());
+    };
+    let mut ihdr = Vec::new();
+    ihdr.extend_from_slice(&(width as u32).to_be_bytes());
+    ihdr.extend_from_slice(&(height as u32).to_be_bytes());
+    ihdr.extend_from_slice(&[8, if channels == 1 { 0 } else { 2 }, 0, 0, 0]);
+    chunk(b"IHDR", &ihdr);
+    chunk(b"IDAT", &zlib_stored(&raw));
+    chunk(b"IEND", &[]);
+    out
+}
+
+/// Images in a grid, `cols` across, each scaled up by `zoom` (pixels
+/// repeated) with a 1-pixel gap at that zoom: one picture of many samples.
+/// `rows_of_images` is n × (h·w·c).
+pub fn grid(images: &Mat<f32>, shape: Shape, cols: usize, zoom: usize) -> (Vec<f32>, usize, usize) {
+    let (h, w, c) = (shape.height, shape.width, shape.channels);
+    let cols = cols.max(1).min(images.rows.max(1));
+    let rows = images.rows.div_ceil(cols);
+    let gap = zoom.max(1);
+    let gh = rows * (h * zoom + gap) + gap;
+    let gw = cols * (w * zoom + gap) + gap;
+    let mut out = vec![0.0f32; gh * gw * c]; // the gaps: mid grey
+    for (k, img) in (0..images.rows).map(|k| (k, images.row(k))) {
+        let (oy, ox) = (
+            gap + (k / cols) * (h * zoom + gap),
+            gap + (k % cols) * (w * zoom + gap),
+        );
+        for y in 0..h * zoom {
+            for x in 0..w * zoom {
+                let src = ((y / zoom) * w + x / zoom) * c;
+                let dst = ((oy + y) * gw + ox + x) * c;
+                out[dst..dst + c].copy_from_slice(&img[src..src + c]);
+            }
+        }
+    }
+    (out, gh, gw)
+}
+
+/// Write images as one PNG grid.
+pub fn write_grid(
+    path: &Path,
+    images: &Mat<f32>,
+    shape: Shape,
+    cols: usize,
+    zoom: usize,
+) -> Result<(), String> {
+    let (px, h, w) = grid(images, shape, cols, zoom);
+    let mut f =
+        fs::File::create(path).map_err(|e| format!("can't write {}: {e}", path.display()))?;
+    f.write_all(&png(&px, h, w, shape.channels))
+        .map_err(|e| format!("can't write {}: {e}", path.display()))
+}
+
 // ----- bytes
 
 /// A value in −1 to 1 as a byte, 0 to 255, the way MNIST stores it.
@@ -283,6 +404,89 @@ mod tests {
         assert_eq!(pt.row(0), &[0.0, 1.0, 4.0, 5.0]); // top left
         assert_eq!(pt.row(1), &[2.0, 3.0, 6.0, 7.0]); // top right
         assert_eq!(pt.row(3), &[10.0, 11.0, 14.0, 15.0]); // bottom right
+    }
+
+    #[test]
+    fn checksums_against_known_values() {
+        assert_eq!(crc32(b"123456789"), 0xCBF4_3926); // the standard check value
+        assert_eq!(adler32(b"Wikipedia"), 0x11E6_0398);
+        assert_eq!(crc32(b""), 0);
+        assert_eq!(adler32(b""), 1);
+    }
+
+    /// Read our own PNG back: the signature, each chunk's CRC, the header,
+    /// and the pixels out of the stored zlib blocks.
+    #[test]
+    fn png_round_trip() {
+        for c in [1, 3] {
+            let (h, w) = (5, 300);
+            let px: Vec<f32> = (0..h * w * c)
+                .map(|i| ((i % 256) as f32) / 127.5 - 1.0)
+                .collect();
+            let bytes = png(&px, h, w, c);
+            assert_eq!(
+                &bytes[..8],
+                &[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A]
+            );
+            let mut i = 8;
+            let mut idat = Vec::new();
+            while i < bytes.len() {
+                let len = u32::from_be_bytes(bytes[i..i + 4].try_into().unwrap()) as usize;
+                let body = &bytes[i + 4..i + 8 + len];
+                let crc = u32::from_be_bytes(bytes[i + 8 + len..i + 12 + len].try_into().unwrap());
+                assert_eq!(crc32(body), crc);
+                match &body[..4] {
+                    b"IHDR" => {
+                        assert_eq!(
+                            u32::from_be_bytes(body[4..8].try_into().unwrap()) as usize,
+                            w
+                        );
+                        assert_eq!(
+                            u32::from_be_bytes(body[8..12].try_into().unwrap()) as usize,
+                            h
+                        );
+                        assert_eq!(body[13], if c == 1 { 0 } else { 2 });
+                    }
+                    b"IDAT" => idat.extend_from_slice(&body[4..]),
+                    _ => {}
+                }
+                i += 12 + len;
+            }
+            // Unpack the stored blocks.
+            let mut raw = Vec::new();
+            let mut j = 2;
+            loop {
+                let last = idat[j] & 1 == 1;
+                let len = u16::from_le_bytes([idat[j + 1], idat[j + 2]]) as usize;
+                assert_eq!(
+                    u16::from_le_bytes([idat[j + 3], idat[j + 4]]),
+                    !(len as u16)
+                );
+                raw.extend_from_slice(&idat[j + 5..j + 5 + len]);
+                j += 5 + len;
+                if last {
+                    break;
+                }
+            }
+            assert_eq!(
+                u32::from_be_bytes(idat[j..j + 4].try_into().unwrap()),
+                adler32(&raw)
+            );
+            for y in 0..h {
+                let row = &raw[y * (1 + w * c)..(y + 1) * (1 + w * c)];
+                assert_eq!(row[0], 0);
+                for x in 0..w * c {
+                    assert_eq!(row[1 + x], to_byte(px[y * w * c + x]));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn large_images_use_several_stored_blocks() {
+        let z = zlib_stored(&vec![7u8; 150_000]);
+        // Three blocks of 65,535 or fewer bytes, each with a 5-byte header.
+        assert_eq!(z.len(), 2 + 150_000 + 3 * 5 + 4);
     }
 
     #[test]
