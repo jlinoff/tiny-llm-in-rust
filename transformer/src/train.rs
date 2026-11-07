@@ -966,6 +966,45 @@ mod tests {
         }
     }
 
+    /// Drawing's training end to end, small: each class's "image" is a
+    /// fixed random sequence of 12 tokens from 4 values, trained on
+    /// whole-image batches. Without the class token the first token can't
+    /// be known (ln 4 nats) and the second only partly (10 classes share 4
+    /// first tokens), together at least 0.12 nats over the 12 targets; so a
+    /// loss below 0.1 means the model reads the class token at position 0,
+    /// which only whole, aligned images give it.
+    #[test]
+    fn drawing_batches_teach_the_class() {
+        let c = ModelConfig {
+            context: 12,
+            ..tiny_model()
+        };
+        let (len, images, vocab) = (13, 200, 4 + 10 + 1);
+        let mut rng = crate::rng::Rng::new(11);
+        let table: Vec<Vec<u32>> = (0..10)
+            .map(|_| (0..12).map(|_| rng.below(4) as u32).collect())
+            .collect();
+        let mut ids = Vec::new();
+        for i in 0..images {
+            ids.push(4 + (i % 10) as u32);
+            ids.extend(&table[i % 10]);
+        }
+        let t = training(300);
+        let order = data::EpochOrder::new(images, t.seed);
+        let mut s = fresh(&c, vocab);
+        let mut recent = Vec::new();
+        for step_no in 1..=t.steps {
+            let b = data::image_batch(&ids, len, 8, t.seed, step_no, &order, 0.0, 14);
+            recent.push(step(&mut s, &c, &t, &b, c.context).0);
+        }
+        let last = recent[recent.len() - 20..].iter().sum::<f64>() / 20.0;
+        assert!(
+            last < 0.1,
+            "mean loss {last} over the last 20 of {} steps",
+            t.steps
+        );
+    }
+
     #[test]
     fn refuses_data_from_another_tokenizer() {
         let corpus = Corpus::decode(include_bytes!("../tests/data/tiny.ids")).unwrap();

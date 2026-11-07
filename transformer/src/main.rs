@@ -350,6 +350,54 @@ enum Command {
         #[arg(long)]
         codebook: Option<PathBuf>,
     },
+    /// Drawing: MNIST's images as sentences of tokens, written as token
+    /// files: <OUTPUT>-train.ids and <OUTPUT>-test.ids.
+    DrawEncode {
+        /// The folder holding MNIST's four files
+        #[arg(long, default_value = "data/mnist")]
+        data: PathBuf,
+        /// pixels (part 1) or codebook (part 2)
+        #[arg(long)]
+        tokens: String,
+        /// The codebook, for --tokens codebook
+        #[arg(long)]
+        codebook: Option<PathBuf>,
+        /// The files' common start, such as out/draw-pixels
+        #[arg(short, long)]
+        output: PathBuf,
+    },
+    /// Drawing: a new model for drawing's tokens (step 3, with the
+    /// vocabulary taken from the token file instead of a tokenizer).
+    DrawBuild {
+        /// The settings file; its [model] section is read
+        #[arg(long)]
+        config: PathBuf,
+        /// The training token file (draw-encode writes it)
+        #[arg(long)]
+        data: PathBuf,
+        #[arg(short, long)]
+        output: PathBuf,
+    },
+    /// Drawing: train on whole images (step 4, with drawing's batches),
+    /// validating on the test images.
+    DrawTrain {
+        #[arg(long)]
+        model: PathBuf,
+        /// The training token file
+        #[arg(long)]
+        data: PathBuf,
+        /// The test images' token file, for validation
+        #[arg(long)]
+        valid: PathBuf,
+        /// The settings file; [training] and [draw] are read
+        #[arg(long)]
+        config: PathBuf,
+        /// Stop at this step instead of [training] steps (for timing runs)
+        #[arg(long)]
+        steps: Option<u64>,
+        #[arg(short, long)]
+        output: PathBuf,
+    },
 }
 
 fn main() -> ExitCode {
@@ -521,6 +569,25 @@ fn main() -> ExitCode {
             classifier,
             codebook,
         } => draw_check(&data, &classifier, codebook.as_deref()),
+        Command::DrawEncode {
+            data,
+            tokens,
+            codebook,
+            output,
+        } => draw_encode(&data, &tokens, codebook.as_deref(), &output),
+        Command::DrawBuild {
+            config,
+            data,
+            output,
+        } => draw_build(&config, &data, &output),
+        Command::DrawTrain {
+            model,
+            data,
+            valid,
+            config,
+            steps,
+            output,
+        } => draw_train(&model, &data, &valid, &config, steps, &output),
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,
@@ -800,6 +867,336 @@ fn draw_check(data: &Path, classifier: &Path, book: Option<&Path>) -> Result<(),
     Ok(())
 }
 
+/// The token files' fingerprint and vocabulary for a kind of tokens.
+fn draw_tokens(
+    kind: &str,
+    book: Option<&Path>,
+) -> Result<([u8; 32], draw::Vocab, Option<codebook::Codebook>), String> {
+    match (kind, book) {
+        ("pixels", None) => Ok((draw::pixel_fingerprint(), draw::PIXELS, None)),
+        ("pixels", Some(_)) => Err("--codebook is for --tokens codebook".into()),
+        ("codebook", Some(p)) => {
+            let b = codebook::Codebook::from_file(&safetensors::read(p)?)
+                .map_err(|e| format!("{}: {e}", p.display()))?;
+            let mut fp = [0u8; 32];
+            for (i, byte) in fp.iter_mut().enumerate() {
+                *byte = u8::from_str_radix(&b.fingerprint()[2 * i..2 * i + 2], 16)
+                    .expect("a SHA-256 in hex");
+            }
+            let v = draw::Vocab { image: b.size() };
+            Ok((fp, v, Some(b)))
+        }
+        ("codebook", None) => Err("--tokens codebook needs --codebook".into()),
+        (k, _) => Err(format!("--tokens {k}: pixels or codebook")),
+    }
+}
+
+/// "<prefix>-train.ids" or "<prefix>-test.ids".
+fn ids_path(prefix: &Path, part: &str) -> PathBuf {
+    let mut s = prefix.as_os_str().to_owned();
+    s.push(format!("-{part}.ids"));
+    PathBuf::from(s)
+}
+
+fn draw_encode(data: &Path, kind: &str, book: Option<&Path>, output: &Path) -> Result<(), String> {
+    let (fp, vocab, book) = draw_tokens(kind, book)?;
+    let paths = [ids_path(output, "train"), ids_path(output, "test")];
+    for p in &paths {
+        check_writable(p)?;
+    }
+    println!(
+        "Encoding MNIST as sentences of {} tokens (PLAN.md, Drawing): a vocabulary of {}",
+        if kind == "pixels" {
+            "pixel"
+        } else {
+            "codebook"
+        },
+        vocab.size()
+    );
+    for (test, path) in [false, true].into_iter().zip(&paths) {
+        let set = mnist(data, test)?;
+        let ids = match &book {
+            None => draw::pixel_sentences(&set),
+            Some(b) => {
+                let entries = b.encode(&set.pixels, set.shape);
+                let per = image::patch_count(set.shape, b.patch);
+                draw::codebook_sentences(&entries, per, &set.labels, vocab)
+            }
+        };
+        let len = ids.len() / set.labels.len();
+        let corpus = data::Corpus {
+            ids,
+            vocab_size: vocab.size(),
+            fingerprint: fp,
+        };
+        corpus.write(path)?;
+        // Read it back, as every writer here does.
+        let back = data::Corpus::load(path)?;
+        if back.ids != corpus.ids {
+            return Err(format!("{}: read-back doesn't match", path.display()));
+        }
+        println!(
+            "  {}: {} images × {len} tokens = {} tokens",
+            path.display(),
+            set.labels.len(),
+            corpus.ids.len()
+        );
+    }
+    println!("  fingerprint {}", hex(&fp));
+    Ok(())
+}
+
+/// A drawing token file read and checked: whole sentences of `len` tokens,
+/// each starting with a class token.
+fn draw_corpus(path: &Path, len: usize) -> Result<data::Corpus, String> {
+    check_readable(path, "token file")?;
+    let c = data::Corpus::load(path)?;
+    if c.vocab_size < draw::CLASSES + 2 || c.ids.is_empty() || c.ids.len() % len != 0 {
+        return Err(format!(
+            "{}: not whole drawing sentences of {len} tokens ({} tokens)",
+            path.display(),
+            c.ids.len()
+        ));
+    }
+    let v = draw::Vocab {
+        image: c.vocab_size - draw::CLASSES - 1,
+    };
+    if let Some(i) = c
+        .ids
+        .chunks(len)
+        .position(|s| s[0] < v.class(0) || s[0] >= v.none())
+    {
+        return Err(format!(
+            "{}: sentence {i} doesn't start with a class token",
+            path.display()
+        ));
+    }
+    Ok(c)
+}
+
+fn draw_build(config_path: &Path, data_path: &Path, output: &Path) -> Result<(), String> {
+    check_readable(config_path, "config")?;
+    check_writable(output)?;
+    let config = ModelConfig::load(config_path)?;
+    let corpus = draw_corpus(data_path, config.context + 1)?;
+    let v = corpus.vocab_size;
+    let kind = if corpus.fingerprint == draw::pixel_fingerprint() {
+        "pixels"
+    } else {
+        "codebook"
+    };
+    println!("=== transformer draw-build ===");
+    println!(
+        "Tokens {}: drawing's {} tokens, V = {v}; sentences of {} tokens, so context {}",
+        data_path.display(),
+        if kind == "pixels" {
+            "pixel"
+        } else {
+            "codebook"
+        },
+        config.context + 1,
+        config.context
+    );
+    println!(
+        "Config {} [model]: d_model = {}, layers = {}, heads = {} (head size {}), context = {}, d_ff = {}, seed = {}",
+        config_path.display(),
+        config.d_model,
+        config.layers,
+        config.heads,
+        config.head_size(),
+        config.context,
+        config.d_ff,
+        config.seed
+    );
+    let mut source = BTreeMap::new();
+    source.insert("tokenizer_fingerprint".into(), hex(&corpus.fingerprint));
+    source.insert("drawing".into(), kind.into());
+    source.insert("tokenizer_file".into(), data_path.display().to_string());
+    write_init(&config, config_path, v, source, output)
+}
+
+/// The `[draw]` section: drawing's settings beyond step 4's.
+#[derive(serde::Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+struct DrawConfig {
+    /// The fraction of training images whose class token becomes <none>.
+    drop: f64,
+}
+
+fn draw_config(path: &Path) -> Result<DrawConfig, String> {
+    let text =
+        fs::read_to_string(path).map_err(|e| format!("can't read {}: {e}", path.display()))?;
+    let mut table: toml::Table =
+        toml::from_str(&text).map_err(|e| format!("config {}: {e}", path.display()))?;
+    let section = table
+        .remove("draw")
+        .ok_or(format!("config {}: no [draw] section", path.display()))?;
+    let d: DrawConfig = section
+        .try_into()
+        .map_err(|e| format!("config {} [draw]: {e}", path.display()))?;
+    if !(0.0..1.0).contains(&d.drop) {
+        return Err(format!(
+            "config {} [draw]: drop must be from 0 to below 1",
+            path.display()
+        ));
+    }
+    Ok(d)
+}
+
+fn draw_train(
+    model_path: &Path,
+    data_path: &Path,
+    valid_path: &Path,
+    config_path: &Path,
+    steps: Option<u64>,
+    output: &Path,
+) -> Result<(), String> {
+    check_readable(model_path, "checkpoint")?;
+    check_readable(config_path, "config")?;
+    for input in [data_path, valid_path, config_path] {
+        if same_file(input, output) {
+            return Err(format!(
+                "output {} would overwrite an input",
+                output.display()
+            ));
+        }
+    }
+    check_writable(output)?;
+    let model = load_checkpoint(model_path)?;
+    let (config, vocab) = (model.config.clone(), model.vocab);
+    let len = config.context + 1;
+    let fp = model.meta("tokenizer_fingerprint")?;
+    let kind = model.meta("drawing").map_err(|_| {
+        format!(
+            "{}: not a drawing model (draw-build makes one)",
+            model_path.display()
+        )
+    })?;
+    let (train_c, valid_c) = (draw_corpus(data_path, len)?, draw_corpus(valid_path, len)?);
+    train::check_data(&train_c, vocab, &fp)?;
+    train::check_data(&valid_c, vocab, &fp)?;
+    let mut tcfg = train::TrainingConfig::load(config_path)?;
+    if let Some(n) = steps {
+        tcfg.steps = n;
+    }
+    let dcfg = draw_config(config_path)?;
+    let state = train::State::from_checkpoint(&model.ckpt)?;
+    if state.step >= tcfg.steps {
+        return Err(format!(
+            "{} is already at step {}; raise [training] steps to train further",
+            model_path.display(),
+            state.step
+        ));
+    }
+    let images = train_c.ids.len() / len;
+    let none = (vocab - 1) as u32;
+    let n: usize = state.params.mats.iter().map(|m| m.data.len()).sum();
+    let tokens_per_step = tcfg.batch_size * config.context;
+    let remaining = (tcfg.steps - state.step) as usize;
+    println!("=== transformer draw-train ===");
+    println!(
+        "Model {}: {n} parameters, drawing's {} tokens, context {}, V = {vocab}",
+        model_path.display(),
+        if kind == "pixels" {
+            "pixel"
+        } else {
+            "codebook"
+        },
+        config.context
+    );
+    println!("  large matrix products: {}", blas::backend());
+    if state.step > 0 {
+        println!("  resuming at step {}", state.step);
+    }
+    println!(
+        "Data {}: {images} images of {len} tokens; validation on {} ({} images, {} of them each time)",
+        data_path.display(),
+        valid_path.display(),
+        valid_c.ids.len() / len,
+        tcfg.eval_batches * tcfg.batch_size
+    );
+    println!(
+        "Training: steps {} to {}, {} images × {} tokens = {tokens_per_step} tokens per step; {} passes over the images",
+        state.step + 1,
+        tcfg.steps,
+        tcfg.batch_size,
+        config.context,
+        train::passes((remaining * tcfg.batch_size) as f64 / images as f64)
+    );
+    println!(
+        "  each image once per pass, in an order shuffled for each pass; the class token dropped (to <none>) {}% of the time",
+        100.0 * dcfg.drop
+    );
+    println!(
+        "  AdamW: peak learning rate {} after {} warm-up steps, cosine down to {} of it; weight decay {}; gradient clipped at length {}",
+        tcfg.learning_rate, tcfg.warmup_steps, tcfg.min_lr_fraction, tcfg.weight_decay, tcfg.grad_clip
+    );
+    println!("  the loss is in nats per image token (per pixel, for part 1)\n");
+
+    let mut base = model.ckpt.metadata.clone();
+    for k in RUN_KEYS {
+        base.remove(k);
+    }
+    base.insert("valid_file".into(), valid_path.display().to_string());
+    base.insert(
+        "draw".into(),
+        toml::to_string(&dcfg).expect("a flat struct always serializes"),
+    );
+    let prov = train::Provenance {
+        kind: "train",
+        base,
+        training_toml: toml::to_string(&tcfg).expect("a flat struct always serializes"),
+        data_file: data_path.display().to_string(),
+        data_sha256: sha256_file(data_path)?,
+        parent_file: model_path.display().to_string(),
+        parent_sha256: sha256_file(model_path)?,
+    };
+    let order = data::EpochOrder::new(images, tcfg.seed);
+    let batches = |step: u64| {
+        data::image_batch(
+            &train_c.ids,
+            len,
+            tcfg.batch_size,
+            tcfg.seed,
+            step,
+            &order,
+            dcfg.drop,
+            none,
+        )
+    };
+    let valid = data::image_valid_batches(&valid_c.ids, len, tcfg.eval_batches, tcfg.batch_size);
+    let start = std::time::Instant::now();
+    let state = train::run_with(
+        state,
+        &config,
+        &tcfg,
+        batches,
+        &valid,
+        output,
+        &prov,
+        |line| println!("{line}"),
+    )?;
+    let secs = start.elapsed().as_secs_f64();
+    let tensors = state.tensors();
+    if safetensors::read(output)?.tensors != tensors {
+        return Err(format!(
+            "{}: read-back doesn't match what was written",
+            output.display()
+        ));
+    }
+    println!(
+        "\nTrained to step {} in {:.1} minutes ({:.0} tokens per second overall).",
+        state.step,
+        secs / 60.0,
+        (remaining * tokens_per_step) as f64 / secs
+    );
+    println!(
+        "Wrote {} with Adam's state (resumable); read back and verified.",
+        output.display()
+    );
+    Ok(())
+}
+
 /// Stop now, before any work, if `path` can't be written (the project's
 /// convention). An existing file is left unchanged; a new one is removed.
 fn check_writable(path: &Path) -> Result<(), String> {
@@ -923,9 +1320,26 @@ fn build(tok_path: &Path, config_path: &Path, output: &Path) -> Result<(), Strin
         config.seed
     );
 
-    let tensors = model::init(&config, v);
+    let mut source = BTreeMap::new();
+    source.insert("tokenizer_fingerprint".into(), hex(&tok.fingerprint));
+    source.insert("tokenizer_file".into(), tok_path.display().to_string());
+    source.insert("tokenizer_sha256".into(), sha256_file(tok_path)?);
+    write_init(&config, config_path, v, source, output)
+}
+
+/// Step 3's work once the vocabulary is known: the initial weights, checked
+/// against the parameter formula, written with `source` (where the
+/// vocabulary came from) in the metadata, and read back.
+fn write_init(
+    config: &ModelConfig,
+    config_path: &Path,
+    v: usize,
+    source: BTreeMap<String, String>,
+    output: &Path,
+) -> Result<(), String> {
+    let tensors = model::init(config, v);
     let n: usize = tensors.iter().map(|t| t.data.len()).sum();
-    let expected = model::formula(&config, v);
+    let expected = model::formula(config, v);
     if n != expected {
         return Err(format!(
             "internal error: {n} parameters, but the formula gives {expected}"
@@ -943,7 +1357,7 @@ fn build(tok_path: &Path, config_path: &Path, output: &Path) -> Result<(), Strin
         2 * config.d_model
     );
 
-    let mut meta = BTreeMap::new();
+    let mut meta = source;
     meta.insert("format".into(), FORMAT.into());
     meta.insert("kind".into(), "init".into());
     meta.insert("model".into(), config.to_toml());
@@ -951,9 +1365,6 @@ fn build(tok_path: &Path, config_path: &Path, output: &Path) -> Result<(), Strin
     meta.insert("parameters".into(), n.to_string());
     meta.insert("architecture".into(), model::ARCHITECTURE.into());
     meta.insert("init".into(), model::INIT.into());
-    meta.insert("tokenizer_fingerprint".into(), hex(&tok.fingerprint));
-    meta.insert("tokenizer_file".into(), tok_path.display().to_string());
-    meta.insert("tokenizer_sha256".into(), sha256_file(tok_path)?);
     meta.insert("config_file".into(), config_path.display().to_string());
     meta.insert("config_sha256".into(), sha256_file(config_path)?);
     meta.insert(

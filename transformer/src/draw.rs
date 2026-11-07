@@ -67,6 +67,17 @@ impl Vocab {
 /// The pixel model's vocabulary: 4 levels, 10 classes, `<none>`: 15.
 pub const PIXELS: Vocab = Vocab { image: LEVELS };
 
+/// The fingerprint part 1's token files and models carry, in place of a
+/// tokenizer's: the SHA-256 of a description of the encoding, so a change
+/// to it (more levels, other values) makes old files unreadable.
+pub fn pixel_fingerprint() -> [u8; 32] {
+    use sha2::{Digest, Sha256};
+    Sha256::digest(
+        b"mini_transformer drawing, part 1: pixels in raster order, levels 0 85 170 255; then <0>-<9>, <none>",
+    )
+    .into()
+}
+
 /// The level of a pixel (−1 black to 1 white): its byte value, 0 to 255,
 /// rounded to the nearest of 0, 85, 170 and 255, so black stays black and
 /// white stays white. The boundaries fall between 42 and 43, 127 and 128,

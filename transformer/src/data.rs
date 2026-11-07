@@ -30,6 +30,33 @@ impl Corpus {
         Self::decode(&bytes).map_err(|e| format!("{}: {e}", path.display()))
     }
 
+    /// The file's bytes, as mini_bpe.py's write_ids writes them: IDs of 2
+    /// bytes when V ≤ 65,536, else 4. (Drawing writes its sentences this
+    /// way, so training reads them like any corpus.)
+    pub fn encode(&self) -> Vec<u8> {
+        let width: usize = if self.vocab_size <= 1 << 16 { 2 } else { 4 };
+        let mut b = Vec::with_capacity(64 + width * self.ids.len());
+        b.extend_from_slice(b"MBPEIDS\0");
+        for x in [1u32, width as u32, self.vocab_size as u32, 0] {
+            b.extend_from_slice(&x.to_le_bytes());
+        }
+        b.extend_from_slice(&(self.ids.len() as u64).to_le_bytes());
+        b.extend_from_slice(&self.fingerprint);
+        for &t in &self.ids {
+            if width == 2 {
+                b.extend_from_slice(&(t as u16).to_le_bytes());
+            } else {
+                b.extend_from_slice(&t.to_le_bytes());
+            }
+        }
+        b
+    }
+
+    pub fn write(&self, path: &Path) -> Result<(), String> {
+        std::fs::write(path, self.encode())
+            .map_err(|e| format!("can't write {}: {e}", path.display()))
+    }
+
     pub fn decode(bytes: &[u8]) -> Result<Corpus, String> {
         if bytes.len() < 64 {
             return Err("too short for the 64-byte header".into());
@@ -217,8 +244,7 @@ impl EpochOrder {
 /// is replaced by `none` with probability `drop` (so one model learns
 /// "draw a 7" and "draw a digit", for guidance), the choice depending only
 /// on the seed, the step and the row, so resuming is exact.
-// Used by drawing's training, which comes after the tokenizer checks.
-#[allow(dead_code, clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)]
 pub fn image_batch(
     sentences: &[u32],
     len: usize,
@@ -239,6 +265,27 @@ pub fn image_batch(
         }
     }
     b
+}
+
+/// Drawing's validation batches: `batches` × `batch` whole images spread
+/// evenly over `sentences` (the test images), never with the class dropped.
+pub fn image_valid_batches(
+    sentences: &[u32],
+    len: usize,
+    batches: usize,
+    batch: usize,
+) -> Vec<Batch> {
+    let images = sentences.len() / len;
+    let n = (batches * batch).min(images);
+    if n == 0 {
+        return Vec::new();
+    }
+    let starts: Vec<usize> = (0..n).map(|i| i * images / n * len).collect();
+    starts
+        .chunks(batch)
+        .filter(|c| c.len() == batch)
+        .map(|c| batch_at(sentences, c, len - 1))
+        .collect()
 }
 
 /// Fixed validation batches: windows spread evenly over the held-out part,
@@ -448,6 +495,25 @@ mod tests {
         let a = image_batch(&s, len, 8, 3, 7, &order, 0.5, none);
         let b = image_batch(&s, len, 8, 3, 7, &order, 0.5, none);
         assert_eq!(a.inputs, b.inputs);
+    }
+
+    /// The writer gives back the file mini_bpe.py wrote, byte for byte, and
+    /// reads back what it wrote.
+    #[test]
+    fn corpus_files_round_trip() {
+        let bytes = include_bytes!("../tests/data/tiny.ids");
+        let c = Corpus::decode(bytes).unwrap();
+        assert_eq!(c.encode(), bytes.to_vec());
+        let big = Corpus {
+            ids: vec![0, 70_000, 5],
+            vocab_size: 70_001,
+            fingerprint: [7; 32],
+        };
+        let back = Corpus::decode(&big.encode()).unwrap();
+        assert_eq!(
+            (back.ids, back.vocab_size, back.fingerprint),
+            (big.ids, 70_001, [7; 32])
+        );
     }
 
     /// tests/data/tiny.ids was written by mini_bpe.py --encode with

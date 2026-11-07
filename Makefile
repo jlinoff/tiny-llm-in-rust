@@ -413,6 +413,39 @@ draw-check: $(OUT)/classifier.safetensors $(OUT)/codebook.safetensors | $(TRANSF
 	$(call hdr,$@)
 	$(TRANSFORMER) draw-check --data data/mnist --classifier $(OUT)/classifier.safetensors --codebook $(OUT)/codebook.safetensors
 
+# Part 1: pixels as tokens.
+DRAW_PIXELS_CONFIG ?= config-draw-pixels.toml
+DRAW_TIME_STEPS    ?= 50
+
+$(OUT)/draw-pixels-train.ids: $(MNIST) | $(OUT) $(TRANSFORMER)
+	$(call hdr,draw-encode pixels)
+	$(TRANSFORMER) draw-encode --data data/mnist --tokens pixels -o $(OUT)/draw-pixels
+
+$(OUT)/draw-pixels-test.ids: $(OUT)/draw-pixels-train.ids
+
+.PHONY: draw-encode-pixels
+draw-encode-pixels: $(OUT)/draw-pixels-train.ids ## Drawing, part 1: MNIST as sentences of pixel tokens.
+
+$(OUT)/draw-pixels-init.safetensors: $(DRAW_PIXELS_CONFIG) $(OUT)/draw-pixels-train.ids | $(TRANSFORMER)
+	$(call hdr,draw-build pixels)
+	$(TRANSFORMER) draw-build --config $(DRAW_PIXELS_CONFIG) --data $(OUT)/draw-pixels-train.ids -o $@
+
+.PHONY: draw-pixels-time
+draw-pixels-time: $(OUT)/draw-pixels-init.safetensors $(OUT)/draw-pixels-test.ids | $(TRANSFORMER) ## Drawing, part 1: a short timing run (DRAW_TIME_STEPS steps), to set the budget's steps.
+	$(call hdr,$@)
+	$(TRANSFORMER) draw-train --model $(OUT)/draw-pixels-init.safetensors \
+		--data $(OUT)/draw-pixels-train.ids --valid $(OUT)/draw-pixels-test.ids \
+		--config $(DRAW_PIXELS_CONFIG) --steps $(DRAW_TIME_STEPS) -o $(OUT)/draw-pixels-time.safetensors
+
+.PHONY: draw-pixels
+draw-pixels: $(OUT)/draw-pixels.safetensors ## Drawing, part 1: train the pixel model (about 30 minutes on the M4).
+
+$(OUT)/draw-pixels.safetensors: $(OUT)/draw-pixels-init.safetensors $(OUT)/draw-pixels-test.ids $(DRAW_PIXELS_CONFIG) | $(TRANSFORMER)
+	$(call hdr,draw-train pixels)
+	set -o pipefail; $(TRANSFORMER) draw-train --model $(OUT)/draw-pixels-init.safetensors \
+		--data $(OUT)/draw-pixels-train.ids --valid $(OUT)/draw-pixels-test.ids \
+		--config $(DRAW_PIXELS_CONFIG) -o $@ 2>&1 | tee $(OUT)/draw-pixels.log
+
 # The variables make help lists, one per line, with what each does and its
 # value now. A variable meant to be set from the command line gets a place
 # in HELP_VARS and a HELP_ description; make lint fails if a ?= variable
@@ -420,7 +453,7 @@ draw-check: $(OUT)/classifier.safetensors $(OUT)/codebook.safetensors | $(TRANSF
 HELP_VARS := OUT CORPUS TOK_CORPUS SPLIT_ON MERGES CONFIG CARGO_FEATURES \
 	CHAT_ARGS LORA_ARGS EVAL_ARGS CHAT_MODEL PROMPT GEN_ARGS PROBE_MODEL \
 	PROBE_ARGS LLAMA_DIR LLAMA_ARGS W2V_CORPUS W2V_ARGS W2V_OUT URL_MNIST \
-	CLASSIFIER_ARGS CODEBOOK_ARGS FORCE
+	CLASSIFIER_ARGS CODEBOOK_ARGS DRAW_PIXELS_CONFIG DRAW_TIME_STEPS FORCE
 HELP_OUT            := where the tokenizer, models and other outputs go (the full run uses out-full)
 HELP_CORPUS         := the training text
 HELP_TOK_CORPUS     := the text the tokenizer is learned from (CORPUS unless set)
@@ -444,6 +477,8 @@ HELP_W2V_OUT        := where word2vec writes its vectors
 HELP_URL_MNIST      := where make data/mnist downloads MNIST from
 HELP_CLASSIFIER_ARGS := options for transformer draw-classifier, such as --steps 2000
 HELP_CODEBOOK_ARGS  := options for transformer draw-codebook, such as --size 512
+HELP_DRAW_PIXELS_CONFIG := the settings file for drawing's part 1 (the pixel model)
+HELP_DRAW_TIME_STEPS := steps in make draw-pixels-time's timing run
 HELP_FORCE          := 1 lets make full-clean delete out-full/ (a day of training)
 # A value inside single quotes, with any single quote in it escaped.
 q = $(subst ','\'',$(1))

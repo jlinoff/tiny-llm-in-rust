@@ -4047,8 +4047,9 @@ it.
 
 **Started.** Built so far: the classifier (copied), part 1's levels and
 sentences, whole-image batches, the codebook, and `draw-check`, which
-measures the tokenizers; predictions 1 and 2 are tested (see
-[Results](#results), below). No drawing model has been trained yet.
+measures the tokenizers, so predictions 1 and 2 are tested (see
+[Results](#results), below); then the token files, building and
+training for part 1. No drawing model has been trained yet.
 
 This section was written before any code: the
 plan, the tests, and the predictions, each with its mechanism and a
@@ -4172,7 +4173,13 @@ speeds, half an hour is about 15 million tokens for the pixel model,
 some 20,000 images, a third of a pass over the training images; and
 about 27 million for the codebook model, some 550,000 images, nine
 passes. The 10,000 test images are the validation
-set.
+set: 80 of them, spread evenly, are measured every 200 steps.
+
+Part 1's settings (`config-draw-pixels.toml`), chosen when it was built:
+8 images a step (6,272 tokens; attention over 784 positions holds 8 × 4
+heads × 784² weights a layer, about 80 MB, so 8 rather than more), the
+development model's learning rate of 0.002 with 100 warm-up steps, and
+2,400 steps, provisional until the timing run measures the M4's speed.
 
 **Figures.**
 
@@ -4210,14 +4217,18 @@ and Makefile targets, built so far and planned:
 | 2. classifier | `transformer draw-classifier` | `make draw-classifier` | built |
 | 3. codebook | `transformer draw-codebook` | `make draw-codebook` | built |
 | the tokenizer checks (predictions 1 and 2) | `transformer draw-check` | `make draw-check` | built |
-| 4. encode | `transformer draw-encode` | | planned |
-| 5. build, train | this project's `build` and `train` | `make draw-pixels`, `make draw-codebook-model` | planned |
+| 4. encode | `transformer draw-encode` | `make draw-encode-pixels` | built (part 1) |
+| 5. build | `transformer draw-build` | (made as needed) | built |
+| 5. train | `transformer draw-train` | `make draw-pixels-time` (the timing run), `make draw-pixels` | built (part 1) |
 | 6, 7. sample, measure | `transformer draw-sample`, `draw-measure` | `make draw-guidance` | planned |
 
 The tokenizer checks aren't an item of the flow: they measure items 1 to
 3 before anything is trained, so they come first. `make draw-check` runs
 items 1 to 3 as needed, then the checks. The planned names may change
-when they're built; this table will say so.
+when they're built; this table will say so. (Changed when built: steps 3
+and 4 became `draw-build` and `draw-train`, this project's `build` and
+`train` with the vocabulary taken from the token file and the batches
+made of whole images, rather than options on those commands.)
 
 ### Tests
 
