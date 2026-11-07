@@ -426,7 +426,15 @@ $(OUT)/draw-pixels-test.ids: $(OUT)/draw-pixels-train.ids
 .PHONY: draw-encode-pixels
 draw-encode-pixels: $(OUT)/draw-pixels-train.ids ## Drawing, part 1: MNIST as sentences of pixel tokens.
 
-$(OUT)/draw-pixels-init.safetensors: $(DRAW_PIXELS_CONFIG) $(OUT)/draw-pixels-train.ids | $(TRANSFORMER)
+# As for the text model, each depends only on its own section of the
+# settings file (copied by tools/config_section.py, rewritten only when a
+# value changes), so editing a comment, [draw] or [training] never rebuilds
+# the starting model, and nothing downstream of a trained model (grids,
+# measures) ever retrains it.
+$(OUT)/draw-pixels-config/%.toml: $(DRAW_PIXELS_CONFIG) tools/config_section.py | $(OUT)
+	@python3 tools/config_section.py $(DRAW_PIXELS_CONFIG) $* $@
+
+$(OUT)/draw-pixels-init.safetensors: $(OUT)/draw-pixels-config/model.toml $(OUT)/draw-pixels-train.ids | $(TRANSFORMER)
 	$(call hdr,draw-build pixels)
 	$(TRANSFORMER) draw-build --config $(DRAW_PIXELS_CONFIG) --data $(OUT)/draw-pixels-train.ids -o $@
 
@@ -440,7 +448,8 @@ draw-pixels-time: $(OUT)/draw-pixels-init.safetensors $(OUT)/draw-pixels-test.id
 .PHONY: draw-pixels
 draw-pixels: $(OUT)/draw-pixels.safetensors ## Drawing, part 1: train the pixel model (about 30 minutes on the M4).
 
-$(OUT)/draw-pixels.safetensors: $(OUT)/draw-pixels-init.safetensors $(OUT)/draw-pixels-test.ids $(DRAW_PIXELS_CONFIG) | $(TRANSFORMER)
+$(OUT)/draw-pixels.safetensors: $(OUT)/draw-pixels-init.safetensors $(OUT)/draw-pixels-test.ids \
+		$(OUT)/draw-pixels-config/training.toml $(OUT)/draw-pixels-config/draw.toml | $(TRANSFORMER)
 	$(call hdr,draw-train pixels)
 	set -o pipefail; $(TRANSFORMER) draw-train --model $(OUT)/draw-pixels-init.safetensors \
 		--data $(OUT)/draw-pixels-train.ids --valid $(OUT)/draw-pixels-test.ids \
@@ -449,21 +458,25 @@ $(OUT)/draw-pixels.safetensors: $(OUT)/draw-pixels-init.safetensors $(OUT)/draw-
 DRAW_GUIDANCE ?= 0,1,1.5,2,3,5,8
 
 .PHONY: draw-pixels-grid
-draw-pixels-grid: $(OUT)/draw-pixels.safetensors | $(TRANSFORMER) ## Drawing, part 1: grids of the pixel model's digits, at w = 1 and 3.
+# The trained model is checked for, not depended on: these never train it.
+draw-pixels-grid: | $(TRANSFORMER) ## Drawing, part 1: grids of the pixel model's digits, at w = 1 and 3.
 	$(call hdr,$@)
+	@test -f $(OUT)/draw-pixels.safetensors || { echo "no $(OUT)/draw-pixels.safetensors: run make draw-pixels first"; exit 1; }
 	$(TRANSFORMER) draw-sample --model $(OUT)/draw-pixels.safetensors --guidance 1 -o $(OUT)/draw-pixels-w1.png
 	$(TRANSFORMER) draw-sample --model $(OUT)/draw-pixels.safetensors --guidance 3 -o $(OUT)/draw-pixels-w3.png
 
 .PHONY: draw-pixels-measure
-draw-pixels-measure: $(OUT)/draw-pixels.safetensors $(OUT)/classifier.safetensors | $(TRANSFORMER) ## Drawing, part 1: measure the pixel model's digits at each guidance scale.
+draw-pixels-measure: $(OUT)/classifier.safetensors | $(TRANSFORMER) ## Drawing, part 1: measure the pixel model's digits at each guidance scale.
 	$(call hdr,$@)
+	@test -f $(OUT)/draw-pixels.safetensors || { echo "no $(OUT)/draw-pixels.safetensors: run make draw-pixels first"; exit 1; }
 	set -o pipefail; $(TRANSFORMER) draw-measure --model $(OUT)/draw-pixels.safetensors \
 		--classifier $(OUT)/classifier.safetensors --data data/mnist --guidance $(DRAW_GUIDANCE) \
 		2>&1 | tee $(OUT)/draw-pixels-measure.log
 
 .PHONY: draw-pixels-attention
-draw-pixels-attention: $(OUT)/draw-pixels.safetensors $(OUT)/draw-pixels-test.ids | $(TRANSFORMER) ## Drawing, part 1: where each head looks, by distance back (prediction 5).
+draw-pixels-attention: $(OUT)/draw-pixels-test.ids | $(TRANSFORMER) ## Drawing, part 1: where each head looks, by distance back (prediction 5).
 	$(call hdr,$@)
+	@test -f $(OUT)/draw-pixels.safetensors || { echo "no $(OUT)/draw-pixels.safetensors: run make draw-pixels first"; exit 1; }
 	$(TRANSFORMER) draw-attention --model $(OUT)/draw-pixels.safetensors --valid $(OUT)/draw-pixels-test.ids
 
 # The variables make help lists, one per line, with what each does and its
