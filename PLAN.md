@@ -71,6 +71,7 @@ names are explained where they first appear.
   - [Tests](#tests)
   - [Predictions](#predictions)
   - [What would change the plan](#what-would-change-the-plan)
+  - [Results](#results)
 - [Order of work](#order-of-work)
 - [Bibliography](#bibliography)
   - [Tokenization (tokenizer/)](#tokenization-tokenizer)
@@ -4046,8 +4047,8 @@ it.
 
 **Started.** Built so far: the classifier (copied), part 1's levels and
 sentences, whole-image batches, the codebook, and `draw-check`, which
-measures the tokenizers (predictions 1 and 2); no drawing model has been
-trained yet.
+measures the tokenizers; predictions 1 and 2 are tested (see
+[Results](#results), below). No drawing model has been trained yet.
 
 This section was written before any code: the
 plan, the tests, and the predictions, each with its mechanism and a
@@ -4335,9 +4336,51 @@ If prediction 1 fails badly (the codebook's reconstructions classified
 below 95%), the codebook grows to 512 entries before any model is
 trained. If prediction 5 fails, so the pixel model never learns the
 pixel above, that is a finding about learned positions, worth a second
-look at what the position table learned; it doesn't stop the work. If the pixel model's samples are unrecognizable
-at half an hour, a longer run is added, recorded as a departure from the
-equal budget.
+look at what the position table learned; it doesn't stop the work. If
+the pixel model's samples are unrecognizable at half an hour, a longer
+run is added, recorded as a departure from the equal budget.
+
+### Results
+
+Results are added as each part runs, against the predictions above,
+which stay as written.
+
+**The tokenizers (predictions 1 and 2).** `make draw-check`, on the M4:
+39 seconds in all, 7 for the classifier's 5,000 steps and 11 for the
+codebook's 30 repetitions.
+
+| Check | Predicted | Measured | |
+|---|---|---|---|
+| The classifier on the test images | 98.20%, exactly | 98.20% | right |
+| … rounded to 4 levels | at least 97.7% | 98.31% | right |
+| … rebuilt from the codebook | 96.5% to 98.0%, below the 4-level figure | 98.15%, below it | wrong: far less lost |
+| Pixels at level 0, level 3 | 80% to 84%, 8% to 12% | 83.45%, 9.66% | right |
+| Levels 1 and 2 | about equal | 3.32%, 3.57% | right |
+| Knowing only the levels' shares | 0.55 to 0.75 nats per pixel | 0.609 | right |
+| Patches given to the all-black entry | 55% to 70% | 64.93% | right |
+
+- **The same instrument.** The copied classifier gives
+  tiny-diffusion-in-rust's 98.20% to the digit (and 99.79% on 10,000
+  training images), so drawing's measurements are made with the
+  instrument its stage 4 used, not merely a similar one.
+- **The miss: the codebook loses almost nothing.** Prediction 1 expected
+  256 patches to blur crossings and tight curves, where digits differ,
+  and cost 0.2 to 1.7 points; they cost 0.05. Its reconstructions are
+  close (a mean squared error of 0.019 on the −1 to 1 scale, about 18
+  gray levels in 255), and the classifier goes by a digit's overall
+  shape, which the patches keep. So part 2's tokenizer barely limits
+  what its model can draw: the limit will be the model.
+- **Rounded digits classify slightly better than the originals,** by 11
+  of 10,000. Not predicted, and too few to explain: rounding clears
+  faint gray specks, which might help, or it might be chance.
+- **The codebook didn't settle:** after 30 repetitions 6,626 patches
+  (0.2%) were still changing, and the error still falling, by about
+  0.03% a repetition. Within the plan (it stops when the repetitions run
+  out), and the classifier shows it doesn't matter, so 30 stays.
+- Knowing only how common each codebook entry is costs 2.508 nats per
+  patch. It isn't comparable with the 0.609 per pixel: the two
+  tokenizers keep different information, so their losses measure
+  different things.
 
 ## Order of work
 
