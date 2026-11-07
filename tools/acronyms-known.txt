@@ -26,3 +26,5 @@ README
 LICENSE
 SolidGoldMagikarp   # a glitch token, quoted
 AIE                 # quoted from a model's output
+DALL                # DALL·E, OpenAI's image model, named where it appears
+LeCun               # Yann LeCun, a name

@@ -18,6 +18,7 @@ names are explained where they first appear.
   - [Training](#training)
   - [Generation (inference)](#generation-inference)
   - [word2vec](#word2vec)
+  - [Drawing](#drawing)
 - [The flows](#the-flows)
   - [1. The LLM flow](#1-the-llm-flow)
     - [What each step does](#what-each-step-does)
@@ -64,6 +65,12 @@ names are explained where they first appear.
 - [The endpoint: an open-weight model](#the-endpoint-an-open-weight-model)
   - [How far could this go?](#how-far-could-this-go)
   - [Trying a new model: SmolLM-1.7B, step by step](#trying-a-new-model-smollm-17b-step-by-step)
+- [Drawing: a language model that makes images](#drawing-a-language-model-that-makes-images)
+  - [Where it fits](#where-it-fits)
+  - [What it adds](#what-it-adds)
+  - [Tests](#tests)
+  - [Predictions](#predictions)
+  - [What would change the plan](#what-would-change-the-plan)
 - [Order of work](#order-of-work)
 - [Bibliography](#bibliography)
   - [Tokenization (tokenizer/)](#tokenization-tokenizer)
@@ -71,14 +78,16 @@ names are explained where they first appear.
   - [Attention and the transformer (attention/, transformer/)](#attention-and-the-transformer-attention-transformer)
   - [Training data and small models](#training-data-and-small-models)
   - [Post-training (transformer finetune)](#post-training-transformer-finetune)
+  - [Drawing (planned)](#drawing-planned)
   - [Not papers, but excellent for this project](#not-papers-but-excellent-for-this-project)
 <!-- /toc -->
 
 ## Terms
 
 The groups follow the order a reader meets the ideas, which is also the
-order of the [LLM flow](#1-the-llm-flow): the text and its tokens, the model that reads
-them, how it's trained, how it generates, and word2vec, the side branch.
+order of the [LLM flow](#1-the-llm-flow): the text and its tokens, the
+model that reads them, how it's trained, how it generates; then
+word2vec, the side branch, and drawing, the model's use for images.
 Within and across groups, each definition uses only terms defined above
 it. Each group opens with a line saying what it collects.
 
@@ -387,9 +396,66 @@ The historical side branch, which has its own flow.
 - **Hogwild**: training with many threads that update the shared weights
   without locks, accepting the rare collision.
 
+#### Drawing
+
+The terms of the drawing section, where this project's transformer
+learns to make images ([Drawing](#drawing-a-language-model-that-makes-images)).
+
+- **MNIST**: the standard set of 70,000 handwritten digits, 28 × 28
+  grayscale pixels each (60,000 to train on, 10,000 to test with), each
+  labelled with its digit. Its name is from NIST (the National
+  Institute of Standards and Technology, in the United States), whose
+  earlier collections it was made from.
+- **raster order**: an image read as text is read: the top row of
+  pixels from left to right, then the next row, to the bottom right.
+  The pixel directly above a pixel is 28 positions earlier.
+- **brightness level**: one of 4 values a pixel is rounded to (black,
+  dark gray, light gray, white), so that a pixel can be a token: the
+  pixel model's vocabulary is the 4 levels plus the class tokens.
+- **class token**: a token that names the digit to draw, `<0>` to
+  `<9>`, put before the image's tokens, so "draw a 7" is a prompt;
+  and **`<none>`**, an 11th, meaning "any digit", for guidance.
+- **patch**: a 4 × 4 square of pixels; a 28 × 28 image is 7 × 7 = 49
+  patches.
+- **codebook**: a list of K typical patches (here K = 256), learned from
+  the training images; each patch of an image is replaced by the number
+  of the codebook entry nearest to it, so an image becomes 49 tokens.
+  The image tokenizer's version of BPE's merges: a vocabulary learned
+  from data that makes sequences shorter.
+- **k-means**: the way the codebook is learned. Start from K patches
+  picked from the data; then repeat two steps: give each training patch
+  to its nearest entry, and move each entry to the average of the
+  patches it was given. Each repetition can only lower the total
+  squared distance from patches to their entries, so it settles.
+- **reconstruction**: an image rebuilt from its tokens (levels back to
+  brightness, or codebook entries pasted back as patches); what the
+  tokenizer loses is the difference between an image and its
+  reconstruction.
+- **the classifier**: a small network trained on MNIST to name the
+  digit in an image, copied from tiny-diffusion-in-rust (its stage 4),
+  the instrument generated digits are measured with. Its measures, over
+  many samples: **agreement**, the fraction it names as the requested
+  digit; **confident**, the fraction it names any digit with probability
+  above 0.9 (a clear digit); **variety**, how different two samples of
+  one digit are, relative to real handwriting (1 as varied, 0 all
+  identical).
+- **classifier-free guidance**: asking for a digit more strongly than
+  the model learned to. Each step scores the next token twice, once
+  after the class token and once after `<none>`, and combines the two
+  sets of logits as ℓ = ℓ_none + w·(ℓ_class − ℓ_none). The **guidance
+  scale** w: 0 ignores the class, 1 is the model as trained, above 1
+  pushes further toward what distinguishes the class. One model learns
+  both because training replaces the class token with `<none>` 10% of
+  the time. (tiny-diffusion-in-rust's stage 4 combines velocities the
+  same way.)
+- **batched sampling**: generating many images at once, one position at
+  a time for all of them together, so each step's matrix products serve
+  the whole batch; it gives exactly the tokens one-at-a-time generation
+  would, with the same seeds.
+
 ## The flows
 
-There are four separate flows:
+There are five separate flows, the fifth planned:
 
 1. **The LLM flow**: the main goal. It builds a small GPT-style language
    model, from text to a trained model that generates text, and then
@@ -407,6 +473,9 @@ There are four separate flows:
    multiplies and a real training step for a built model, to turn the
    training-time estimates into measured figures before committing to a
    long run. It reads a checkpoint and writes nothing.
+5. **The drawing flow** (planned): the LLM flow's model and training
+   applied to images, digits as sequences of tokens. Its flow and plan
+   are in [Drawing](#drawing-a-language-model-that-makes-images).
 
 ### 1. The LLM flow
 
@@ -3970,6 +4039,277 @@ implement what the new family adds (here, the biases and the tokenizer
 pattern), and accept the model only once `make llama-check` passes for
 it.
 
+## Drawing: a language model that makes images
+
+**Planned, not started.** This section was written before any code: the
+plan, the tests, and the predictions, each with its mechanism and a
+numeric check, in the manner of tiny-diffusion-in-rust's stages 4 to 7.
+The results will be added below them, and a prediction that misses
+stays as written, with the miss recorded.
+
+The question: can the model this project built for stories, with no
+change to how it works, learn to draw? An image becomes a sequence of
+tokens, the transformer learns to predict the next token exactly as it
+does for text, and its output becomes an image again. Everything new is
+in the two conversions and in how the results are measured; the model,
+the training loop and the sampler are the ones already built. Full-scale
+systems that draw this way (Image GPT, DALL·E's first version,
+LlamaGen) are described in tiny-diffusion-in-rust's PLAN.md, "The other
+direction: language models that draw", with their papers.
+
+### Where it fits
+
+It is item 11 of [Order of work](#order-of-work), after the project's
+text work is done, and the mirror image of tiny-diffusion-in-rust's
+stage 6, where a diffusion model wrote text. That project's stage 4 is
+the comparison: a diffusion model trained on the same digits, for 26
+minutes on the M4, measured with the same classifier. So the results
+here can be read row for row against its table: a language model and a
+diffusion model, the same data, the same budget, the same instrument.
+
+What is reused, and what is new:
+
+| Piece | From | Change |
+|---|---|---|
+| The model (`gpt.rs`, `model.rs`), training (`train.rs`), sampling (`generate.rs`) | this project | none to how they work; a context of 784 is a setting |
+| Batches | `data.rs` | whole images, each starting at position 0, never a window across two images |
+| The digits and their PNG (portable network graphics) files | tiny-diffusion-in-rust's `image.rs` | copied, as it copied this project's foundation |
+| The classifier and its measures | tiny-diffusion-in-rust's `classify.rs` | copied, with its tests |
+| Pixels to tokens and back; the codebook | new: `draw.rs`, `codebook.rs` | |
+| Guidance and batched sampling | new, in `generate.rs` | |
+
+Rust source files named here are in `transformer/src/`.
+
+**The data.** MNIST ([Terms](#drawing)), downloaded by `make` from the
+copy tiny-diffusion-in-rust uses, never stored in this repository. Yann
+LeCun and Corinna Cortes hold its copyright (it is derived from NIST's
+collections), and they make it available under the Creative Commons
+Attribution-Share Alike 3.0 licence. The README credits it, and so will
+any figure that shows generated digits.
+
+### What it adds
+
+**An image as a sentence.** A digit becomes its class token followed by
+its pixels in raster order: 785 tokens. Training is this project's
+next-token prediction with the usual one-place shift, so the model
+reads 784 of them and is scored on 784:
+
+```
+position:   0      1    2    3   …   783    784
+token:     <7>    p1   p2   p3   …   p783   p784
+
+inputs   (positions 0 to 783): the class token, then pixels p1 to p783
+targets  (positions 1 to 784): pixels p1 to p784
+```
+
+The class token predicts the first pixel, each pixel predicts the next,
+and p783 predicts p784; the last pixel is only ever a target, so a
+context of 784 holds a whole image. Pixel p1 is the top-left corner,
+p28 the top-right, p29 the start of the second row.
+
+**Part 1: pixels as tokens.** Each pixel's brightness, 0 to 255, is
+rounded to one of 4 levels (0–63, 64–127, 128–191, 192–255), decoded as
+the middle of its range. The vocabulary is 15: 4 levels, 10 class
+tokens and `<none>`. The model is the development size (d = 128, 4
+layers, 4 heads, d_ff = 512) with a context of 784: by
+[the parameter formula](#configuration) (N = V·d + T·d + L·(4d² + 2·d·d_ff + 9d + d_ff) + 2d), 15 × 128 + 784 × 128 + 4 ×
+(4 × 128² + 2 × 128 × 512 + 9 × 128 + 512) + 2 × 128 = **895,616
+parameters**, of which 100,352 are the position table, which must learn
+on its own that 28 positions back means "directly above".
+
+**Part 2: a learned codebook.** k-means ([Terms](#drawing)) learns 256
+typical 4 × 4 patches from the training images (each patch 16 values,
+the brightness scaled to −1 to 1), and each image becomes its class
+token and 49 patch tokens, its patches in raster order. The
+vocabulary is 267 (256 entries, 10 classes, `<none>`), the context 49,
+and the model otherwise the same: 267 × 128 + 49 × 128 + 793,088 + 256
+= **833,792 parameters**. The codebook is saved with a fingerprint, as
+the tokenizer is, so token files can't be decoded with the wrong one.
+This is the tokenizer idea of DALL·E and LlamaGen at its simplest: they
+learn their codebook with a trained autoencoder; k-means is the same
+lesson without training convolutions (item 11 says why that isn't
+planned).
+
+**Part 3: measuring.** Before any model is trained, the tokenizers
+themselves are measured: the classifier's accuracy on the 10,000 test
+images after rounding to 4 levels, and after the codebook's
+reconstruction. That is the ceiling: no model can draw better digits
+than its tokenizer can represent. Then, for each model, 1,000 samples
+(100 per digit) give agreement, confident and variety, and the time
+they took, as in tiny-diffusion-in-rust's stage 4. Its fourth measure,
+overshoot (pixel values past the image's range), can't happen here:
+every token decodes to a value inside the range, so it isn't measured.
+
+**Part 4: classifier-free guidance.** Training replaces the class token
+with `<none>` 10% of the time, so one model learns both "draw a 7" and
+"draw a digit". Sampling at guidance scale w runs both and combines
+their logits ([Terms](#drawing)), at the scales stage 4 used: 0, 1,
+1.5, 2, 3, 5 and 8. Sampling is at temperature 1 with no top-k cutoff,
+so that w alone changes what is drawn.
+
+**The budget.** Each model trains for about 30 minutes on the M4,
+matching the 26 minutes of tiny-diffusion-in-rust's conditional model.
+Equal time, not equal steps: the step counts are set from a 50-step
+timing run, recorded here before the full run. At prediction 3's
+speeds, half an hour is about 15 million tokens for the pixel model,
+some 20,000 images, a third of a pass over the training images; and
+about 27 million for the codebook model, some 550,000 images, nine
+passes. The 10,000 test images are the validation
+set.
+
+**Figures.**
+
+- grids of samples: one row per digit, one column per seed, the same
+  seed down each column, for each model at w = 1 and at the best w;
+- drawing in progress: one sample at a quarter, half, three quarters
+  and all of its tokens, beside a map of how unsure the model was at
+  each pixel (the entropy of its prediction there: what it was choosing
+  between);
+- the codebook: its 256 patches, commonest first, and a few test digits
+  beside their reconstructions;
+- the training loss curves, drawn by the same tool as
+  tiny-diffusion-in-rust's.
+
+**The flow.**
+
+```
+draw:
+  item              input(s)                               output
+  1. data           (download)                         ──► data/mnist/                  # MNIST's four files
+  2. classifier     data/mnist/                        ──► out/classifier.safetensors   # the instrument
+  3. codebook       data/mnist/                        ──► out/codebook.safetensors     # part 2 only: k-means
+  4. encode         data/mnist/ (+ codebook)           ──► out/draw-*.ids               # images as tokens
+  5. build, train   config-draw-*.toml, out/draw-*.ids ──► out/draw-*.safetensors       # this project's steps 3 and 4
+  6. sample         model (+ codebook)                 ──► out/draw-*.png               # grids, at a guidance scale
+  7. measure        model, classifier                  ──► (printed)                    # agreement, confident, variety, time
+```
+
+Items 5 to 7 run once per model (`pixels`, `codebook`). The command
+names will follow this project's existing ones (`transformer draw-encode`
+and so on) and the Makefile's targets (`make draw-pixels`,
+`make draw-codebook`, `make draw-guidance`).
+
+### Tests
+
+Written with the code, before any training, as design for test asks
+([Conventions for all code](#conventions-for-all-code)):
+
+- **Levels.** Each brightness goes to the right level, at every
+  boundary (63 and 64, 127 and 128, 191 and 192), and decoding gives the
+  middle of each range.
+- **The sentence.** An image encodes to 785 tokens, the class first;
+  decoding its tokens gives its reconstruction; a hand-made 2 × 2 image
+  gives tokens checked by hand.
+- **Whole-image batches.** Every input row starts with a class token,
+  holds exactly one image, and its targets are its inputs shifted by
+  one; with a 10% drop, the share of `<none>` over 10,000 drawn images
+  is within 1 point of 10%.
+- **k-means.** After each repetition every patch is with its nearest
+  entry (checked against a brute-force search) and the total squared
+  distance has not risen; the same seed gives the same codebook, byte
+  for byte; a patch equal to an entry encodes to that entry.
+- **The codebook's fingerprint.** Token files made with one codebook
+  are refused with another.
+- **Guidance.** At w = 1 the combined logits equal the conditional
+  ones exactly, and at w = 0 the unconditional ones; the formula
+  checked on hand-made numbers.
+- **Batched sampling.** A batch of 8 gives exactly the tokens of the 8
+  generated one at a time with the same seeds, with and without
+  guidance.
+- **The classifier.** Its own tests, copied with it.
+- **Unchanged text path.** The existing tests, and the golden loss of
+  the text model, pass unchanged.
+
+### Predictions
+
+1. **The 4 levels lose almost nothing; the codebook loses a little.**
+   The classifier, retrained here from the copied code with the same
+   seed and data, gives tiny-diffusion-in-rust's 98.20% on the test
+   images (the same code and arithmetic on the same machine). On the
+   same images rounded to 4 levels: at least 97.7%, within half a point.
+   On the codebook's reconstructions: 96.5% to 98.0%, below the 4-level
+   figure. *Mechanism:* MNIST is nearly black and white, so rounding to
+   4 levels moves only the soft edges of strokes; 256 patches cover
+   blank squares, stroke pieces at a few angles and thicknesses, and
+   ends, but blur the rarer shapes, such as crossings and tight curves,
+   where digits differ.
+2. **The pixel vocabulary is mostly black.** Of the training images'
+   pixels, 80% to 84% are level 0, 8% to 12% are level 3, and levels 1
+   and 2 share the rest about equally. So knowing only how common each
+   level is costs 0.55 to 0.75 nats per pixel (from these shares, about
+   0.64), the reference line for part 1's loss curve. Of the patches, 55%
+   to 70% go to a single all-black entry. *Mechanism:* the digits are
+   drawn in the middle 20 × 20 of the image, so the 4-pixel border is
+   blank, and that alone is 24 of the 49 patches, already 49%; the strokes
+   are mostly solid white with soft edges.
+3. **Training speed: 6,000 to 11,000 tokens per second for the pixel
+   model, 13,000 to 17,000 for the codebook model**, against 15,000 for
+   the development model at context 128. *Mechanism:* the weights cost
+   about 6 operations each per token, the same for all three; attention
+   costs about 12 · T · d operations per token per layer, forward and
+   backward, which at T = 784 is 4.8 million per token, nearly as much
+   as the weights' 5.4 million, while at T = 49 it's negligible.
+4. **The pixel model's loss: 0.12 to 0.25 nats per pixel** on the test
+   images at the end, far below prediction 2's line. *Mechanism:* most
+   pixels follow from their neighbours above and to the left (black
+   continues black, a stroke continues), so the uncertainty is at the
+   edges where a stroke begins or ends. Pixel models in the literature, on
+   black-and-white MNIST, reach about 79 nats per image (PixelRNN, van
+   den Oord et al. 2016: see [Bibliography](#drawing-planned)), 0.10 per
+   pixel;
+   4 levels add edge uncertainty, and a small model trained for half a
+   pass falls short of the best.
+5. **The pixel model attends to the pixel above.** Averaged over test
+   images, at least one head in the first layer gives 40% or more of its
+   attention to the positions 1, 27, 28 and 29 back: the pixel to the
+   left and the three above. *Mechanism:* those are the best evidence
+   for a pixel, and the position table has to learn the image's width
+   from the data; this is the check that it did. (A small new command
+   averages the attention by distance; this project's `probe` shows one
+   prompt at a time.)
+6. **At equal time, the codebook model draws better digits.** At w = 1:
+   agreement 60% to 85% for the pixel model and 80% to 95% for the
+   codebook model, both below the diffusion model's 93.2%; confident,
+   50% to 80% and 70% to 90%. *Mechanism:* in the same half hour the
+   codebook model sees 25 to 30 times as many images (16 times fewer
+   tokens per image, each cheaper: prediction 3), and
+   each of its choices settles a whole patch; the pixel model commits to
+   its top rows first and can never revise them, so a digit that starts
+   like a 7 and ends like a 1 costs it agreement. The diffusion model
+   revises every pixel at every step.
+7. **Sampling time, 1,000 images at w = 1, batched: 20 to 40 times
+   longer for the pixel model than the codebook model.** *Mechanism:* 16
+   times as many tokens, each attending to a longer history. In
+   absolute terms, against the diffusion model's 14 seconds: the
+   codebook model under 15 seconds, the pixel model 2 to 8 minutes.
+   Guidance doubles both, as it doubled diffusion's.
+8. **Guidance works here as it does for diffusion.** For the codebook
+   model, agreement at w = 3 is at least 98% and variety at most 0.90;
+   both change monotonically with w from 1 to 8. At w = 8, variety
+   falls below diffusion's 0.82, and repeated near-identical samples
+   appear. *Mechanism:* the same combination, applied to logits instead
+   of velocities, makes each choice favour what distinguishes the class;
+   but a token is a discrete choice, made once, so a strong push picks
+   the single most typical patch again and again, where diffusion's
+   continuous values can still vary a little.
+9. **The pixel model fails from the bottom up.** Of the first 20 of its
+   samples at w = 1 that the classifier doesn't name as requested, at
+   least 13 have a top half that is plainly the requested digit (counted
+   by eye, the 20 shown in a figure so the count can be checked).
+   *Mechanism:* the class token is
+   furthest away at the bottom, 700 positions back, and a raster model
+   never revisits its early choices, so errors accumulate downward.
+
+### What would change the plan
+
+If prediction 1 fails badly (the codebook's reconstructions classified
+below 95%), the codebook grows to 512 entries before any model is
+trained. If prediction 5 fails, so the pixel model never learns the
+pixel above, that is a finding about learned positions, worth a second
+look at what the position table learned; it doesn't stop the work. If the pixel model's samples are unrecognizable
+at half an hour, a longer run is added, recorded as a departure from the
+equal budget.
+
 ## Order of work
 
 These items are this project's chapters, built once and in order; the
@@ -4040,7 +4380,8 @@ run every time the model is made or used.
     autoencoder), which would need convolutions trained with a backward
     pass; tiny-diffusion-in-rust's convolutions run forward only.
     tiny-diffusion-in-rust's PLAN.md (The other direction: language models
-    that draw) sets out the idea and its research.
+    that draw) sets out the idea and its research; its plan and
+    predictions are in [Drawing](#drawing-a-language-model-that-makes-images).
 
 None of the architecture refinements (RoPE and the rest) is planned for
 our own models: at our scale each was expected to change the loss by
@@ -4286,6 +4627,33 @@ for language research.
   [arXiv:2305.11206](https://arxiv.org/abs/2305.11206). Fine-tuning on only
   1,000 carefully chosen conversations works well, encouraging for a small
   `chat.txt`.
+
+### Drawing (planned)
+
+- van den Oord, A., Kalchbrenner, N., & Kavukcuoglu, K. (2016). "Pixel
+  Recurrent Neural Networks." ICML.
+  [arXiv:1601.06759](https://arxiv.org/abs/1601.06759). Images generated
+  one pixel at a time in raster order; its MNIST result (about 79 nats
+  per image) is prediction 4's reference.
+- Chen, M., et al. (2020). "Generative Pretraining from Pixels." ICML.
+  Image GPT: a GPT-style transformer trained on pixels as tokens, part
+  1's idea at scale.
+- Ramesh, A., et al. (2021). "Zero-Shot Text-to-Image Generation."
+  ICML. [arXiv:2102.12092](https://arxiv.org/abs/2102.12092). The first
+  DALL·E: image tokens from a learned codebook, predicted by a
+  transformer.
+- Sun, P., et al. (2024). "Autoregressive Model Beats Diffusion: Llama
+  for Scalable Image Generation."
+  [arXiv:2406.06525](https://arxiv.org/abs/2406.06525). LlamaGen: a
+  language model's architecture, a codebook tokenizer, and
+  classifier-free guidance on the logits, parts 2 and 4 at scale.
+- Ho, J., & Salimans, T. (2022). "Classifier-Free Diffusion Guidance."
+  [arXiv:2207.12598](https://arxiv.org/abs/2207.12598). Guidance as part
+  4 uses it, first for diffusion.
+- Lloyd, S. (1982). "Least Squares Quantization in PCM." IEEE
+  Transactions on Information Theory 28 (2). k-means as part 2 uses it
+  (PCM: pulse-code modulation, the way sound is stored as numbers;
+  IEEE: the Institute of Electrical and Electronics Engineers).
 
 ### Not papers, but excellent for this project
 
