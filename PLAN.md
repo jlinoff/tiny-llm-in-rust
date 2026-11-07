@@ -4200,10 +4200,23 @@ draw:
   7. measure        model, classifier                  ──► (printed)                    # agreement, confident, variety, time
 ```
 
-Items 5 to 7 run once per model (`pixels`, `codebook`). The command
-names will follow this project's existing ones (`transformer draw-encode`
-and so on) and the Makefile's targets (`make draw-pixels`,
-`make draw-codebook`, `make draw-guidance`).
+Items 5 to 7 run once per model (`pixels`, `codebook`). The commands
+and Makefile targets, built so far and planned:
+
+| Item | Command | Make target | Status |
+|---|---|---|---|
+| 1. data | (curl) | `make data/mnist` | built |
+| 2. classifier | `transformer draw-classifier` | `make draw-classifier` | built |
+| 3. codebook | `transformer draw-codebook` | `make draw-codebook` | built |
+| the tokenizer checks (predictions 1 and 2) | `transformer draw-check` | `make draw-check` | built |
+| 4. encode | `transformer draw-encode` | | planned |
+| 5. build, train | this project's `build` and `train` | `make draw-pixels`, `make draw-codebook-model` | planned |
+| 6, 7. sample, measure | `transformer draw-sample`, `draw-measure` | `make draw-guidance` | planned |
+
+The tokenizer checks aren't an item of the flow: they measure items 1 to
+3 before anything is trained, so they come first. `make draw-check` runs
+items 1 to 3 as needed, then the checks. The planned names may change
+when they're built; this table will say so.
 
 ### Tests
 
