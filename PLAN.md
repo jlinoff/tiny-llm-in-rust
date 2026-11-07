@@ -4179,7 +4179,9 @@ Part 1's settings (`config-draw-pixels.toml`), chosen when it was built:
 8 images a step (6,272 tokens; attention over 784 positions holds 8 × 4
 heads × 784² weights a layer, about 80 MB, so 8 rather than more), the
 development model's learning rate of 0.002 with 100 warm-up steps, and
-2,400 steps, provisional until the timing run measures the M4's speed.
+4,000 steps, set from the timing run (see [Results](#results)): about
+30 minutes, 32,000 images, a little over half a pass. (Provisionally
+2,400, before the run.)
 
 **Figures.**
 
@@ -4392,6 +4394,25 @@ codebook's 30 repetitions.
   patch. It isn't comparable with the 0.609 per pixel: the two
   tokenizers keep different information, so their losses measure
   different things.
+
+**The pixel model's speed (prediction 3, its first half).** `make
+draw-pixels-time`, 50 steps on the M4: 15,329 tokens a second over the
+first 25 steps, 13,411 over the next 25 (which include a validation),
+14,303 overall. Predicted: 6,000 to 11,000. **Wrong, on the fast side:**
+the pixel model trains as fast as the development model does at context
+128 (15,000). The mechanism counted operations: at T = 784 attention
+adds about 4.8 million per token to the weights' 5.4 million, so it
+should have nearly halved the speed. But the development model's 15,000
+(16 × 128 tokens a step) was only 40% of the M4's measured matrix-multiply
+speed ([The bench flow](#4-the-bench-flow)): at T = 128 its matrix
+products are small, and fixed costs per product,
+not arithmetic, set the pace. At T = 784 the products are six times
+longer, Accelerate runs them nearer its ceiling, and the extra
+arithmetic is paid for by the better efficiency. Counting operations
+predicts speed only where arithmetic is the bottleneck, and at this size
+it isn't. The step count was set from this run: 4,000 steps, about 30
+minutes. (The codebook model's half of prediction 3 is measured when it
+is built.)
 
 ## Order of work
 

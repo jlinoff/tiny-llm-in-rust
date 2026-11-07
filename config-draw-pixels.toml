@@ -12,8 +12,9 @@ seed    = 1
 
 [training]
 learning_rate = 0.002   # as config.toml
-steps         = 2400    # PROVISIONAL: set from the 50-step timing run so
-                        # training takes about 30 minutes on the M4
+steps         = 4000    # about 30 minutes on the M4: the 50-step timing
+                        # run measured 14,300 tokens a second, 0.44 s a step
+                        # (32,000 images, about half a pass)
 batch_size    = 8       # images per step: 8 × 784 = 6,272 tokens; attention
                         # over 784 positions keeps 8 × 4 heads × 784² weights
                         # a layer, about 80 MB, so 8 rather than more
