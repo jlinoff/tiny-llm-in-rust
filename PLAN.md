@@ -4534,7 +4534,7 @@ tiny-diffusion-in-rust's stage 4 at the same scales:
 - **Variety above 1 at w = 1:** the pixel model's digits differ from each
   other more than real handwriting does. Not predicted. The guess
   recorded first, stray marks from drawing every pixel at random, was
-  wrong: the w = 1 grid below is clean. The variety comes from wrong
+  wrong: the pixel model's w = 1 grid below is clean. The variety comes from wrong
   digits: a 0 drawn where a 6 was asked for is, to the measure, a very
   different 6. At w = 3, with fewer wrong digits, it falls to 1.01; at
   w = 8 flooding (below) drives it to 1.34.
@@ -4552,18 +4552,23 @@ tiny-diffusion-in-rust's stage 4 at the same scales:
   so the error compounds. A diffusion model revises every pixel at every
   step and can recover; this one can't.
 
-**What the pixel model draws.** Each grid has a row per digit asked for,
+**What the models draw.** Each grid has a row per digit asked for,
 0 at the top, and a column per random stream, the same stream down each
 column, made exactly as tiny-diffusion-in-rust's stage 4 grids were, so
 they can be set side by side. (The images are under MNIST's licence,
 Creative Commons Attribution-Share Alike 3.0: see
 `docs/drawing/NOTICE.md`.)
 
-| Guidance | This project's pixel model | tiny-diffusion-in-rust's diffusion model |
-|---|---|---|
-| w = 1, as trained | ![Digits 0 to 9, one per row, eight random streams across, drawn by the pixel model at guidance 1](docs/drawing/pixels-w1.png) | ![Digits 0 to 9, one per row, eight noises across, drawn by the diffusion model at guidance 1](docs/drawing/diffusion-w1.png) |
-| at its best: w = 3 here, w = 5 there | ![The pixel model's digits at guidance 3](docs/drawing/pixels-w3.png) | ![The diffusion model's digits at guidance 5](docs/drawing/diffusion-w5.png) |
-| w = 8 | ![The pixel model's digits at guidance 8, many flooded with gray](docs/drawing/pixels-w8.png) | (at w = 8: 100% agreement, variety 0.82) |
+Each image's column says which model drew it; the codebook model's
+column is its 29,000-step model, whose results come below.
+
+| Guidance | **Pixel model** (part 1: 784 tokens an image, one per pixel) | **Codebook model** (part 2: 49 tokens an image, one per 4 × 4 patch) | **Diffusion model** (tiny-diffusion-in-rust, stage 4) |
+|---|---|---|---|
+| w = 1, as trained | ![Pixel model, guidance 1: digits 0 to 9, one per row, eight random streams across](docs/drawing/pixels-w1.png) | ![Codebook model, guidance 1: digits 0 to 9, one per row, eight random streams across](docs/drawing/codebook-w1.png) | ![Diffusion model, guidance 1: digits 0 to 9, one per row, eight noises across](docs/drawing/diffusion-w1.png) |
+| w = 3 (diffusion: w = 5) | ![Pixel model, guidance 3](docs/drawing/pixels-w3.png) | ![Codebook model, guidance 3](docs/drawing/codebook-w3.png) | ![Diffusion model, guidance 5](docs/drawing/diffusion-w5.png) |
+| w = 8 | ![Pixel model, guidance 8: many digits flooded with gray](docs/drawing/pixels-w8.png) | ![Codebook model, guidance 8: digits broken into patch fragments, the 6s flooded](docs/drawing/codebook-w8.png) | (no grid; at w = 8: 100% agreement, variety 0.82) |
+
+The pixel model's grids, read row by row:
 
 - **At w = 1** the strokes are clean, with no stray marks, but about a
   third of the digits are the wrong digit: the 6 row holds a 9 and two
@@ -4641,7 +4646,7 @@ the diffusion model's 14 at w = 1.
   diffusion model's 0.82, with repeated near-identical samples: wrong,
   it rises to 1.27. The mechanism (a discrete choice pushed hard picks
   the most typical patch again and again) shows in one row of the w = 8
-  grid below, the 6s, and nowhere else; what happens instead is the
+  grid (the middle column of the grids above), the 6s, and nowhere else; what happens instead is the
   pixel model's breakdown, later and milder.
 - **Memorizing hurts most under strong guidance.** At w = 1 to 2 the two
   codebook models are within a point of each other; at w = 5 and 8 the
@@ -4659,14 +4664,8 @@ the diffusion model's 14 at w = 1.
   the diffusion model stays ahead, reaching 100% where the codebook
   model peaks at 99.5% and then declines.
 
-**What the codebook model draws** (29,000 steps; the same layout and
-streams as above):
-
-| Guidance | This project's codebook model | tiny-diffusion-in-rust's diffusion model |
-|---|---|---|
-| w = 1, as trained | ![Digits 0 to 9, one per row, eight random streams across, drawn by the codebook model at guidance 1](docs/drawing/codebook-w1.png) | ![The diffusion model's digits at guidance 1](docs/drawing/diffusion-w1.png) |
-| w = 3 here, w = 5 there | ![The codebook model's digits at guidance 3](docs/drawing/codebook-w3.png) | ![The diffusion model's digits at guidance 5](docs/drawing/diffusion-w5.png) |
-| w = 8 | ![The codebook model's digits at guidance 8, broken into fragments, the 6s flooded](docs/drawing/codebook-w8.png) | (at w = 8: 100% agreement, variety 0.82) |
+**What the codebook model draws**: the middle column of the grids
+above, read row by row:
 
 - **At w = 1** every one of the 80 digits is, by eye, the digit asked for, in a
   range of thicknesses and slants like real handwriting; beside the
