@@ -26,7 +26,10 @@ written with Claude; no copyright is claimed.*
 - **the same inference code running a real open-weight model** (one whose
   trained weights are published), Hugging Face's SmolLM-135M and its
   13-times-larger sibling SmolLM-1.7B, their predictions checked against
-  Hugging Face's own implementation.
+  Hugging Face's own implementation;
+- **the same transformer drawing digits**: handwritten digits turned into
+  sequences of tokens, so the model that writes stories learns to draw,
+  measured against the diffusion model of the companion project.
 
 Models are trained on [TinyStories](https://arxiv.org/abs/2305.07759), short
 stories written for small models. What it gets you:
@@ -121,15 +124,54 @@ memory caps a 32 GB Mac at about 4 billion parameters in 32-bit floats,
 and the loader accepts only models it implements exactly, so other families
 such as Qwen need code first.
 
+## Draw digits with the same transformer
+
+The transformer that writes stories can draw, unchanged: a digit becomes a
+sentence, its class token ("draw a 7") followed by its tokens, and the
+model predicts the next token as it does for text. Two kinds of token were
+tried, each model trained for half an hour on an M4: every pixel as a token
+(4 brightness levels, 784 tokens an image), and every 4 × 4 patch as one of
+256 typical patches learned from the data (49 tokens an image). They are
+measured with the same classifier, on the same digits (**MNIST**, a
+standard set of 70,000 handwritten digits), as the companion project's
+diffusion model:
+
+| Drawn by | Digits as asked | Time for 1,000 |
+|---|---|---|
+| this transformer, a token per pixel | 70.5% | 22 s |
+| this transformer, a token per patch | 94.7% | about 1 s |
+| tiny-diffusion-in-rust's diffusion model | 93.2% | 14 s |
+
+| A token per pixel | A token per patch | Diffusion |
+|---|---|---|
+| ![Digits 0 to 9, one per row, drawn by the transformer with a token per pixel](docs/drawing/pixels-w1.png) | ![Digits 0 to 9, one per row, drawn by the transformer with a token per patch](docs/drawing/codebook-w1.png) | ![Digits 0 to 9, one per row, drawn by tiny-diffusion-in-rust's diffusion model](docs/drawing/diffusion-w1.png) |
+
+What the tokens are decides more than the model does. With guidance (asking
+for the digit more strongly) the diffusion model reaches 100%, while both
+language models peak and then break down: they can't revise a token once
+written. The plan, ten predictions with their results, and what it taught
+are in [PLAN.md](PLAN.md)'s Drawing section. To run it:
+
+```
+make data/mnist           # download MNIST
+make draw-check           # the classifier, the codebook, and what each tokenizer keeps
+make draw-codebook-model  # train the patch model (about 30 minutes); make draw-pixels for pixels
+make draw-codebook-grid draw-codebook-measure
+```
+
+The digit images are under MNIST's licence, CC BY-SA 3.0 (Creative Commons
+Attribution-Share Alike): see [docs/drawing/NOTICE.md](docs/drawing/NOTICE.md).
+
 ## What's where
 
 | Directory | What it holds |
 |---|---|
 | `tokenizer/` | `mini_bpe.py`: learning a tokenizer, encoding, decoding |
 | `chat/` | `make_chat.py`: fine-tuning conversations made from the stories |
-| `transformer/` | the model: build, train, finetune, generate, evaluate, probe, llama |
+| `transformer/` | the model: build, train, finetune, generate, evaluate, probe, llama, and drawing (`draw-*`) |
 | `attention/` | self-attention on its own, on toy inputs, up to an induction head |
 | `word2vec/` | word vectors, the historical precursor |
+| `docs/drawing/` | drawing's figures, with their licence notice |
 | `tools/` | helpers: PLAN.md's table of contents, the Hugging Face reference, experiments, continuous integration (CI)'s smoke test |
 
 ## Checks
@@ -167,7 +209,8 @@ starting from this project's matrices, automatic differentiation and model
 files. Its stage 6 trains a masked diffusion language model on this
 project's tokenizer and corpus and compares it with this project's model;
 its stage 7 runs a full-scale open model (DiT-XL/2) through its own code, as
-this project ran SmolLM.
+this project ran SmolLM. This project's drawing is the mirror image of its
+stage 6, and is measured with its classifier against its stage 4.
 
 ## License
 
