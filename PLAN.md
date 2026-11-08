@@ -4046,11 +4046,11 @@ it.
 
 ## Drawing: a language model that makes images
 
-**Started.** Built so far: the classifier (copied), part 1's levels and
-sentences, whole-image batches, the codebook, and `draw-check`, which
-measures the tokenizers, so predictions 1 and 2 are tested (see
-[Results](#results), below); then the token files, building and
-training for part 1. No drawing model has been trained yet.
+**Parts 1 to 4 built and measured.** Both models are trained and
+measured against tiny-diffusion-in-rust's stage 4, with guidance (see
+[Results](#results)); predictions 1 to 8 and 10 are tested, prediction 9
+awaits its count by eye, and what drawing taught is still to be
+written.
 
 This section was written before any code: the
 plan, the tests, and the predictions, each with its mechanism and a
@@ -4587,6 +4587,100 @@ Creative Commons Attribution-Share Alike 3.0: see
   nearly every 1, 5 and 9. This is the compounding error described
   above, made visible; it can start anywhere, the 4s failing beside the
   class token, so it is not prediction 9's distance effect.
+
+**The codebook model, trained (prediction 10).** `make
+draw-codebook-model`: 29,000 steps in 28.7 minutes, 52,771 tokens a
+second, 30.9 passes. Validation reached its best, **0.977 nats per patch
+at step 15,000**, then rose steadily to **0.998** at the end, while the
+training loss fell to **0.872** and the gradient's length doubled (0.32
+to 0.65) as the model fitted particular training digits ever more
+closely.
+
+| Prediction 10 | Predicted | Measured | |
+|---|---|---|---|
+| Final validation loss | within 0.02 of 0.967 | 0.998 (+0.031) | wrong: worse, not flat |
+| Final training loss | 0.92 or below | 0.872 | right |
+| The gap | at least 0.04 | 0.126 | right |
+
+So the mechanism held and was too mild: past about 15 passes, more
+training made the model worse on digits it hadn't seen, and the
+equal-time model generalizes less well than the 8,000-step one (0.967).
+The budget was longer than 60,000 digits could use.
+
+**The codebook model's digits (predictions 6, 7 and 8).** `make
+draw-codebook-measure`, and the same for the 8,000-step model; each
+cell is agreement, confident, variety:
+
+| w | Codebook, 29,000 steps (the budget) | Codebook, 8,000 steps | Pixel model | Diffusion (tiny-diffusion-in-rust) |
+|---|---|---|---|---|
+| 0 | confident 84.2% | confident 75.4% | confident 62.0% | confident 62.2% |
+| 1 | 94.7%, 94.6%, 1.00 | 93.8%, 91.9%, 1.00 | 70.5%, 77.8%, 1.11 | 93.2%, 93.4%, 0.99 |
+| 1.5 | 98.2%, 97.5%, 0.97 | 98.8%, 97.9%, 0.97 | 82.6%, 85.9%, 1.07 | 98.8%, 99.1%, 0.95 |
+| 2 | 99.5%, 98.8%, 0.97 | 99.8%, 99.6%, 0.96 | 87.9%, 87.8%, 1.04 | 99.7%, 99.7%, 0.92 |
+| 3 | 98.7%, 97.9%, 0.96 | 99.8%, 99.5%, 0.92 | 90.8%, 86.4%, 1.01 | 100.0%, 100.0%, 0.88 |
+| 5 | 93.2%, 91.3%, 1.09 | 98.6%, 98.3%, 0.98 | 82.7%, 85.8%, 1.10 | 100.0%, 100.0%, 0.84 |
+| 8 | 70.3%, 71.8%, 1.27 | 88.7%, 90.8%, 1.11 | 56.6%, 69.1%, 1.34 | 100.0%, 100.0%, 0.82 |
+
+Each model's 1,000 images took about 1 second at every scale (the
+command reports whole seconds), against the pixel model's 20 to 50 and
+the diffusion model's 14 at w = 1.
+
+- **Prediction 6, the codebook model's half: partly wrong.** Agreement
+  94.7% at w = 1 is inside the predicted 80% to 95%; confident 94.6% is
+  above the predicted 70% to 90%; and "both below the diffusion model's
+  93.2%" is wrong for the codebook model, which is above it (and so is
+  the 8,000-step model, at 93.8%). The pixel model's half stood.
+- **Prediction 7: right.** About 1 second for 1,000 images, predicted
+  under 15; the pixel model took 22, a ratio of about 22, predicted 20
+  to 40. Whether guidance doubled the codebook model's time can't be
+  seen at a resolution of a second.
+- **Prediction 8: mostly wrong.** Agreement at w = 3 at least 98%:
+  98.7%, right. Variety at w = 3 at most 0.90: 0.96, wrong. Agreement
+  and variety changing steadily with w from 1 to 8: wrong, agreement
+  peaks at w = 2 and falls to 70.3%. Variety at w = 8 below the
+  diffusion model's 0.82, with repeated near-identical samples: wrong,
+  it rises to 1.27. The mechanism (a discrete choice pushed hard picks
+  the most typical patch again and again) shows in one row of the w = 8
+  grid below, the 6s, and nowhere else; what happens instead is the
+  pixel model's breakdown, later and milder.
+- **Memorizing hurts most under strong guidance.** At w = 1 to 2 the two
+  codebook models are within a point of each other; at w = 5 and 8 the
+  equal-time model is far worse (93.2% against 98.6%, 70.3% against
+  88.7%). Without a class it is more confident (84.2% against 75.4%), as
+  a model that reproduces training digits would be. The equal-time row
+  is the comparison the plan set; stopping near 8,000 steps would have
+  done better.
+- **Why the codebook model does well, in part:** every patch it pastes
+  was cut from real handwriting, so even a poor choice looks like a
+  piece of a real digit, which the classifier rewards; and with 49
+  choices an image instead of 784, there are fewer chances to go wrong.
+  At w = 1 the language model that draws with a learned vocabulary of
+  patches matches the diffusion model, 14 times faster; under guidance
+  the diffusion model stays ahead, reaching 100% where the codebook
+  model peaks at 99.5% and then declines.
+
+**What the codebook model draws** (29,000 steps; the same layout and
+streams as above):
+
+| Guidance | This project's codebook model | tiny-diffusion-in-rust's diffusion model |
+|---|---|---|
+| w = 1, as trained | ![Digits 0 to 9, one per row, eight random streams across, drawn by the codebook model at guidance 1](docs/drawing/codebook-w1.png) | ![The diffusion model's digits at guidance 1](docs/drawing/diffusion-w1.png) |
+| w = 3 here, w = 5 there | ![The codebook model's digits at guidance 3](docs/drawing/codebook-w3.png) | ![The diffusion model's digits at guidance 5](docs/drawing/diffusion-w5.png) |
+| w = 8 | ![The codebook model's digits at guidance 8, broken into fragments, the 6s flooded](docs/drawing/codebook-w8.png) | (at w = 8: 100% agreement, variety 0.82) |
+
+- **At w = 1** every one of the 80 digits is, by eye, the digit asked for, in a
+  range of thicknesses and slants like real handwriting; beside the
+  diffusion model's grid it is hard to tell which is which. The
+  columns share less than the diffusion model's do: a random stream
+  here decides patch by patch, not a whole image's style at once.
+- **At w = 3** the digits are bolder and more uniform, with an
+  occasional stray speck.
+- **At w = 8 the failure is a collage.** Strokes break into patches that
+  don't line up, with blocks of debris between; most 1s are gone. The
+  6s are the one place prediction 8's mechanism appears: the top of
+  every 6 is flooded with the same comb-like patch, repeated across the
+  rows. Unlike the pixel model's floods, the debris comes in 4 × 4
+  pieces: the tokens are patches, so so are the mistakes.
 
 ## Order of work
 

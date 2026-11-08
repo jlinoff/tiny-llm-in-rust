@@ -9,6 +9,9 @@ The images are offered under the same licence, with that credit.
 - `pixels-*.png`: drawn by this project's pixel model (PLAN.md, Drawing,
   part 1), at the guidance scale in the name; `make draw-pixels-grid`
   and `make draw-figures` remake and copy them.
+- `codebook-*.png`: drawn by this project's codebook model (PLAN.md,
+  Drawing, part 2), at the guidance scale in the name; `make
+  draw-codebook-grid` and `make draw-figures` remake and copy them.
 - `pixels-misses.png` and `.txt`: the first 20 of its digits the
   classifier doesn't name as asked, each beside its top half
   (`make draw-pixels-misses`).
