@@ -72,6 +72,7 @@ names are explained where they first appear.
   - [Predictions](#predictions)
   - [What would change the plan](#what-would-change-the-plan)
   - [Results](#results)
+  - [What drawing taught](#what-drawing-taught)
 - [Order of work](#order-of-work)
 - [Bibliography](#bibliography)
   - [Tokenization (tokenizer/)](#tokenization-tokenizer)
@@ -460,7 +461,7 @@ learns to make images ([Drawing](#drawing-a-language-model-that-makes-images)).
 
 ## The flows
 
-There are five separate flows, the fifth being built:
+There are five separate flows:
 
 1. **The LLM flow**: the main goal. It builds a small GPT-style language
    model, from text to a trained model that generates text, and then
@@ -478,7 +479,7 @@ There are five separate flows, the fifth being built:
    multiplies and a real training step for a built model, to turn the
    training-time estimates into measured figures before committing to a
    long run. It reads a checkpoint and writes nothing.
-5. **The drawing flow** (being built): the LLM flow's model and training
+5. **The drawing flow**: the LLM flow's model and training
    applied to images, digits as sequences of tokens. Its flow and plan
    are in [Drawing](#drawing-a-language-model-that-makes-images).
 
@@ -4048,9 +4049,8 @@ it.
 
 **Parts 1 to 4 built and measured.** Both models are trained and
 measured against tiny-diffusion-in-rust's stage 4, with guidance (see
-[Results](#results)); predictions 1 to 8 and 10 are tested, prediction 9
-awaits its count by eye, and what drawing taught is still to be
-written.
+[Results](#results)); all ten predictions are tested, and [What drawing
+taught](#what-drawing-taught) closes the section.
 
 This section was written before any code: the
 plan, the tests, and the predictions, each with its mechanism and a
@@ -4629,7 +4629,32 @@ are plainly the start of the digit asked for.
 | 20 | 5, columns 7 and 8 | 58 | 8 | 9 (0.49) |
 
 The commonest confusions are 2 drawn as 3 (four times) and 8 drawn as 9
-or 3 (three times). The count, by eye, is to come.
+or 3 (three times).
+
+**Prediction 9: wrong.** Predicted: at least 13 of the 20 top halves
+plainly the digit asked for. Two counts were made, Joe's first and then
+Claude's; Claude's was not blind, having seen Joe's calls before seeing
+the figure.
+
+| Count | Yes | Pairs counted yes |
+|---|---|---|
+| Joe | 12 | 1, 2, 3, 4, 8, 9, 10, 11, 13, 15, 16, 17 |
+| Claude | 8 | 1, 4, 8, 9, 10, 11, 13, 16 |
+| Reconciled | 8 or 9 | Claude's 8, and pair 17 undecided |
+
+The two agreed on 16 of the 20. Of the four they didn't, three were
+settled by comparing each top half with its whole digit: pair 2 (asked
+6) starts as a peak, like a 0; pair 3 (asked 7) is a blob with no bar;
+pair 15 (asked 2) is a short smudge, plainly not a 2 beside its whole.
+Pair 17 (asked 9) stays open: its whole could be a 9 with a very short
+tail, and its top half is an open arch. Either way, 8 or 9 is well
+short of 13: most of the pixel model's wrong digits are already wrong
+in their first rows, like the 6 that begins as a peak, so the
+mechanism, errors accumulating downward as the class token falls far
+behind, is not what mainly drives its failures at w = 1. That fits the
+w = 8 grid, where the 4s failed beside the class token. The check was
+also weak in itself: two careful readers disagreed on a fifth of the
+cells (see below).
 
 **The codebook model, trained (prediction 10).** `make
 draw-codebook-model`: 29,000 steps in 28.7 minutes, 52,771 tokens a
@@ -4719,6 +4744,58 @@ above, read row by row:
   rows. Unlike the pixel model's floods, the debris comes in 4 × 4
   pieces: the tokens are patches, so so are the mistakes.
 
+
+### What drawing taught
+
+- **The tokenizer decides more than the model.** The same transformer,
+  trained for the same half hour, drew 70.5% of its digits right when
+  each token was a pixel and 94.7% when each was one of 256 learned
+  patches; the codebook itself lost only 0.05 points of the classifier's
+  accuracy. Shorter sequences mean more images seen in the same time
+  (58 times as many here), fewer choices in which to go wrong (49 against
+  784), and every choice a piece of real handwriting. It is the
+  argument for BPE's merges, made for images.
+- **A language model can draw as well as a diffusion model, and
+  faster, until it is pushed.** At w = 1 the codebook model matched
+  tiny-diffusion-in-rust's diffusion model (94.7% against 93.2%) and
+  drew 14 times faster. Under guidance the diffusion model kept
+  improving, to 100%, while both language models peaked and then broke
+  down, the pixel model by flooding and the codebook model in patch
+  collages. The difference is revision: a diffusion model reconsiders
+  every pixel at every step, while a model that writes token by token
+  must live with each choice, and strong guidance makes some choices
+  that nothing after them can repair.
+- **Equal time isn't equal value.** The half-hour budget gave the
+  codebook model 31 passes over 60,000 digits; its validation loss was
+  best after about 15 and then rose (prediction 10), and the memorizing
+  showed most under strong guidance (70.3% at w = 8, against 88.7% for
+  the same model stopped at 8,000 steps). The budget should have
+  followed the validation loss, not the clock.
+- **Counting operations needs the whole computation.** Both speed
+  predictions (3) were wrong by a factor of two to three, the same way:
+  the reference model's cost was counted as its weights', forgetting
+  that its 4,096-token vocabulary costs as much again in logits and
+  softmax. The drawing models have 15 and 267 tokens. Predicting speed
+  needs every part counted, and the knowledge of which parts are
+  arithmetic-bound and which are not.
+- **Write checks from the picture.** Prediction 5's mechanism was right,
+  one head reads the row above, but its numeric check counted distances
+  from the input instead of from the pixel being predicted, the same
+  one-position shift drawn in "An image as a sentence" and then
+  forgotten. A check should be derived from the diagram it depends on,
+  not from memory of it.
+- **A check that needs judgment should be an instrument.** Prediction
+  9's count asked two readers to judge 20 half digits of 14 rows each;
+  they disagreed on a fifth of them. Asking the classifier whether each
+  top half is nearest to real top halves of the asked digit would have
+  been repeatable and blind.
+- **Copy the instrument whole, and feed it what it knows.** The
+  classifier, copied unchanged, gave tiny-diffusion-in-rust's 98.20% to
+  the digit, which is what makes the two projects' tables comparable.
+  And the plan's first decoding of the 4 levels would have turned the
+  black background gray, so the instrument would have measured its own
+  surprise rather than the tokenizer's loss (corrected before any code).
+
 ## Order of work
 
 These items are this project's chapters, built once and in order; the
@@ -4769,8 +4846,9 @@ run every time the model is made or used.
    uses the existing tape and training loop.
 10. **Smaller items:** top-p sampling; folding this plan into
     the README at the end.
-11. **Drawing: a language model that makes images** (started: its plan and
-    predictions came before any code, and its section says what is built).
+11. **Drawing: a language model that makes images** (done: its plan and
+    predictions came before any code; its section has the results and
+    what it taught).
     The mirror image of tiny-diffusion-in-rust's stage 6, where diffusion
     wrote text: images become sequences of tokens, and this project's
     transformer learns to predict them, as it predicts stories. Decided so
