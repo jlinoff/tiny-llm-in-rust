@@ -4417,6 +4417,80 @@ it isn't. The step count was set from this run: 4,000 steps, about 30
 minutes. (The codebook model's half of prediction 3 is measured when it
 is built.)
 
+**The pixel model, trained (prediction 4).** `make draw-pixels`: 4,000
+steps in 27.8 minutes, 15,035 tokens a second. The validation loss ended
+at **0.153 nats per pixel**: predicted 0.12 to 0.25, **right**; a quarter
+of the 0.609 that knowing only the levels' shares costs, and about 120
+nats an image. The training loss ended beside it (0.154), so after half a
+pass nothing is memorized. The curve sat flat near 0.31 from step 100 to
+about 300 before falling steadily; one reading is that the model first
+learned the levels' shares and what the pixel to the left implies, and
+only then the image's width (prediction 5's head). The checkpoints were
+overwritten as training went, so that can't be checked now.
+
+**Where the pixel model looks (prediction 5).** `make
+draw-pixels-attention`, 50 test images. Predicted: at least one
+first-layer head with 40% of its attention on distances 1, 27, 28 and
+29. Best measured: head 1.2, **25.6%. Wrong as written**; but the
+check, not the model, was off by one. The input at position t predicts
+the pixel at t + 1, so the predicted pixel's neighbours are 0 back (its
+left neighbour is the input itself), 26 (above-right), 27 (directly
+above) and 28 (above-left): exactly the shift of the sentence picture
+above, which the check forgot. Counted that way head 1.2 gives 21.4% to
+the pixel above, 15.8% above-right, 6.1% left and 3.0% above-left,
+**46.3%**, and its next favourites are 54 and 55 back, two rows up. The
+mechanism holds: the position table learned the image's width, and one
+head of the first layer reads the row above. Heads 1.4, 3.4 and 4.1 lean
+the same way more weakly (5% to 7% on the input itself, then the row
+above); heads 1.1 and 4.2 spread almost evenly, about 0.4% at every
+distance, which may be how a head reads the class token far back.
+`draw-attention` now shows both sums and each head's weight on the class
+token.
+
+**The pixel model's digits (predictions 6 and 7).** `make
+draw-pixels-measure`, 1,000 images per scale, beside
+tiny-diffusion-in-rust's stage 4 at the same scales:
+
+| w | Agreement | Confident | Variety | Time | Diffusion: agreement, confident, variety |
+|---|---|---|---|---|---|
+| 0 (unconditional) | | 62.0% | | 20 s | , 62.2%, |
+| 1 | 70.5% | 77.8% | 1.11 | 22 s | 93.2%, 93.4%, 0.99 |
+| 1.5 | 82.6% | 85.9% | 1.07 | 49 s | 98.8%, 99.1%, 0.95 |
+| 2 | 87.9% | 87.8% | 1.04 | 50 s | 99.7%, 99.7%, 0.92 |
+| 3 | 90.8% | 86.4% | 1.01 | 49 s | 100.0%, 100.0%, 0.88 |
+| 5 | 82.7% | 85.8% | 1.10 | 47 s | 100.0%, 100.0%, 0.84 |
+| 8 | 56.6% | 69.1% | 1.34 | 45 s | 100.0%, 100.0%, 0.82 |
+
+- **Prediction 6, the pixel model's half: right.** Agreement 70.5% and
+  confident 77.8% at w = 1, inside 60% to 85% and 50% to 80%, and below
+  the diffusion model's 93.2%. (The codebook model's half waits for it.)
+- **Prediction 7: wrong, on the fast side.** Predicted 2 to 8 minutes for
+  1,000 images at w = 1; measured 22 seconds, near the diffusion
+  model's 14. Each image runs on its own core, and one
+  row at a time through 0.9 million weights is cheap, 784 times over.
+  Guidance doubled the time, as predicted.
+- **Without a class the two models agree to a fifth of a point:** 62.0%
+  of the pixel model's digits are clear, 62.2% of the diffusion
+  model's. Not predicted; possibly chance, possibly a property of what
+  an unconditioned small model of MNIST draws.
+- **Variety above 1 at w = 1:** the pixel model's digits differ from each
+  other more than real handwriting does. Not predicted. Every pixel is a
+  fresh random draw at temperature 1, so stray marks are a likely cause;
+  the grids will show.
+- **Guidance helps, then hurts, not as for diffusion.** Agreement climbs
+  from 70.5% to 90.8% at w = 3, then falls, to 56.6% at w = 8, and
+  variety rises with it, to 1.34: strong guidance makes the digits worse
+  and more different from each other, where diffusion's grew steadily
+  better and more alike. Prediction 8 is about the codebook model and
+  waits for it; but its mechanism, a push toward what distinguishes the
+  class, was stated generally, and here it fails above w = 3. A likely
+  reason: at large w every small disagreement between the conditional
+  and unconditional predictions is amplified, a pixel is drawn that no
+  real digit has, and every later pixel is predicted from an image unlike
+  any the model was trained on, where the two predictions disagree more,
+  so the error compounds. A diffusion model revises every pixel at every
+  step and can recover; this one can't.
+
 ## Order of work
 
 These items are this project's chapters, built once and in order; the
