@@ -443,6 +443,34 @@ enum Command {
         #[arg(long, default_value_t = 1)]
         seed: u64,
     },
+    /// Drawing: the first digits the classifier doesn't name as asked, each
+    /// beside its top half alone, for prediction 9's count by eye
+    /// (PLAN.md, Drawing). The same images draw-measure draws.
+    DrawMisses {
+        #[arg(long)]
+        model: PathBuf,
+        /// The classifier (draw-classifier writes it)
+        #[arg(long)]
+        classifier: PathBuf,
+        /// The codebook, for a codebook model
+        #[arg(long)]
+        codebook: Option<PathBuf>,
+        #[arg(long, default_value_t = 1.0)]
+        guidance: f64,
+        /// Images drawn, as draw-measure (image i asks for digit i mod 10)
+        #[arg(long, default_value_t = 1000)]
+        samples: usize,
+        /// How many misses to show
+        #[arg(long, default_value_t = 20)]
+        count: usize,
+        #[arg(long, default_value_t = 1)]
+        seed: u64,
+        #[arg(long, default_value_t = 3)]
+        zoom: usize,
+        /// The PNG file; a legend is written beside it, as .txt
+        #[arg(short, long)]
+        output: PathBuf,
+    },
     /// Drawing: where each head looks, averaged by distance back, over
     /// test images (PLAN.md, Drawing, prediction 5).
     DrawAttention {
@@ -667,6 +695,26 @@ fn main() -> ExitCode {
             valid,
             images,
         } => draw_attention(&model, &valid, images),
+        Command::DrawMisses {
+            model,
+            classifier,
+            codebook,
+            guidance,
+            samples,
+            count,
+            seed,
+            zoom,
+            output,
+        } => draw_misses(
+            &model,
+            &classifier,
+            codebook.as_deref(),
+            guidance,
+            (samples, count),
+            seed,
+            zoom,
+            &output,
+        ),
         Command::DrawMeasure {
             model,
             classifier,
@@ -982,7 +1030,9 @@ fn draw_tokens(
             let v = draw::Vocab { image: b.size() };
             Ok((fp, v, Some(b)))
         }
-        ("codebook", None) => Err("--tokens codebook needs --codebook".into()),
+        ("codebook", None) => {
+            Err("codebook tokens need --codebook (make draw-codebook writes one)".into())
+        }
         (k, _) => Err(format!("--tokens {k}: pixels or codebook")),
     }
 }
@@ -1505,13 +1555,89 @@ fn draw_measure(
     Ok(())
 }
 
-/// The distances back that prediction 5 counts: the pixel to the left (1)
-/// and the three above it (27, 28, 29), in an image 28 pixels wide.
+#[allow(clippy::too_many_arguments)]
+fn draw_misses(
+    model_path: &Path,
+    clf_path: &Path,
+    book: Option<&Path>,
+    w: f64,
+    (n, count): (usize, usize),
+    seed: u64,
+    zoom: usize,
+    output: &Path,
+) -> Result<(), String> {
+    check_writable(output)?;
+    let legend_path = output.with_extension("txt");
+    check_writable(&legend_path)?;
+    let d = Drawer::load(model_path, book)?;
+    let clf = classify::Classifier::from_file(&safetensors::read(clf_path)?)
+        .map_err(|e| format!("{}: {e}", clf_path.display()))?;
+    let asks: Vec<draw::Ask> = (0..n)
+        .map(|i| draw::Ask {
+            class: Some(i % draw::CLASSES),
+            w,
+            stream: i as u64,
+        })
+        .collect();
+    let images = d.draw(&asks, seed);
+    let named = classify::best(&clf.probabilities(&images));
+    let misses: Vec<usize> = (0..n)
+        .filter(|&i| named[i].0 != i % draw::CLASSES)
+        .take(count)
+        .collect();
+    let shape = d.shape();
+    let (h, wd) = (shape.height, shape.width);
+    // Each miss, then the same with its bottom half black.
+    let mut cells = Vec::with_capacity(2 * misses.len() * shape.values());
+    for &i in &misses {
+        let img = images.row(i);
+        cells.extend_from_slice(img);
+        let mut top = img.to_vec();
+        for v in top[(h / 2) * wd..].iter_mut() {
+            *v = -1.0;
+        }
+        cells.extend(top);
+    }
+    let grid = tensor::Mat::from_vec(2 * misses.len(), shape.values(), cells);
+    image::write_grid(output, &grid, shape, 8, zoom)?;
+    let mut legend = format!(
+        "{}: the first {} of {n} digits drawn by {} at guidance {w} (seed {seed}, image i asking for digit i mod 10) that {} doesn't name as asked.\nEach is followed by its top half alone; four pairs a row, read left to right.\n\n  pair  image  asked  named (probability)\n",
+        output.display(),
+        misses.len(),
+        model_path.display(),
+        clf_path.display()
+    );
+    for (k, &i) in misses.iter().enumerate() {
+        legend.push_str(&format!(
+            "  {:>4}  {i:>5}  {:>5}  {} ({:.2})\n",
+            k + 1,
+            i % draw::CLASSES,
+            named[i].0,
+            named[i].1
+        ));
+    }
+    fs::write(&legend_path, &legend)
+        .map_err(|e| format!("can't write {}: {e}", legend_path.display()))?;
+    print!("{legend}");
+    println!("Wrote {} and {}", output.display(), legend_path.display());
+    Ok(())
+}
+
+/// The distances back that prediction 5 counts, as written: 1, 27, 28 and
+/// 29, meant as the left pixel and the three above it.
 const NEIGHBOURS: [usize; 4] = [1, 27, 28, 29];
+
+/// The same neighbours counted from the pixel being predicted, which is one
+/// position after the input that predicts it: left (0, the input itself),
+/// above-right (26), above (27), above-left (28). Prediction 5's check was
+/// off by this one position (PLAN.md, Drawing, Results).
+const TARGET_NEIGHBOURS: [usize; 4] = [0, 26, 27, 28];
 
 /// Each head's attention averaged by distance back: share[k] is the mean
 /// weight a position gives the position k before it, over positions that
-/// have one 29 back (the pixel above-left exists from row 2 on).
+/// have one 29 back (the pixel above-left exists from row 2 on); and the
+/// last entry, at index `context`, is the mean weight on position 0, the
+/// class token.
 fn attention_by_distance(
     p: &gpt::Params<f32>,
     c: &ModelConfig,
@@ -1519,7 +1645,7 @@ fn attention_by_distance(
 ) -> Vec<Vec<Vec<f64>>> {
     let n = c.context;
     let first = NEIGHBOURS[3];
-    let mut share = vec![vec![vec![0.0f64; n]; c.heads]; c.layers];
+    let mut share = vec![vec![vec![0.0f64; n + 1]; c.heads]; c.layers];
     let mut count = 0usize;
     for s in sentences {
         let tokens: Vec<usize> = s[..n].iter().map(|&t| t as usize).collect();
@@ -1531,6 +1657,7 @@ fn attention_by_distance(
                     for k in 0..=t {
                         share[l][h][k] += row[t - k] as f64;
                     }
+                    share[l][h][n] += row[0] as f64;
                 }
             }
         }
@@ -1576,25 +1703,28 @@ fn draw_attention(model_path: &Path, valid: &Path, images: usize) -> Result<(), 
         m.config.context - 1,
         train::duration(start.elapsed().as_secs_f64())
     );
-    println!("  head    1 (left)   27     28 (above)  29     these four   the five largest (distance back: weight; 0 is itself)");
+    println!(
+        "  as predicted: distances 1, 27, 28, 29; the predicted pixel's neighbours: 0 (left), 26 (above-right), 27 (above), 28 (above-left)"
+    );
+    println!("  head   as predicted   neighbours   class token   the five largest (distance back: weight; 0 is itself)");
+    let n = m.config.context;
     for (l, heads) in share.iter().enumerate() {
         for (h, s) in heads.iter().enumerate() {
             let four: f64 = NEIGHBOURS.iter().map(|&d| s[d]).sum();
-            let mut order: Vec<usize> = (0..s.len()).collect();
+            let target: f64 = TARGET_NEIGHBOURS.iter().map(|&d| s[d]).sum();
+            let mut order: Vec<usize> = (0..n).collect();
             order.sort_by(|&a, &b| s[b].total_cmp(&s[a]).then(a.cmp(&b)));
             let top: Vec<String> = order[..5]
                 .iter()
                 .map(|&d| format!("{d}: {:.1}%", 100.0 * s[d]))
                 .collect();
             println!(
-                "  {}.{}   {:7.1}% {:6.1}% {:7.1}%    {:5.1}%   {:7.1}%     {}",
+                "  {}.{}   {:10.1}%   {:9.1}%   {:10.1}%   {}",
                 l + 1,
                 h + 1,
-                100.0 * s[1],
-                100.0 * s[27],
-                100.0 * s[28],
-                100.0 * s[29],
                 100.0 * four,
+                100.0 * target,
+                100.0 * s[n],
                 top.join(", ")
             );
         }
@@ -3645,7 +3775,7 @@ mod tests {
         let share = attention_by_distance(&p, &c, &[&s1, &s2]);
         for (l, heads) in share.iter().enumerate() {
             for (h, s) in heads.iter().enumerate() {
-                let total: f64 = s.iter().sum();
+                let total: f64 = s[..c.context].iter().sum();
                 assert!(
                     (total - 1.0).abs() < 1e-5,
                     "head {}.{}: {total}",

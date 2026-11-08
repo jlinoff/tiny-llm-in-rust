@@ -1,0 +1,34 @@
+# Drawing, part 2: a learned codebook (PLAN.md, Drawing). Read by
+# transformer draw-build ([model]) and draw-train ([training], [draw]).
+
+[model]
+d_model = 128   # the same model as part 1 but for its context
+layers  = 4
+heads   = 4     # head size 32
+context = 49    # a whole image: the class token and 48 patches in,
+                # patches 1 to 49 out
+d_ff    = 512
+seed    = 1
+
+[training]
+learning_rate = 0.002   # as part 1
+steps         = 8000    # PROVISIONAL: set from the 50-step timing run so
+                        # training takes about 30 minutes on the M4, as
+                        # part 1's did
+batch_size    = 64      # images per step: 64 × 49 = 3,136 tokens, about
+                        # half of part 1's 6,272
+warmup_steps  = 100
+min_lr_fraction = 0.1
+weight_decay  = 0.1
+grad_clip     = 1.0
+beta1         = 0.9
+beta2         = 0.95
+seed          = 1       # for the order of the images and the dropped classes
+validation_fraction = 0.0   # unused: validation is on MNIST's test images
+log_every     = 50
+eval_every    = 500     # validation: 10 batches of 64 test images
+eval_batches  = 10
+checkpoint_every = 500
+
+[draw]
+drop = 0.1      # as part 1

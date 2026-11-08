@@ -4176,6 +4176,11 @@ about 27 million for the codebook model, some 550,000 images, nine
 passes. The 10,000 test images are the validation
 set: 80 of them, spread evenly, are measured every 200 steps.
 
+Part 2's settings (`config-draw-codebook.toml`), chosen when it was
+built: the same model with a context of 49 (833,792 parameters), 64
+images a step (3,136 tokens), the same learning rate, and 8,000 steps,
+provisional until its own timing run.
+
 Part 1's settings (`config-draw-pixels.toml`), chosen when it was built:
 8 images a step (6,272 tokens; attention over 784 positions holds 8 × 4
 heads × 784² weights a layer, about 80 MB, so 8 rather than more), the
@@ -4226,6 +4231,10 @@ and Makefile targets, built so far and planned:
 | 6. sample | `transformer draw-sample` | `make draw-pixels-grid` | built (part 1) |
 | 7. measure | `transformer draw-measure` | `make draw-pixels-measure` | built (part 1) |
 | prediction 5's attention | `transformer draw-attention` | `make draw-pixels-attention` | built |
+| prediction 9's misses | `transformer draw-misses` | `make draw-pixels-misses` | built |
+| the figures in `docs/drawing/` | | `make draw-figures` | built |
+| part 2: encode, timing run, train | as part 1 | `make draw-encode-codebook`, `draw-codebook-time`, `draw-codebook-model` | built |
+| part 2: sample, measure | as part 1, with `--codebook` | `make draw-codebook-grid`, `draw-codebook-measure` | built |
 
 The tokenizer checks aren't an item of the flow: they measure items 1 to
 3 before anything is trained, so they come first. `make draw-check` runs
@@ -4474,9 +4483,12 @@ tiny-diffusion-in-rust's stage 4 at the same scales:
   model's. Not predicted; possibly chance, possibly a property of what
   an unconditioned small model of MNIST draws.
 - **Variety above 1 at w = 1:** the pixel model's digits differ from each
-  other more than real handwriting does. Not predicted. Every pixel is a
-  fresh random draw at temperature 1, so stray marks are a likely cause;
-  the grids will show.
+  other more than real handwriting does. Not predicted. The guess
+  recorded first, stray marks from drawing every pixel at random, was
+  wrong: the w = 1 grid below is clean. The variety comes from wrong
+  digits: a 0 drawn where a 6 was asked for is, to the measure, a very
+  different 6. At w = 3, with fewer wrong digits, it falls to 1.01; at
+  w = 8 flooding (below) drives it to 1.34.
 - **Guidance helps, then hurts, not as for diffusion.** Agreement climbs
   from 70.5% to 90.8% at w = 3, then falls, to 56.6% at w = 8, and
   variety rises with it, to 1.34: strong guidance makes the digits worse
@@ -4490,6 +4502,42 @@ tiny-diffusion-in-rust's stage 4 at the same scales:
   any the model was trained on, where the two predictions disagree more,
   so the error compounds. A diffusion model revises every pixel at every
   step and can recover; this one can't.
+
+**What the pixel model draws.** Each grid has a row per digit asked for,
+0 at the top, and a column per random stream, the same stream down each
+column, made exactly as tiny-diffusion-in-rust's stage 4 grids were, so
+they can be set side by side. (The images are under MNIST's licence,
+Creative Commons Attribution-Share Alike 3.0: see
+`docs/drawing/NOTICE.md`.)
+
+| Guidance | This project's pixel model | tiny-diffusion-in-rust's diffusion model |
+|---|---|---|
+| w = 1, as trained | ![Digits 0 to 9, one per row, eight random streams across, drawn by the pixel model at guidance 1](docs/drawing/pixels-w1.png) | ![Digits 0 to 9, one per row, eight noises across, drawn by the diffusion model at guidance 1](docs/drawing/diffusion-w1.png) |
+| at its best: w = 3 here, w = 5 there | ![The pixel model's digits at guidance 3](docs/drawing/pixels-w3.png) | ![The diffusion model's digits at guidance 5](docs/drawing/diffusion-w5.png) |
+| w = 8 | ![The pixel model's digits at guidance 8, many flooded with gray](docs/drawing/pixels-w8.png) | (at w = 8: 100% agreement, variety 0.82) |
+
+- **At w = 1** the strokes are clean, with no stray marks, but about a
+  third of the digits are the wrong digit: the 6 row holds a 9 and two
+  0s, the 8 row an R-like shape and two 6s, the 4 row a 1, a 2 and a v.
+  Beside it, the diffusion model's digits are all the digit asked for,
+  and share a slant down each column; the pixel model's columns share
+  less.
+- **At w = 3** the pixel model is at its best, and it looks like MNIST:
+  bold, well-formed 0s, 2s, 6s, 8s and 9s. It is still behind the
+  diffusion model at w = 5, as the table says (90.8% against 100%), and
+  guidance's costs have begun: some 1s nearly vanish (a 1 is mostly
+  background, and guidance pushes the background hard toward black), and
+  two 7s carry debris at the bottom.
+- **At w = 8 the failure is flooding.** Part of the black background
+  turns gray or white and then stays so: every 4 is gray texture from the
+  top row down; the 7s are good digits until a white band floods their
+  bottom rows; the 2s and 6s are shapes in a sea of white. Many images
+  have horizontal streaks, runs of one level along a row, as a model that
+  leans on the pixel to the left would make once a run begins (prediction
+  5's heads). The digits that survive are the simple, confident ones:
+  nearly every 1, 5 and 9. This is the compounding error described
+  above, made visible; it can start anywhere, the 4s failing beside the
+  class token, so it is not prediction 9's distance effect.
 
 ## Order of work
 

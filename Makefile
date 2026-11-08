@@ -459,11 +459,29 @@ DRAW_GUIDANCE ?= 0,1,1.5,2,3,5,8
 
 .PHONY: draw-pixels-grid
 # The trained model is checked for, not depended on: these never train it.
-draw-pixels-grid: | $(TRANSFORMER) ## Drawing, part 1: grids of the pixel model's digits, at w = 1 and 3.
+draw-pixels-grid: | $(TRANSFORMER) ## Drawing, part 1: grids of the pixel model's digits, at w = 1, 3 and 8.
 	$(call hdr,$@)
 	@test -f $(OUT)/draw-pixels.safetensors || { echo "no $(OUT)/draw-pixels.safetensors: run make draw-pixels first"; exit 1; }
 	$(TRANSFORMER) draw-sample --model $(OUT)/draw-pixels.safetensors --guidance 1 -o $(OUT)/draw-pixels-w1.png
 	$(TRANSFORMER) draw-sample --model $(OUT)/draw-pixels.safetensors --guidance 3 -o $(OUT)/draw-pixels-w3.png
+	$(TRANSFORMER) draw-sample --model $(OUT)/draw-pixels.safetensors --guidance 8 -o $(OUT)/draw-pixels-w8.png
+
+.PHONY: draw-pixels-misses
+draw-pixels-misses: $(OUT)/classifier.safetensors | $(TRANSFORMER) ## Drawing, part 1: the first 20 misdrawn digits, each beside its top half (prediction 9).
+	$(call hdr,$@)
+	@test -f $(OUT)/draw-pixels.safetensors || { echo "no $(OUT)/draw-pixels.safetensors: run make draw-pixels first"; exit 1; }
+	$(TRANSFORMER) draw-misses --model $(OUT)/draw-pixels.safetensors \
+		--classifier $(OUT)/classifier.safetensors -o $(OUT)/draw-pixels-misses.png
+
+.PHONY: draw-figures
+draw-figures: ## Drawing: copy the grids made so far from $(OUT)/ into docs/drawing/ (see its NOTICE.md).
+	$(call hdr,$@)
+	mkdir -p docs/drawing
+	for f in draw-pixels-w1.png draw-pixels-w3.png draw-pixels-w8.png draw-pixels-misses.png draw-pixels-misses.txt \
+		draw-codebook-w1.png draw-codebook-w3.png draw-codebook-w8.png; do \
+		if [ -f $(OUT)/$$f ]; then cp $(OUT)/$$f docs/drawing/$${f#draw-}; echo "copied $$f"; fi; \
+	done
+	python3 tools/png_squeeze.py docs/drawing/*.png
 
 .PHONY: draw-pixels-measure
 draw-pixels-measure: $(OUT)/classifier.safetensors | $(TRANSFORMER) ## Drawing, part 1: measure the pixel model's digits at each guidance scale.
@@ -479,6 +497,58 @@ draw-pixels-attention: $(OUT)/draw-pixels-test.ids | $(TRANSFORMER) ## Drawing, 
 	@test -f $(OUT)/draw-pixels.safetensors || { echo "no $(OUT)/draw-pixels.safetensors: run make draw-pixels first"; exit 1; }
 	$(TRANSFORMER) draw-attention --model $(OUT)/draw-pixels.safetensors --valid $(OUT)/draw-pixels-test.ids
 
+# Part 2: the codebook model. The same steps as part 1, with the codebook's
+# tokens (made by make draw-codebook) instead of pixels.
+DRAW_CODEBOOK_CONFIG ?= config-draw-codebook.toml
+CB := --codebook $(OUT)/codebook.safetensors
+
+$(OUT)/draw-codebook-config/%.toml: $(DRAW_CODEBOOK_CONFIG) tools/config_section.py | $(OUT)
+	@python3 tools/config_section.py $(DRAW_CODEBOOK_CONFIG) $* $@
+
+$(OUT)/draw-codebook-train.ids: $(MNIST) $(OUT)/codebook.safetensors | $(OUT) $(TRANSFORMER)
+	$(call hdr,draw-encode codebook)
+	$(TRANSFORMER) draw-encode --data data/mnist --tokens codebook $(CB) -o $(OUT)/draw-codebook
+
+$(OUT)/draw-codebook-test.ids: $(OUT)/draw-codebook-train.ids
+
+.PHONY: draw-encode-codebook
+draw-encode-codebook: $(OUT)/draw-codebook-train.ids ## Drawing, part 2: MNIST as sentences of codebook tokens.
+
+$(OUT)/draw-codebook-init.safetensors: $(OUT)/draw-codebook-config/model.toml $(OUT)/draw-codebook-train.ids | $(TRANSFORMER)
+	$(call hdr,draw-build codebook)
+	$(TRANSFORMER) draw-build --config $(DRAW_CODEBOOK_CONFIG) --data $(OUT)/draw-codebook-train.ids -o $@
+
+.PHONY: draw-codebook-time
+draw-codebook-time: $(OUT)/draw-codebook-init.safetensors $(OUT)/draw-codebook-test.ids | $(TRANSFORMER) ## Drawing, part 2: a short timing run (DRAW_TIME_STEPS steps), to set the budget's steps.
+	$(call hdr,$@)
+	$(TRANSFORMER) draw-train --model $(OUT)/draw-codebook-init.safetensors \
+		--data $(OUT)/draw-codebook-train.ids --valid $(OUT)/draw-codebook-test.ids \
+		--config $(DRAW_CODEBOOK_CONFIG) --steps $(DRAW_TIME_STEPS) -o $(OUT)/draw-codebook-time.safetensors
+
+.PHONY: draw-codebook-model
+draw-codebook-model: $(OUT)/draw-codebook.safetensors ## Drawing, part 2: train the codebook model (about 30 minutes on the M4).
+
+$(OUT)/draw-codebook.safetensors: $(OUT)/draw-codebook-init.safetensors $(OUT)/draw-codebook-test.ids \
+		$(OUT)/draw-codebook-config/training.toml $(OUT)/draw-codebook-config/draw.toml | $(TRANSFORMER)
+	$(call hdr,draw-train codebook)
+	set -o pipefail; $(TRANSFORMER) draw-train --model $(OUT)/draw-codebook-init.safetensors \
+		--data $(OUT)/draw-codebook-train.ids --valid $(OUT)/draw-codebook-test.ids \
+		--config $(DRAW_CODEBOOK_CONFIG) -o $@ 2>&1 | tee $(OUT)/draw-codebook.log
+
+.PHONY: draw-codebook-grid
+draw-codebook-grid: | $(TRANSFORMER) ## Drawing, part 2: grids of the codebook model's digits, at w = 1, 3 and 8.
+	$(call hdr,$@)
+	@test -f $(OUT)/draw-codebook.safetensors || { echo "no $(OUT)/draw-codebook.safetensors: run make draw-codebook-model first"; exit 1; }
+	for w in 1 3 8; do $(TRANSFORMER) draw-sample --model $(OUT)/draw-codebook.safetensors $(CB) --guidance $$w -o $(OUT)/draw-codebook-w$$w.png || exit 1; done
+
+.PHONY: draw-codebook-measure
+draw-codebook-measure: $(OUT)/classifier.safetensors | $(TRANSFORMER) ## Drawing, part 2: measure the codebook model's digits at each guidance scale.
+	$(call hdr,$@)
+	@test -f $(OUT)/draw-codebook.safetensors || { echo "no $(OUT)/draw-codebook.safetensors: run make draw-codebook-model first"; exit 1; }
+	set -o pipefail; $(TRANSFORMER) draw-measure --model $(OUT)/draw-codebook.safetensors $(CB) \
+		--classifier $(OUT)/classifier.safetensors --data data/mnist --guidance $(DRAW_GUIDANCE) \
+		2>&1 | tee $(OUT)/draw-codebook-measure.log
+
 # The variables make help lists, one per line, with what each does and its
 # value now. A variable meant to be set from the command line gets a place
 # in HELP_VARS and a HELP_ description; make lint fails if a ?= variable
@@ -486,7 +556,8 @@ draw-pixels-attention: $(OUT)/draw-pixels-test.ids | $(TRANSFORMER) ## Drawing, 
 HELP_VARS := OUT CORPUS TOK_CORPUS SPLIT_ON MERGES CONFIG CARGO_FEATURES \
 	CHAT_ARGS LORA_ARGS EVAL_ARGS CHAT_MODEL PROMPT GEN_ARGS PROBE_MODEL \
 	PROBE_ARGS LLAMA_DIR LLAMA_ARGS W2V_CORPUS W2V_ARGS W2V_OUT URL_MNIST \
-	CLASSIFIER_ARGS CODEBOOK_ARGS DRAW_PIXELS_CONFIG DRAW_TIME_STEPS DRAW_GUIDANCE FORCE
+	CLASSIFIER_ARGS CODEBOOK_ARGS DRAW_PIXELS_CONFIG DRAW_CODEBOOK_CONFIG \
+	DRAW_TIME_STEPS DRAW_GUIDANCE FORCE
 HELP_OUT            := where the tokenizer, models and other outputs go (the full run uses out-full)
 HELP_CORPUS         := the training text
 HELP_TOK_CORPUS     := the text the tokenizer is learned from (CORPUS unless set)
@@ -511,6 +582,7 @@ HELP_URL_MNIST      := where make data/mnist downloads MNIST from
 HELP_CLASSIFIER_ARGS := options for transformer draw-classifier, such as --steps 2000
 HELP_CODEBOOK_ARGS  := options for transformer draw-codebook, such as --size 512
 HELP_DRAW_PIXELS_CONFIG := the settings file for drawing's part 1 (the pixel model)
+HELP_DRAW_CODEBOOK_CONFIG := the settings file for drawing's part 2 (the codebook model)
 HELP_DRAW_TIME_STEPS := steps in make draw-pixels-time's timing run
 HELP_DRAW_GUIDANCE  := the guidance scales make draw-pixels-measure measures at
 HELP_FORCE          := 1 lets make full-clean delete out-full/ (a day of training)
