@@ -4354,7 +4354,8 @@ Written with the code, before any training, as design for test asks
 9. **The pixel model fails from the bottom up.** Of the first 20 of its
    samples at w = 1 that the classifier doesn't name as requested, at
    least 13 have a top half that is plainly the requested digit (counted
-   by eye, the 20 shown in a figure so the count can be checked).
+   by eye, the 20 shown in a figure so the count can be checked: see
+   [Results](#results), "The misses, for prediction 9").
    *Mechanism:* the class token is
    furthest away at the bottom, 700 positions back, and a raster model
    never revisits its early choices, so errors accumulate downward.
@@ -4592,6 +4593,43 @@ The pixel model's grids, read row by row:
   nearly every 1, 5 and 9. This is the compounding error described
   above, made visible; it can start anywhere, the 4s failing beside the
   class token, so it is not prediction 9's distance effect.
+
+**The misses, for prediction 9.** `make draw-pixels-misses`: the same
+1,000 images `draw-measure` drew at w = 1, and the first 20 that the
+classifier doesn't name as asked (they fall among the first 58, a miss
+rate like the measured 70.5% agreement). Each miss is followed by its
+top half alone, the bottom half blacked out, so the figure has 5 rows of
+8: four pairs a row, the whole digit in columns 1, 3, 5 and 7 and its top
+half to its right. Prediction 9's count is of the top halves: how many
+are plainly the start of the digit asked for.
+
+![Pixel model, guidance 1: the first 20 digits the classifier doesn't name as asked, each followed by its top half alone, four pairs a row](docs/drawing/pixels-misses.png)
+
+| Pair | Row, columns | Image | Asked | Named (probability) |
+|---|---|---|---|---|
+| 1 | 1, columns 1 and 2 | 2 | 2 | 3 (1.00) |
+| 2 | 1, columns 3 and 4 | 6 | 6 | 0 (0.98) |
+| 3 | 1, columns 5 and 6 | 7 | 7 | 9 (0.98) |
+| 4 | 1, columns 7 and 8 | 8 | 8 | 3 (0.69) |
+| 5 | 2, columns 1 and 2 | 9 | 9 | 7 (1.00) |
+| 6 | 2, columns 3 and 4 | 10 | 0 | 5 (0.82) |
+| 7 | 2, columns 5 and 6 | 12 | 2 | 3 (0.95) |
+| 8 | 2, columns 7 and 8 | 13 | 3 | 8 (0.78) |
+| 9 | 3, columns 1 and 2 | 14 | 4 | 8 (1.00) |
+| 10 | 3, columns 3 and 4 | 18 | 8 | 9 (1.00) |
+| 11 | 3, columns 5 and 6 | 23 | 3 | 2 (0.78) |
+| 12 | 3, columns 7 and 8 | 29 | 9 | 8 (0.41) |
+| 13 | 4, columns 1 and 2 | 32 | 2 | 3 (1.00) |
+| 14 | 4, columns 3 and 4 | 33 | 3 | 5 (0.60) |
+| 15 | 4, columns 5 and 6 | 42 | 2 | 3 (1.00) |
+| 16 | 4, columns 7 and 8 | 45 | 5 | 9 (0.57) |
+| 17 | 5, columns 1 and 2 | 49 | 9 | 0 (1.00) |
+| 18 | 5, columns 3 and 4 | 50 | 0 | 6 (0.95) |
+| 19 | 5, columns 5 and 6 | 53 | 3 | 5 (0.99) |
+| 20 | 5, columns 7 and 8 | 58 | 8 | 9 (0.49) |
+
+The commonest confusions are 2 drawn as 3 (four times) and 8 drawn as 9
+or 3 (three times). The count, by eye, is to come.
 
 **The codebook model, trained (prediction 10).** `make
 draw-codebook-model`: 29,000 steps in 28.7 minutes, 52,771 tokens a
