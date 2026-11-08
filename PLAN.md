@@ -4452,6 +4452,24 @@ also revises the efficiency reading recorded above for the pixel model,
 which is kept as written. The step count was set from this run: 29,000
 steps, about 30 minutes.
 
+**An unplanned shorter run of the codebook model.** The first `make
+draw-codebook-model` ran with the provisional 8,000 steps (8.1 minutes,
+8.5 passes: about the nine passes the plan first foresaw), because the
+new step count hadn't been committed yet. It is kept, as
+`out/draw-codebook-8000.safetensors`, and measured as a second data
+point. Its validation loss ended at **0.967 nats per patch**. Training
+and validation tracked each other to about step 5,000; after that
+training kept falling (0.977 to 0.951) while validation flattened
+(0.987, 0.978, 0.971, 0.967, 0.969, 0.967), a gap of about 0.02 at the
+end: the first sign of memorizing.
+
+**Prediction 10 (added after the 8,000-step run, before the 29,000-step
+run).** The validation loss of the full run ends within 0.02 of the
+8,000-step run's 0.967, while its training loss falls to 0.92 or below,
+a gap of at least 0.04. *Mechanism:* validation flattened from step
+6,000 on while training kept falling, so the model is near what it can
+generalize from 60,000 digits, and further passes mostly memorize them.
+
 **The pixel model, trained (prediction 4).** `make draw-pixels`: 4,000
 steps in 27.8 minutes, 15,035 tokens a second. The validation loss ended
 at **0.153 nats per pixel**: predicted 0.12 to 0.25, **right**; a quarter
