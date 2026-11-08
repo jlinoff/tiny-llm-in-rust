@@ -4178,8 +4178,12 @@ set: 80 of them, spread evenly, are measured every 200 steps.
 
 Part 2's settings (`config-draw-codebook.toml`), chosen when it was
 built: the same model with a context of 49 (833,792 parameters), 64
-images a step (3,136 tokens), the same learning rate, and 8,000 steps,
-provisional until its own timing run.
+images a step (3,136 tokens), the same learning rate, and 29,000 steps,
+set from its timing run: about 30 minutes, 1.86 million images, 31
+passes over the training images. (Provisionally 8,000, before the run.)
+Thirty-one passes is more than the plan foresaw (nine), so the gap
+between training and validation loss is the thing to watch for
+memorizing.
 
 Part 1's settings (`config-draw-pixels.toml`), chosen when it was built:
 8 images a step (6,272 tokens; attention over 784 positions holds 8 × 4
@@ -4425,6 +4429,28 @@ predicts speed only where arithmetic is the bottleneck, and at this size
 it isn't. The step count was set from this run: 4,000 steps, about 30
 minutes. (The codebook model's half of prediction 3 is measured when it
 is built.)
+
+**The codebook model's speed (prediction 3, its second half).** `make
+draw-codebook-time`, 50 steps: **51,800 tokens a second**. Predicted:
+13,000 to 17,000. **Wrong again, by three times, on the fast side.**
+Both halves of prediction 3 missed the same way, and this one shows
+why: the mechanism counted the development model's cost as its
+weights' alone, 6 operations per weight per token, and forgot its
+vocabulary. The development model has 4,096 tokens: producing its
+logits costs 2 · 4,096 · 128 ≈ 1 million operations per token forward,
+about 3 million with the backward pass, and a softmax over 4,096 values
+for every token, as much again as its blocks' 4.8 million. The drawing
+models have 15 and 267 tokens, so that cost all but disappears. Counted
+that way the pixel model (blocks 4.8 million plus attention 4.8 million)
+costs about what the development model does (blocks plus vocabulary,
+about 8 million), and it trained at the same speed; the codebook model
+costs about 5 million, which predicts 1.7 times the speed, and it
+trained at 3.4 times, the rest plausibly from its larger matrix
+products (3,136 rows a step against 2,048). This explanation came after
+the measurement, so it is a reading, not a confirmed prediction; it
+also revises the efficiency reading recorded above for the pixel model,
+which is kept as written. The step count was set from this run: 29,000
+steps, about 30 minutes.
 
 **The pixel model, trained (prediction 4).** `make draw-pixels`: 4,000
 steps in 27.8 minutes, 15,035 tokens a second. The validation loss ended
