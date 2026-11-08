@@ -4358,6 +4358,15 @@ Written with the code, before any training, as design for test asks
    *Mechanism:* the class token is
    furthest away at the bottom, 700 positions back, and a raster model
    never revisits its early choices, so errors accumulate downward.
+10. **The codebook model's 31 passes mostly memorize.** *(Added after an
+    unplanned 8,000-step run, before the full 29,000-step run: see
+    [Results](#results).)* The full run's validation loss ends within
+    0.02 of the 8,000-step run's 0.967 nats per patch, while its
+    training loss falls to 0.92 or below, a gap of at least 0.04.
+    *Mechanism:* in the 8,000-step run validation flattened from step
+    6,000 on while training kept falling, so the model is near what it
+    can generalize from 60,000 digits, and further passes mostly
+    memorize them.
 
 ### What would change the plan
 
@@ -4463,12 +4472,8 @@ training kept falling (0.977 to 0.951) while validation flattened
 (0.987, 0.978, 0.971, 0.967, 0.969, 0.967), a gap of about 0.02 at the
 end: the first sign of memorizing.
 
-**Prediction 10 (added after the 8,000-step run, before the 29,000-step
-run).** The validation loss of the full run ends within 0.02 of the
-8,000-step run's 0.967, while its training loss falls to 0.92 or below,
-a gap of at least 0.04. *Mechanism:* validation flattened from step
-6,000 on while training kept falling, so the model is near what it can
-generalize from 60,000 digits, and further passes mostly memorize them.
+That run prompted prediction 10, added to the predictions above before
+the full run began.
 
 **The pixel model, trained (prediction 4).** `make draw-pixels`: 4,000
 steps in 27.8 minutes, 15,035 tokens a second. The validation loss ended
